@@ -1,0 +1,133 @@
+{
+  "date": "2026-09-03",
+  "hardware": {
+    "gpu": "ZOTAC GAMING GeForce RTX 3090 Trinity",
+    "vram_mib": 24576,
+    "driver": "595.71.05",
+    "power_limit_w": 200
+  },
+  "runtime": {
+    "image": "ghcr.io/syv-ai/qwen38-27b-rtx3090@sha256:9a4ef2b51316f3ce1a23dd4bffc5e5c93669703daa5c0b0818258408058039ae",
+    "image_source_revision": "8d832f8758ae4fd36c29a15d3c45888922bc4377",
+    "model": "dbirks/Qwen3.8-27B-W4A16-AutoRound",
+    "model_revision": "1f05c441c4e64ae0549de44fa9ea5a6d43610314",
+    "fast_variant_revision": "124c14e7e8c7d2f5402933b9af368e772a9fcf0c",
+    "dflash2_revision": "4d30ec736ffc6b8688dc2ae2b502d9b48bdec279",
+    "context_length": 65536,
+    "prefix_cache": true,
+    "max_sequences": 1
+  },
+  "method": {
+    "real_prompts": "Upstream bench/real_rep.sh: eight realistic prompts, 1024 requested output tokens each, concurrency one, greedy",
+    "document_work": "Upstream bench/labd_bench.py: 23196-token prompt, 512 output tokens, greedy, copy and edit tasks",
+    "retrieval": "needle-bench.py: 60042-token measured prompt, passcode at 90 percent depth, thinking disabled, greedy",
+    "api": "Upstream bench/api_smoke.py plus tool-smoke.py"
+  },
+  "candidates": {
+    "dflash2_7": {
+      "environment": {
+        "CTX": "fast",
+        "SPEC": "dflash2",
+        "DFLASH_TOKENS": "7",
+        "PREFIX_CACHE": "1",
+        "VLLM_DFLASH2_CHAIN": "0",
+        "MAX_SEQS": "1"
+      },
+      "real_prompts": [
+        {"decode_tokens_per_second": 74.3, "tokens_per_step": 3.43, "milliseconds_per_step": 47.5},
+        {"decode_tokens_per_second": 72.4, "tokens_per_step": 3.43, "milliseconds_per_step": 48.8},
+        {"decode_tokens_per_second": 72.6, "tokens_per_step": 3.43, "milliseconds_per_step": 48.7}
+      ],
+      "median_decode_tokens_per_second": 72.6,
+      "tokens_per_joule_at_200w_cap": 0.363,
+      "document_work": {
+        "copy_decode_tokens_per_second": 146.1,
+        "copy_tokens_per_step": 7.51,
+        "copy_cold_ttft_seconds": 29.71,
+        "edit_decode_tokens_per_second": 59.3,
+        "edit_tokens_per_step": 3.05,
+        "edit_prefix_cached_ttft_seconds": 1.22,
+        "combined_decode_tokens_per_second": 84.5
+      },
+      "steady_decode_power_w": "approximately 199.1-200.6",
+      "observed_vram_mib": 22490
+    },
+    "dflash2_7_ngram_chain": {
+      "environment_delta": {"VLLM_DFLASH2_CHAIN": "1"},
+      "real_prompts": [
+        {"decode_tokens_per_second": 69.7, "tokens_per_step": 3.27, "milliseconds_per_step": 48.2},
+        {"decode_tokens_per_second": 66.7, "tokens_per_step": 3.20, "milliseconds_per_step": 49.3}
+      ],
+      "document_work": {
+        "copy_decode_tokens_per_second": 147.2,
+        "edit_decode_tokens_per_second": 55.1,
+        "combined_decode_tokens_per_second": 80.4
+      },
+      "decision": "rejected: no useful copy gain and lower realistic and combined throughput"
+    },
+    "mtp_4": {
+      "environment": {
+        "CTX": "fast",
+        "SPEC": "mtp",
+        "DRAFT_TOKENS": "4",
+        "PREFIX_CACHE": "1",
+        "MAX_SEQS": "1"
+      },
+      "real_prompts": [
+        {"decode_tokens_per_second": 63.2, "tokens_per_step": 2.86, "milliseconds_per_step": 46.7},
+        {"decode_tokens_per_second": 63.1, "tokens_per_step": 2.86, "milliseconds_per_step": 46.5},
+        {"decode_tokens_per_second": 63.5, "tokens_per_step": 2.86, "milliseconds_per_step": 46.2}
+      ],
+      "median_decode_tokens_per_second": 63.2,
+      "tokens_per_joule_at_200w_cap": 0.316,
+      "document_work": {
+        "copy_decode_tokens_per_second": 91.0,
+        "edit_decode_tokens_per_second": 67.5,
+        "combined_decode_tokens_per_second": 77.6
+      },
+      "observed_vram_mib": 21480,
+      "decision": "rejected: about 15 percent slower than DFlash2 on realistic prompts"
+    }
+  },
+  "verification": {
+    "near_limit_retrieval": {
+      "prompt_tokens": 60042,
+      "needle_depth": 0.9,
+      "elapsed_seconds": 98.745,
+      "answer": "ZXCVBNM12345",
+      "retrieved": true
+    },
+    "api_smoke": {"passed": 12, "total": 12},
+    "tool_call": {"function": "health_check", "arguments": {"status": "ok"}, "passed": true},
+    "runtime_footprint": {
+      "host_memory_gib_idle": 3.428,
+      "container_pids_idle": 135,
+      "vram_mib_after_api_smoke": 22970,
+      "loaded_idle_power_w_observed": 129.47
+    },
+    "nix": {
+      "commit": "20bb430",
+      "x86_64_linux_toplevel_build": "passed",
+      "generated_compose_validation": "passed",
+      "pushed": false,
+      "activated": false
+    }
+  },
+  "decision": {
+    "winner": "dflash2_7",
+    "reason": "Highest measured realistic throughput and tokens per joule at the fixed 200 W cap while preserving 65536 context and exact 60042-token retrieval.",
+    "configuration": {
+      "CTX": "fast",
+      "SPEC": "dflash2",
+      "DFLASH_TOKENS": "7",
+      "PREFIX_CACHE": "1",
+      "VLLM_DFLASH2_CHAIN": "0",
+      "MAX_SEQS": "1"
+    }
+  },
+  "sources": [
+    "https://roycorp.net/sglang/index.html",
+    "https://github.com/syv-ai/qwen38-27b-rtx3090",
+    "https://www.localmaxxing.com/en/runs/cmszj4klh0e4vms01944dfihh"
+  ]
+}

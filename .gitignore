@@ -1,0 +1,11 @@
+.DS_Store
+.env
+.env.*
+api-key
+api_key.txt
+hermes.env
+cache/
+models/
+labd-corpus.txt
+__pycache__/
+*.pyc
