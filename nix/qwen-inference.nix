@@ -9,6 +9,7 @@
 let
 	cfg = config.workstation.qwenInference;
 	stateRoot = cfg.stateRoot;
+	stateRootParent = builtins.dirOf stateRoot;
 	port = cfg.port;
 	requiredMountPoint = cfg.requiredMountPoint;
 	qwenImage = "ghcr.io/syv-ai/qwen38-27b-rtx3090@sha256:9a4ef2b51316f3ce1a23dd4bffc5e5c93669703daa5c0b0818258408058039ae";
@@ -171,6 +172,14 @@ PY
 			pkgs.openssl
 		];
 		text = ''
+      for _ in {1..60}; do
+        [[ -d ${lib.escapeShellArg stateRoot} ]] && break
+        sleep 1
+      done
+      [[ -d ${lib.escapeShellArg stateRoot} ]] || {
+        echo "Qwen state root was not created by qwen-inference-state-dirs.service." >&2
+        exit 1
+      }
       for path in ${lib.escapeShellArg stateRoot} \
         ${lib.escapeShellArg "${stateRoot}/models"} \
         ${lib.escapeShellArg "${stateRoot}/cache"}; do
@@ -324,8 +333,18 @@ in
 
 	config = lib.mkIf cfg.enable {
 		virtualisation.docker.rootless.daemon.settings.features.cdi = true;
-		system.activationScripts.ensureQwenInferenceDirs =
-			lib.stringAfter [ "users" ] ensureQwenDirs;
+		systemd.services.qwen-inference-state-dirs = {
+			description = "Create user-owned Qwen inference state directories";
+			wantedBy = [ "multi-user.target" ];
+			after = [ "local-fs.target" ];
+			before = [ "systemd-user-sessions.service" ];
+			unitConfig.RequiresMountsFor = [ stateRoot ];
+			serviceConfig = {
+				Type = "oneshot";
+				RemainAfterExit = true;
+			};
+			script = ensureQwenDirs;
+		};
 		environment.systemPackages = [ qwenHealth ];
 		systemd.user.services.qwen-inference = {
 			description = "Qwen3.8-27B low-latency inference";
@@ -362,7 +381,7 @@ in
 				ProtectHome = "read-only";
 				ProtectSystem = "strict";
 				ReadWritePaths = [
-					stateRoot
+					stateRootParent
 					"%t"
 				];
 				UMask = "0077";

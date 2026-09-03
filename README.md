@@ -7,7 +7,7 @@ Private operational snapshot of the Qwen inference configuration used by `server
 | Item | Value |
 |---|---|
 | GPU | ZOTAC GAMING GeForce RTX 3090 Trinity, 24 GB |
-| Power limit | 200 W |
+| Power limit | 250 W deployment target; 200 W benchmark baseline |
 | Model | Qwen3.8-27B AutoRound W4A16 fast variant |
 | Runtime | Patched vLLM 0.27.1 image from syv-ai |
 | Speculation | DFlash2, 7 draft tokens |
@@ -17,13 +17,14 @@ Private operational snapshot of the Qwen inference configuration used by `server
 | API | OpenAI-compatible, authenticated, loopback-only |
 | Hermes alias | `qwen` |
 
-DFlash2 without the optional n-gram chain won the real-prompt benchmark at **72.6 tok/s median**. MTP reached 63.2 tok/s. The n-gram chain reached 66.7–69.7 tok/s and was rejected for this workload. A 60,042-token needle probe retrieved the passcode exactly.
+At the 200 W baseline, DFlash2 without the optional n-gram chain won the real-prompt benchmark at **72.6 tok/s median**. MTP reached 63.2 tok/s. The n-gram chain reached 66.7–69.7 tok/s and was rejected for this workload. A 60,042-token needle probe retrieved the passcode exactly. The 250 W policy changes GPU headroom only; model, quantization, context, reasoning, and sampling remain unchanged.
 
 Detailed measurements and artifact identities are in [`benchmark-results.json`](benchmark-results.json).
 
 ## Repository map
 
-- `nix/qwen-inference.nix`: exact NixOS service module snapshot from production commit `20bb430`.
+- `nix/qwen-inference.nix`: exact Qwen service module snapshot, including the boot-time state-directory repair.
+- `nix/nvidia-quiet.nix`: exact GPU policy snapshot with the RTX 3090 capped at 250 W.
 - `nix/hermes-integration.nix`: isolated Hermes custom-provider and API-key wiring.
 - `nix/server.nix`: host import and SSD state-path snapshot.
 - `prepare-pinned.sh`: one-time model preparation with immutable Hugging Face revisions.
@@ -61,9 +62,9 @@ The deployment contract requires all of the following:
 2. Validate the generated Docker Compose configuration.
 3. Run the authenticated completion and forced tool-call health probe.
 4. Retrieve a needle from a measured 60K-token prompt.
-5. Confirm the 200 W cap and stable fan command under sustained inference.
+5. Confirm the 250 W cap, stable fan command, and improved tok/s without a quality regression.
 
-The benchmark container consumed approximately 22.5–23.0 GB VRAM and 3.43 GiB host RAM. Steady decode reached the 200 W cap. Keeping the model resident held the card near 129 W while idle; unloading it returned the card to roughly 25 W and zero fan command.
+The 200 W baseline consumed approximately 22.5–23.0 GB VRAM and 3.43 GiB host RAM. Steady decode reached the power cap. Keeping the model resident held the card near 129 W while idle; unloading it returned the card to roughly 25 W and zero fan command. The 250 W run is recorded separately after deployment so the baseline remains auditable.
 
 ## Provenance
 

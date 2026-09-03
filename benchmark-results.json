@@ -6,6 +6,12 @@
     "driver": "595.71.05",
     "power_limit_w": 200
   },
+  "deployment_target": {
+    "power_limit_w": 250,
+    "boot_fix_commit": "a9f8cab",
+    "power_policy_commit": "2cbcb52",
+    "status": "validated_awaiting_push_and_redeploy"
+  },
   "runtime": {
     "image": "ghcr.io/syv-ai/qwen38-27b-rtx3090@sha256:9a4ef2b51316f3ce1a23dd4bffc5e5c93669703daa5c0b0818258408058039ae",
     "image_source_revision": "8d832f8758ae4fd36c29a15d3c45888922bc4377",
@@ -106,11 +112,15 @@
       "loaded_idle_power_w_observed": 129.47
     },
     "nix": {
-      "commit": "20bb430",
-      "x86_64_linux_toplevel_build": "passed",
-      "generated_compose_validation": "passed",
-      "pushed": false,
-      "activated": false
+      "base_commit": "20bb430",
+      "base_pushed": true,
+      "base_activated": true,
+      "base_service_health": "failed before ExecStartPre with systemd 226/NAMESPACE because stateRoot was absent",
+      "boot_fix_commit": "a9f8cab",
+      "power_policy_commit": "2cbcb52",
+      "candidate_x86_64_linux_validation": "passed",
+      "candidate_pushed": false,
+      "candidate_activated": false
     }
   },
   "decision": {
