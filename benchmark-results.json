@@ -10,7 +10,7 @@
     "power_limit_w": 250,
     "boot_fix_commit": "a9f8cab",
     "power_policy_commit": "2cbcb52",
-    "status": "validated_awaiting_push_and_redeploy"
+    "status": "qwen_deployed_hermes_maintenance_validated"
   },
   "runtime": {
     "image": "ghcr.io/syv-ai/qwen38-27b-rtx3090@sha256:9a4ef2b51316f3ce1a23dd4bffc5e5c93669703daa5c0b0818258408058039ae",
@@ -21,7 +21,9 @@
     "dflash2_revision": "4d30ec736ffc6b8688dc2ae2b502d9b48bdec279",
     "context_length": 65536,
     "prefix_cache": true,
-    "max_sequences": 1
+    "max_sequences": 1,
+    "hermes_release": "v2026.8.31",
+    "hermes_revision": "29112bef099274229cadff79cdff7bf7b99c4b77"
   },
   "method": {
     "real_prompts": "Upstream bench/real_rep.sh: eight realistic prompts, 1024 requested output tokens each, concurrency one, greedy",
@@ -57,6 +59,43 @@
       },
       "steady_decode_power_w": "approximately 199.1-200.6",
       "observed_vram_mib": 22490
+    },
+    "dflash2_7_250w": {
+      "environment": {
+        "CTX": "fast",
+        "SPEC": "dflash2",
+        "DFLASH_TOKENS": "7",
+        "PREFIX_CACHE": "1",
+        "VLLM_DFLASH2_CHAIN": "0",
+        "MAX_SEQS": "1"
+      },
+      "real_prompts": [
+        {"decode_tokens_per_second": 123.2, "tokens_per_step": 3.45, "milliseconds_per_step": 29.0},
+        {"decode_tokens_per_second": 120.5, "tokens_per_step": 3.45, "milliseconds_per_step": 29.6},
+        {"decode_tokens_per_second": 119.8, "tokens_per_step": 3.45, "milliseconds_per_step": 29.8}
+      ],
+      "median_decode_tokens_per_second": 120.5,
+      "tokens_per_joule_at_250w_cap": 0.482,
+      "throughput_gain_over_200w_percent": 66.0,
+      "efficiency_gain_over_200w_percent": 32.8,
+      "steady_decode_power_w": "approximately 248.4-251.7",
+      "steady_core_clock_mhz": "approximately 900-1050",
+      "steady_temperature_c": "approximately 69-71",
+      "steady_fan_percent": "approximately 54-57",
+      "observed_vram_mib": 22490,
+      "near_limit_retrieval": {
+        "prompt_tokens": 60042,
+        "elapsed_seconds": 71.862,
+        "retrieved": true
+      },
+      "api_smoke": {"passed": 12, "total": 12},
+      "gsm8k": {
+        "passed": 191,
+        "count": 200,
+        "accuracy": 0.955,
+        "mean_completion_tokens": 381.36,
+        "elapsed_seconds": 411.331
+      }
     },
     "dflash2_7_ngram_chain": {
       "environment_delta": {"VLLM_DFLASH2_CHAIN": "1"},
@@ -118,14 +157,21 @@
       "base_service_health": "failed before ExecStartPre with systemd 226/NAMESPACE because stateRoot was absent",
       "boot_fix_commit": "a9f8cab",
       "power_policy_commit": "2cbcb52",
+      "loopback_port_fix_commit": "8f11f85",
+      "hermes_boot_sync_commit": "841ec4d",
+      "qwen_provider_auth_commit": "d8861ff",
+      "hermes_update_commit": "6dd0eca",
       "candidate_x86_64_linux_validation": "passed",
-      "candidate_pushed": false,
-      "candidate_activated": false
+      "manual_candidate_runtime_validation": "passed",
+      "qwen_candidate_pushed": true,
+      "qwen_candidate_activated": true,
+      "hermes_maintenance_pushed": false,
+      "hermes_maintenance_activated": false
     }
   },
   "decision": {
-    "winner": "dflash2_7",
-    "reason": "Highest measured realistic throughput and tokens per joule at the fixed 200 W cap while preserving 65536 context and exact 60042-token retrieval.",
+    "winner": "dflash2_7_250w",
+    "reason": "The 250 W setting preserved the same model, quantization, reasoning, KV precision, and verified outputs while improving median decode throughput by 66.0% and tokens per joule by 32.8% over 200 W.",
     "configuration": {
       "CTX": "fast",
       "SPEC": "dflash2",

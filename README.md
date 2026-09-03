@@ -15,21 +15,24 @@ Private operational snapshot of the Qwen inference configuration used by `server
 | Prefix cache | Enabled |
 | Concurrent sequences | 1 |
 | API | OpenAI-compatible, authenticated, loopback-only |
+| Hermes Agent | v0.21.0 (`v2026.8.31`) |
 | Hermes alias | `qwen` |
 
-At the 200 W baseline, DFlash2 without the optional n-gram chain won the real-prompt benchmark at **72.6 tok/s median**. MTP reached 63.2 tok/s. The n-gram chain reached 66.7–69.7 tok/s and was rejected for this workload. A 60,042-token needle probe retrieved the passcode exactly. The 250 W policy changes GPU headroom only; model, quantization, context, reasoning, and sampling remain unchanged.
+At 250 W, the unchanged DFlash2 configuration reached **120.5 tok/s median**, up **66.0%** from the 72.6 tok/s 200 W baseline. Tokens per joule improved **32.8%**, from 0.363 to 0.482. GSM8K scored **95.5% on 200 questions**, all 12 API checks passed, and the 60,042-token needle was retrieved exactly in 71.862 seconds. MTP and the optional n-gram chain remain rejected by the controlled 200 W comparison.
 
 Detailed measurements and artifact identities are in [`benchmark-results.json`](benchmark-results.json).
 
 ## Repository map
 
 - `nix/qwen-inference.nix`: exact Qwen service module snapshot, including the boot-time state-directory repair.
+- `nix/local-ai-backend.nix`: exact Hermes settings and boot-time managed-config synchronization from production.
 - `nix/nvidia-quiet.nix`: exact GPU policy snapshot with the RTX 3090 capped at 250 W.
 - `nix/hermes-integration.nix`: isolated Hermes custom-provider and API-key wiring.
 - `nix/server.nix`: host import and SSD state-path snapshot.
 - `prepare-pinned.sh`: one-time model preparation with immutable Hugging Face revisions.
 - `needle-bench.py`: long-context retrieval probe with thinking disabled.
 - `tool-smoke.py`: forced Hermes-style function-call probe.
+- `gsm8k-bench.py` and `gsm8k-200.json`: dependency-free, pinned 200-question quality gate.
 - `benchmark-results.json`: benchmark inputs, outputs, resource use, and selection rationale.
 
 Model weights, API keys, caches, and generated corpora are not committed.
@@ -64,7 +67,7 @@ The deployment contract requires all of the following:
 4. Retrieve a needle from a measured 60K-token prompt.
 5. Confirm the 250 W cap, stable fan command, and improved tok/s without a quality regression.
 
-The 200 W baseline consumed approximately 22.5–23.0 GB VRAM and 3.43 GiB host RAM. Steady decode reached the power cap. Keeping the model resident held the card near 129 W while idle; unloading it returned the card to roughly 25 W and zero fan command. The 250 W run is recorded separately after deployment so the baseline remains auditable.
+The selected runtime consumes approximately 22.5–23.0 GB VRAM and 3.43 GiB host RAM. At 250 W it held roughly 900–1050 MHz core clock, 69–71°C, and 54–57% fan command during sustained decoding. Keeping the model resident holds the card near 129–137 W while idle; unloading it returns the card to roughly 25 W and zero fan command.
 
 ## Provenance
 

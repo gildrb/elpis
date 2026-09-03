@@ -74,7 +74,6 @@ PY
     mv "$marker.tmp" "$marker"
   '';
 	qwenCompose = (pkgs.formats.yaml { }).generate "qwen-inference-compose.yaml" {
-		networks.isolated.internal = true;
 		services = {
 			prepare = {
 				image = qwenImage;
@@ -112,7 +111,6 @@ PY
 					"/run:rw,noexec,nosuid,size=64m"
 					"/tmp:rw,noexec,nosuid,size=2g"
 				];
-				networks = [ "isolated" ];
 				ports = [ "127.0.0.1:${toString port}:${toString port}" ];
 				environment = {
 					CTX = "fast";
@@ -334,16 +332,23 @@ in
 	config = lib.mkIf cfg.enable {
 		virtualisation.docker.rootless.daemon.settings.features.cdi = true;
 		systemd.services.qwen-inference-state-dirs = {
-			description = "Create user-owned Qwen inference state directories";
+			description = "Create Qwen inference state and credentials";
 			wantedBy = [ "multi-user.target" ];
 			after = [ "local-fs.target" ];
-			before = [ "systemd-user-sessions.service" ];
+			before = [
+				"hermes-agent.service"
+				"systemd-user-sessions.service"
+			];
 			unitConfig.RequiresMountsFor = [ stateRoot ];
 			serviceConfig = {
 				Type = "oneshot";
 				RemainAfterExit = true;
 			};
-			script = ensureQwenDirs;
+			script = ''
+				${ensureQwenDirs}
+				${pkgs.util-linux}/bin/runuser -u ${lib.escapeShellArg username} -- \
+					${qwenPrepare}/bin/qwen-inference-prepare
+			'';
 		};
 		environment.systemPackages = [ qwenHealth ];
 		systemd.user.services.qwen-inference = {

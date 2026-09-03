@@ -11,7 +11,7 @@ in
 	services.hermes-agent.settings = {
 		model = {
 			default = qwen.model;
-			provider = "custom";
+			provider = "custom:qwen-local";
 			base_url = "http://127.0.0.1:${toString qwen.port}/v1";
 			context_length = 65536;
 			max_tokens = 8192;
@@ -26,7 +26,7 @@ in
 		];
 		model_aliases.qwen = {
 			model = qwen.model;
-			provider = "custom";
+			provider = "custom:qwen-local";
 			base_url = "http://127.0.0.1:${toString qwen.port}/v1";
 		};
 	};

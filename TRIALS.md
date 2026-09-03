@@ -40,4 +40,24 @@ The repair replaces that assumption with a root system service that creates the 
 
 The 200 W trace kept GDDR6X at full speed while the GPU core fell to roughly 525–645 MHz. The user selected 250 W as the next efficiency point. This changes only power headroom: model weights, quantization, DFlash verification, context length, KV precision, prefix caching, reasoning, and sampling remain unchanged.
 
-The 250 W result is accepted only after throughput, tok/J, thinking, tools, long-context retrieval, and the runtime quality battery pass on the deployed service.
+The 250 W run reached 123.2, 120.5, and 119.8 tok/s: **120.5 tok/s median**, 66.0% above 200 W. Cap-normalized efficiency rose from 0.363 to 0.482 tok/J, or 32.8%. Sustained temperature remained 69–71°C with a 54–57% fan command. The 60,042-token retrieval fell from 98.745 to 71.862 seconds, all 12 API/thinking checks passed, and the dependency-free 200-question GSM8K gate scored 95.5%.
+
+## Rootless loopback publication
+
+The repaired service then started successfully inside its container, but the authenticated host probe could not connect. Docker recorded the requested `127.0.0.1:18020` binding in `HostConfig`, while `NetworkSettings.Ports` was null. Rootless Docker did not publish a port for a container attached only to an `internal` bridge.
+
+The corrected Compose contract keeps the API bound to host loopback but uses the rootless default bridge. The inference container remains read-only, capability-free, authenticated, model-read-only, and pinned; telemetry and runtime model preparation remain disabled. A live candidate deployment passed the authenticated tool-call probe from the host.
+
+## Hermes boot synchronization
+
+The next live check found Hermes still using its previous Ollama model. The upstream Hermes Nix module merges managed `config.yaml` settings from `system.activationScripts`, which the guarded boot-only deployment does not execute. Its new Nix settings therefore existed in the closure but not on disk.
+
+The boot repair reuses the upstream merge script inside the already ordered `hermes-minimal-profile` oneshot. Qwen’s root state service now invokes the existing idempotent credential preparer as the service user before Hermes starts. Contracts inspect both generated boot scripts, and full Linux validation passes.
+
+## Hermes named-provider authentication
+
+The first real Hermes turn reached `http://127.0.0.1:18020/v1` but returned HTTP 401. `provider: custom` uses the generic OpenAI-compatible route and does not resolve a named `custom_providers` entry’s `key_env`. The correct identity is `custom:qwen-local` for both the default model and `qwen` alias. A live CLI override using that identity authenticated successfully, exposed Qwen’s reasoning channel, and returned `QWEN_OK`.
+
+## Hermes v0.21.0
+
+The pinned Hermes input moves from `v2026.8.19` / v0.20.5 to the latest stable `v2026.8.31` / v0.21.0 release at revision `29112bef099274229cadff79cdff7bf7b99c4b77`. The full x86_64 package, NixOS closure, generated managed configuration, and repository contract suite build successfully.
