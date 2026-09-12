@@ -1,189 +1,271 @@
 {
-  "date": "2026-09-03",
+  "schema_version": 1,
+  "date": "2026-09-12",
+  "status": "qualified_profile_not_activated",
   "hardware": {
     "gpu": "ZOTAC GAMING GeForce RTX 3090 Trinity",
     "vram_mib": 24576,
-    "driver": "595.71.05",
-    "power_limit_w": 200
-  },
-  "deployment_target": {
-    "power_limit_w": 250,
-    "boot_fix_commit": "a9f8cab",
-    "power_policy_commit": "2cbcb52",
-    "status": "qwen_deployed_hermes_maintenance_validated"
+    "power_limit_w": 280
   },
   "runtime": {
-    "image": "ghcr.io/syv-ai/qwen38-27b-rtx3090@sha256:9a4ef2b51316f3ce1a23dd4bffc5e5c93669703daa5c0b0818258408058039ae",
-    "image_source_revision": "8d832f8758ae4fd36c29a15d3c45888922bc4377",
-    "model": "dbirks/Qwen3.8-27B-W4A16-AutoRound",
-    "model_revision": "1f05c441c4e64ae0549de44fa9ea5a6d43610314",
-    "fast_variant_revision": "124c14e7e8c7d2f5402933b9af368e772a9fcf0c",
-    "dflash2_revision": "4d30ec736ffc6b8688dc2ae2b502d9b48bdec279",
-    "context_length": 65536,
-    "prefix_cache": true,
-    "max_sequences": 1,
-    "hermes_release": "v2026.8.31",
-    "hermes_revision": "29112bef099274229cadff79cdff7bf7b99c4b77"
+    "engine": "SGLang",
+    "image": "lmsysorg/sglang:v0.5.19@sha256:d6e7288627be8b02be88e4bba38e73f6d50e2826869f753c13a4c4385ab3eda9",
+    "source_repository": "https://github.com/gildrb/sglang",
+    "source_revision": "3958762c198b7e9e0167e6aedda1b8c3f9a8afb1",
+    "profile": "compact-dflash",
+    "served_model": "qwen3.8-27b",
+    "target_artifact_manifest": "prepare/manifest.json",
+    "source_overlay_manifest": "nix/sglang-compat/manifest.json",
+    "target_quantization": "W4A16 with preserved packed head and BF16-dequantized embedding",
+    "draft_quantization": "W4A16",
+    "dflash_block_size": 8,
+    "draft_window_size": 2048,
+    "context_length": 24576,
+    "max_running_requests": 1,
+    "mamba_cache_strategy": "extra_buffer",
+    "input_logprob_chunk_size": 256,
+    "sleep_on_idle": true
   },
   "method": {
-    "real_prompts": "Upstream bench/real_rep.sh: eight realistic prompts, 1024 requested output tokens each, concurrency one, greedy",
-    "document_work": "Upstream bench/labd_bench.py: 23196-token prompt, 512 output tokens, greedy, copy and edit tasks",
-    "retrieval": "needle-bench.py: 60042-token measured prompt, passcode at 90 percent depth, thinking disabled, greedy",
-    "api": "Upstream bench/api_smoke.py plus tool-smoke.py"
+    "client_module": "sglang.benchmark.serving",
+    "backend": "sglang",
+    "protocol": "native streaming /generate",
+    "fixture": "benchmark-prompts.jsonl",
+    "fixture_sha256": "8c73e72ab4d6bf5715078e0b8475063481a7f79daf932f245a6a360cb84db488",
+    "dataset_name": "custom",
+    "apply_chat_template": true,
+    "prompts_per_run": 8,
+    "max_concurrency": 1,
+    "request_rate": "inf",
+    "max_output_tokens": 1024,
+    "temperature": 0,
+    "seed": 42,
+    "warmup_requests": 0,
+    "flush_cache_before_each_run": true,
+    "thinking_enabled": true,
+    "eos_enabled": true,
+    "decode_metric": "1000 / mean_tpot_ms; arithmetic mean TPOT across requests",
+    "limitations": "Two short-suite native runs; reciprocal mean TPOT is not end-to-end throughput or a sustained all-workload guarantee. Prefix cache was flushed, not model weights or compiled graphs.",
+    "native_flags": [
+      "--dataset-name",
+      "custom",
+      "--dataset-path",
+      "benchmark-prompts.jsonl",
+      "--apply-chat-template",
+      "--num-prompts",
+      "8",
+      "--sharegpt-output-len",
+      "1024",
+      "--disable-ignore-eos",
+      "--max-concurrency",
+      "1",
+      "--request-rate",
+      "inf",
+      "--temperature",
+      "0",
+      "--seed",
+      "42",
+      "--warmup-requests",
+      "0",
+      "--flush-cache",
+      "--cache-report"
+    ]
   },
-  "candidates": {
-    "dflash2_7": {
-      "environment": {
-        "CTX": "fast",
-        "SPEC": "dflash2",
-        "DFLASH_TOKENS": "7",
-        "PREFIX_CACHE": "1",
-        "VLLM_DFLASH2_CHAIN": "0",
-        "MAX_SEQS": "1"
-      },
-      "real_prompts": [
-        {"decode_tokens_per_second": 74.3, "tokens_per_step": 3.43, "milliseconds_per_step": 47.5},
-        {"decode_tokens_per_second": 72.4, "tokens_per_step": 3.43, "milliseconds_per_step": 48.8},
-        {"decode_tokens_per_second": 72.6, "tokens_per_step": 3.43, "milliseconds_per_step": 48.7}
-      ],
-      "median_decode_tokens_per_second": 72.6,
-      "tokens_per_joule_at_200w_cap": 0.363,
-      "document_work": {
-        "copy_decode_tokens_per_second": 146.1,
-        "copy_tokens_per_step": 7.51,
-        "copy_cold_ttft_seconds": 29.71,
-        "edit_decode_tokens_per_second": 59.3,
-        "edit_tokens_per_step": 3.05,
-        "edit_prefix_cached_ttft_seconds": 1.22,
-        "combined_decode_tokens_per_second": 84.5
-      },
-      "steady_decode_power_w": "approximately 199.1-200.6",
-      "observed_vram_mib": 22490
-    },
-    "dflash2_7_250w": {
-      "environment": {
-        "CTX": "fast",
-        "SPEC": "dflash2",
-        "DFLASH_TOKENS": "7",
-        "PREFIX_CACHE": "1",
-        "VLLM_DFLASH2_CHAIN": "0",
-        "MAX_SEQS": "1"
-      },
-      "real_prompts": [
-        {"decode_tokens_per_second": 123.2, "tokens_per_step": 3.45, "milliseconds_per_step": 29.0},
-        {"decode_tokens_per_second": 120.5, "tokens_per_step": 3.45, "milliseconds_per_step": 29.6},
-        {"decode_tokens_per_second": 119.8, "tokens_per_step": 3.45, "milliseconds_per_step": 29.8}
-      ],
-      "median_decode_tokens_per_second": 120.5,
-      "tokens_per_joule_at_250w_cap": 0.482,
-      "throughput_gain_over_200w_percent": 66.0,
-      "efficiency_gain_over_200w_percent": 32.8,
-      "steady_decode_power_w": "approximately 248.4-251.7",
-      "steady_core_clock_mhz": "approximately 900-1050",
-      "steady_temperature_c": "approximately 69-71",
-      "steady_fan_percent": "approximately 54-57",
-      "observed_vram_mib": 22490,
-      "near_limit_retrieval": {
-        "prompt_tokens": 60042,
-        "elapsed_seconds": 71.862,
-        "retrieved": true
-      },
-      "api_smoke": {"passed": 12, "total": 12},
-      "gsm8k": {
-        "passed": 191,
-        "count": 200,
-        "accuracy": 0.955,
-        "mean_completion_tokens": 381.36,
-        "elapsed_seconds": 411.331
+  "decode_runs": [
+    {
+      "run": "chat_a",
+      "completed_requests": 8,
+      "decode_tokens_per_second": 137.08613484297427,
+      "mean_tpot_ms": 7.294683748618728,
+      "end_to_end_output_tokens_per_second": 132.1717002585501,
+      "elapsed_seconds": 59.233557445997576,
+      "mean_ttft_ms": 163.93242187450596,
+      "total_input_tokens": 1130,
+      "total_output_tokens": 7829,
+      "mean_accept_length": 3.3681034482758623,
+      "cache_report": {
+        "total_prompt_tokens": 1130,
+        "total_cached_tokens": 0,
+        "cache_hit_rate_pct": 0.0,
+        "device_cached_tokens": null,
+        "host_cached_tokens": null,
+        "storage_cached_tokens": null,
+        "storage_backend": null
       }
     },
-    "dflash2_7_ngram_chain": {
-      "environment_delta": {"VLLM_DFLASH2_CHAIN": "1"},
-      "real_prompts": [
-        {"decode_tokens_per_second": 69.7, "tokens_per_step": 3.27, "milliseconds_per_step": 48.2},
-        {"decode_tokens_per_second": 66.7, "tokens_per_step": 3.20, "milliseconds_per_step": 49.3}
-      ],
-      "document_work": {
-        "copy_decode_tokens_per_second": 147.2,
-        "edit_decode_tokens_per_second": 55.1,
-        "combined_decode_tokens_per_second": 80.4
-      },
-      "decision": "rejected: no useful copy gain and lower realistic and combined throughput"
-    },
-    "mtp_4": {
-      "environment": {
-        "CTX": "fast",
-        "SPEC": "mtp",
-        "DRAFT_TOKENS": "4",
-        "PREFIX_CACHE": "1",
-        "MAX_SEQS": "1"
-      },
-      "real_prompts": [
-        {"decode_tokens_per_second": 63.2, "tokens_per_step": 2.86, "milliseconds_per_step": 46.7},
-        {"decode_tokens_per_second": 63.1, "tokens_per_step": 2.86, "milliseconds_per_step": 46.5},
-        {"decode_tokens_per_second": 63.5, "tokens_per_step": 2.86, "milliseconds_per_step": 46.2}
-      ],
-      "median_decode_tokens_per_second": 63.2,
-      "tokens_per_joule_at_200w_cap": 0.316,
-      "document_work": {
-        "copy_decode_tokens_per_second": 91.0,
-        "edit_decode_tokens_per_second": 67.5,
-        "combined_decode_tokens_per_second": 77.6
-      },
-      "observed_vram_mib": 21480,
-      "decision": "rejected: about 15 percent slower than DFlash2 on realistic prompts"
+    {
+      "run": "chat_b",
+      "completed_requests": 8,
+      "decode_tokens_per_second": 137.04728504297978,
+      "mean_tpot_ms": 7.296751626173311,
+      "end_to_end_output_tokens_per_second": 132.1574007539725,
+      "elapsed_seconds": 59.239966549997916,
+      "mean_ttft_ms": 165.05276450016027,
+      "total_input_tokens": 1130,
+      "total_output_tokens": 7829,
+      "mean_accept_length": 3.3681034482758623,
+      "cache_report": {
+        "total_prompt_tokens": 1130,
+        "total_cached_tokens": 0,
+        "cache_hit_rate_pct": 0.0,
+        "device_cached_tokens": null,
+        "host_cached_tokens": null,
+        "storage_cached_tokens": null,
+        "storage_backend": null
+      }
+    }
+  ],
+  "quality": {
+    "accuracy": 0.965,
+    "count": 200,
+    "elapsed_seconds": 331.8714009070027,
+    "mean_completion_tokens": 379.6,
+    "model": "qwen3.8-27b",
+    "passed": 193,
+    "workers": 1,
+    "fixture": "gsm8k-200.json",
+    "max_output_tokens": 768,
+    "thinking_enabled": false,
+    "native_accuracy_threshold": 0.95,
+    "failures_hitting_output_cap": 4,
+    "limitations": "One capped greedy numeric fixture; not broad quality or distribution parity.",
+    "configuration_scope": "This quality run did not include the sleep-on-idle flag."
+  },
+  "prefill": {
+    "status": "measured_single_cold_request",
+    "client": "SGLang native bench_serving",
+    "actual_input_tokens": 24000,
+    "output_tokens": 128,
+    "cached_input_tokens": 0,
+    "ttft_ms": 22641.91262500026,
+    "effective_input_to_first_token_tokens_per_second": 1059.9811242757025,
+    "end_to_end_input_tokens_per_second": 1036.1855634918402,
+    "elapsed_seconds": 23.161874519002595,
+    "limitations": "Input tokens divided by TTFT includes client, scheduling and server overhead; not pure GPU kernel prefill throughput. One cold request, not a repeatability or all-workload guarantee.",
+    "evidence": "/tmp/inference-sleep-idle-1myt_akk/current-measurements.json"
+  },
+  "power": {
+    "source": "nvidia-smi NVML power.draw",
+    "sample_interval_ms": 200,
+    "selection": "200ms NVML samples, utilization >=90%, within invocation bracket; not phase-exact energy",
+    "run": "chat_b",
+    "measurement": {
+      "sample_count": 294,
+      "mean_draw_w": 278.76962585034016,
+      "min_draw_w": 204.51,
+      "max_draw_w": 280.71,
+      "temperature_c_min": 54,
+      "temperature_c_max": 65,
+      "cap_w_values": [
+        280.0
+      ]
     }
   },
-  "verification": {
-    "near_limit_retrieval": {
-      "prompt_tokens": 60042,
-      "needle_depth": 0.9,
-      "elapsed_seconds": 98.745,
-      "answer": "ZXCVBNM12345",
-      "retrieved": true
-    },
-    "api_smoke": {"passed": 12, "total": 12},
-    "tool_call": {"function": "health_check", "arguments": {"status": "ok"}, "passed": true},
-    "runtime_footprint": {
-      "host_memory_gib_idle": 3.428,
-      "container_pids_idle": 135,
-      "vram_mib_after_api_smoke": 22970,
-      "loaded_idle_power_w_observed": 129.47
-    },
-    "nix": {
-      "base_commit": "20bb430",
-      "base_pushed": true,
-      "base_activated": true,
-      "base_service_health": "failed before ExecStartPre with systemd 226/NAMESPACE because stateRoot was absent",
-      "boot_fix_commit": "a9f8cab",
-      "power_policy_commit": "2cbcb52",
-      "loopback_port_fix_commit": "8f11f85",
-      "hermes_boot_sync_commit": "841ec4d",
-      "qwen_provider_auth_commit": "d8861ff",
-      "hermes_update_commit": "6dd0eca",
-      "candidate_x86_64_linux_validation": "passed",
-      "manual_candidate_runtime_validation": "passed",
-      "qwen_candidate_pushed": true,
-      "qwen_candidate_activated": true,
-      "hermes_maintenance_pushed": false,
-      "hermes_maintenance_activated": false
-    }
+  "deployment": {
+    "status": "not_activated"
   },
-  "decision": {
-    "winner": "dflash2_7_250w",
-    "reason": "The 250 W setting preserved the same model, quantization, reasoning, KV precision, and verified outputs while improving median decode throughput by 66.0% and tokens per joule by 32.8% over 200 W.",
-    "configuration": {
-      "CTX": "fast",
-      "SPEC": "dflash2",
-      "DFLASH_TOKENS": "7",
-      "PREFIX_CACHE": "1",
-      "VLLM_DFLASH2_CHAIN": "0",
-      "MAX_SEQS": "1"
-    }
+  "evidence": {
+    "current_native_measurements": "/tmp/inference-sleep-idle-1myt_akk/current-measurements.json",
+    "quality_file": "/tmp/inference-final-qualification-o9vcvml2/final-quality.json",
+    "sanitization": "Native measurements retain selected metrics only; raw server_info, credentials and generated outputs are excluded."
   },
-  "sources": [
-    "https://roycorp.net/sglang/index.html",
-    "https://github.com/syv-ai/qwen38-27b-rtx3090",
-    "https://www.localmaxxing.com/en/runs/cmszj4klh0e4vms01944dfihh"
-  ]
+  "concurrency": {
+    "status": "measured_with_explicit_configuration_scopes",
+    "server_max_running_requests": 1,
+    "actual_batching": false,
+    "measurement_scope": "Pre-sleep-on-idle measurement of the otherwise current single-running-request profile; not a post-flag result or activated production deployment. Extra clients queue. Aggregate includes prefill; decode is 1000/mean_tpot_ms. These results do not establish continuous-batching gains.",
+    "queue_only_runs": [
+      {
+        "client_concurrency": 1,
+        "completed": 8,
+        "aggregate_output_tok_s": 132.13445651606017,
+        "decode_tok_s": 137.044857130947,
+        "mean_ttft_ms": 164.48513900013495,
+        "mean_tpot_ms": 7.296880896774516,
+        "input_tokens": 1130,
+        "output_tokens": 7829
+      },
+      {
+        "client_concurrency": 2,
+        "completed": 8,
+        "aggregate_output_tok_s": 132.31439158233684,
+        "decode_tok_s": 137.2056000690687,
+        "mean_ttft_ms": 6288.576790998832,
+        "mean_tpot_ms": 7.288332250991245,
+        "input_tokens": 1130,
+        "output_tokens": 7829
+      },
+      {
+        "client_concurrency": 4,
+        "completed": 8,
+        "aggregate_output_tok_s": 131.60587971795667,
+        "decode_tok_s": 136.47446369579325,
+        "mean_ttft_ms": 15669.979285624322,
+        "mean_tpot_ms": 7.32737812569125,
+        "input_tokens": 1130,
+        "output_tokens": 7829
+      }
+    ],
+    "server_log_evidence": "Parent observed one running request with two or three queued requests.",
+    "evidence": "/tmp/inference-current-native-leyns4zq/current-concurrency.json",
+    "true_batching": {
+      "status": "separate_capacity_measurement_complete",
+      "production_default_change": false,
+      "configuration": {
+        "configuration": "separate capacity measurement, not production default",
+        "context_length": 8192,
+        "max_running_requests": 2,
+        "max_mamba_cache_size": 12,
+        "max_total_tokens": 18000,
+        "cuda_graph_max_bs": 2,
+        "sleep_on_idle": true,
+        "actual_two_running_requests_observed": true
+      },
+      "measured_results": {
+        "completed": 8,
+        "duration": 39.174913650000235,
+        "total_input_tokens": 1130,
+        "total_output_tokens": 7827,
+        "input_throughput": 28.844990191828877,
+        "output_throughput": 199.79622852340233,
+        "mean_ttft_ms": 242.29922724907738,
+        "median_ttft_ms": 188.47765099963,
+        "p95_ttft_ms": 407.8199721498094,
+        "mean_tpot_ms": 8.750442624261114,
+        "median_tpot_ms": 8.843202140273124,
+        "mean_e2e_latency_ms": 8927.522481498727,
+        "accept_length": 3.281394372112558,
+        "cache_report": {
+          "total_prompt_tokens": 1130,
+          "total_cached_tokens": 0,
+          "cache_hit_rate_pct": 0.0,
+          "device_cached_tokens": null,
+          "host_cached_tokens": null,
+          "storage_cached_tokens": null,
+          "storage_backend": null
+        }
+      },
+      "decode_tokens_per_second": 114.27993336330685,
+      "limitations": "Separate 8192-context, K12, 18000-token-pool capacity measurement; not the default C1 profile, not a concurrency-only comparison, and not a Hermes task success.",
+      "evidence": "/tmp/inference-current-batch2-cyoy588u/sanitized-results.json"
+    },
+    "sleep_on_idle": false
+  },
+  "idle": {
+    "before_mean_gpu_w": 24.6198,
+    "after_mean_gpu_w": 25.2126,
+    "samples_each": 100,
+    "interval_ms": 200,
+    "pstate_each": "P8",
+    "before_container_cpu_pct": 102.91,
+    "after_container_cpu_pct": 0.51,
+    "caveat": "Different thermal states. No GPU power saving demonstrated. CPU values are snapshots."
+  },
+  "hermes_compatibility": {
+    "status": "blocked_before_generation",
+    "blocker": "Client minimum-context check rejected both empty-profile attempts.",
+    "successful_agent_benchmark": false,
+    "scope": "Rejection is not an inference task result or evidence of successful Hermes operation.",
+    "evidence": "/tmp/inference-current-batch2-cyoy588u/sanitized-results.json"
+  }
 }

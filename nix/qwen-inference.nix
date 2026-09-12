@@ -32,11 +32,11 @@ let
 			cp ${compatSource}/python/sglang/srt/${module.installed_path} "$out/${module.installed_path}"
 		'') compatManifest.modules}
 	'';
-	compatVolumes = lib.optionals cfg.reviewedSource.enable [
+	compatVolumes = [
 		"${./sglang-compat/manifest.json}:/sglang-compat-manifest.json:ro"
 		"${./sglang-compat/verify.py}:/sglang-compat-verify.py:ro"
 	];
-	modelVolumes = lib.optionals (cfg.profile == "compact-dflash") [
+	modelVolumes = [
 		"${../prepare/verify-models.py}:/model-preparation/verify-models.py:ro"
 		"${../prepare/manifest.json}:/model-preparation/manifest.json:ro"
 		"${../prepare/artifact.sha256}:/model-preparation/artifact.sha256:ro"
@@ -47,13 +47,10 @@ let
 		services = {
 			prepare = {
 				image = sglangImage;
-				entrypoint = if cfg.reviewedSource.enable then [
+				entrypoint = [
 					"bash"
 					"-c"
 					"python3 /sglang-compat-verify.py --manifest /sglang-compat-manifest.json --phase original --root ${lib.escapeShellArg compatManifest.source_root} --image ${lib.escapeShellArg sglangImage} && exec bash /sglang-entrypoint"
-				] else [
-					"bash"
-					"/sglang-entrypoint"
 				];
 				command = [ ];
 				pull_policy = "missing";
@@ -63,10 +60,9 @@ let
 					HOME = "/cache";
 					MODELS_DIR = "/models";
 					PREPARE = "1";
-					INFERENCE_PROFILE = cfg.profile;
 				};
 				volumes = [
-					"${stateRoot}/models:/models${lib.optionalString (cfg.profile == "compact-dflash") ":ro"}"
+					"${stateRoot}/models:/models:ro"
 					"${stateRoot}/cache:/cache"
 					"${sglangEntrypoint}:/sglang-entrypoint:ro"
 				] ++ compatVolumes ++ modelVolumes;
@@ -77,13 +73,10 @@ let
 			};
 			inference = {
 				image = sglangImage;
-				entrypoint = if cfg.reviewedSource.enable then [
+				entrypoint = [
 					"bash"
 					"-c"
 					"python3 /sglang-compat-verify.py --manifest /sglang-compat-manifest.json --phase replacement --root ${lib.escapeShellArg compatManifest.source_root} --image ${lib.escapeShellArg sglangImage} && exec bash /sglang-entrypoint"
-				] else [
-					"bash"
-					"/sglang-entrypoint"
 				];
 				command = [ ];
 				pull_policy = "missing";
@@ -105,7 +98,6 @@ let
 					MODELS_DIR = "/models";
 					PORT = toString port;
 					PREPARE = "0";
-					INFERENCE_PROFILE = cfg.profile;
 					SERVED_MODEL_NAME = cfg.model;
 				};
 				volumes = [
@@ -113,7 +105,7 @@ let
 					"${stateRoot}/cache:/cache"
 					"${stateRoot}/api-key:/app/api_key.txt:ro"
 					"${sglangEntrypoint}:/sglang-entrypoint:ro"
-				] ++ compatVolumes ++ modelVolumes ++ lib.optionals cfg.reviewedSource.enable (
+				] ++ compatVolumes ++ modelVolumes ++ (
 					map (module: "${compatOverlay}/${module.installed_path}:${compatManifest.source_root}/${module.installed_path}:ro") compatManifest.modules
 				);
 				deploy.resources = {
@@ -173,13 +165,7 @@ let
         openssl rand -hex 32 >${lib.escapeShellArg "${stateRoot}/api-key.tmp"}
         mv ${lib.escapeShellArg "${stateRoot}/api-key.tmp"} ${lib.escapeShellArg "${stateRoot}/api-key"}
       fi
-      umask 077
-      printf 'QWEN_API_KEY=%s\n' "$(cat ${lib.escapeShellArg "${stateRoot}/api-key"})" \
-        >${lib.escapeShellArg "${stateRoot}/hermes.env.tmp"}
-      mv ${lib.escapeShellArg "${stateRoot}/hermes.env.tmp"} ${lib.escapeShellArg "${stateRoot}/hermes.env"}
-      chmod 0600 \
-        ${lib.escapeShellArg "${stateRoot}/api-key"} \
-        ${lib.escapeShellArg "${stateRoot}/hermes.env"}
+      chmod 0600 ${lib.escapeShellArg "${stateRoot}/api-key"}
     '';
 	};
 	qwenWaitGpu = pkgs.writeShellApplication {
@@ -200,14 +186,6 @@ let
       exit 1
     '';
 	};
-	qwenHealth = import ./qwen-inference-health.nix {
-		inherit
-			lib
-			pkgs
-			port
-			stateRoot
-			;
-	};
 	ensureQwenDirs = ''
     set -euo pipefail
     owner=${lib.escapeShellArg username}
@@ -225,14 +203,6 @@ in
 {
 	options.workstation.qwenInference = {
 		enable = lib.mkEnableOption "Qwen3.8-27B SGLang inference";
-
-		reviewedSource.enable = lib.mkEnableOption "reviewed SGLang source overlay";
-
-		profile = lib.mkOption {
-			type = lib.types.enum [ "awq" "compact-dflash" ];
-			default = "awq";
-			description = "Explicit model profile; compact-dflash requires reviewed source and preverified local artifacts.";
-		};
 
 		stateRoot = lib.mkOption {
 			type = lib.types.externalPath;
@@ -261,19 +231,12 @@ in
 	};
 
 	config = lib.mkIf cfg.enable {
-		assertions = [
-			{
-				assertion = cfg.profile != "compact-dflash" || cfg.reviewedSource.enable;
-				message = "Qwen compact-dflash requires workstation.qwenInference.reviewedSource.enable.";
-			}
-		];
 		virtualisation.docker.rootless.daemon.settings.features.cdi = true;
 		systemd.services.qwen-inference-state-dirs = {
 			description = "Create Qwen inference state and credentials";
 			wantedBy = [ "multi-user.target" ];
 			after = [ "local-fs.target" ];
 			before = [
-				"hermes-agent.service"
 				"systemd-user-sessions.service"
 			];
 			unitConfig.RequiresMountsFor = [ stateRoot ];
@@ -287,7 +250,6 @@ in
 					${qwenPrepare}/bin/qwen-inference-prepare
 			'';
 		};
-		environment.systemPackages = [ qwenHealth ];
 		systemd.user.services.qwen-inference = {
 			description = "Qwen3.8-27B SGLang inference";
 			wantedBy = [ "default.target" ];
@@ -330,34 +292,5 @@ in
 			};
 		};
 
-		systemd.user.services.qwen-inference-health = {
-			description = "Verify Qwen completion and tool-call inference";
-			after = [ "qwen-inference.service" ];
-			onFailure = [ "qwen-inference-recover.service" ];
-			serviceConfig = {
-				Type = "oneshot";
-				ExecStart = "${qwenHealth}/bin/qwen-inference-health";
-				TimeoutStartSec = "7min";
-			};
-		};
-
-		systemd.user.services.qwen-inference-recover = {
-			description = "Recover failed Qwen inference";
-			serviceConfig = {
-				Type = "oneshot";
-				ExecStart = "${pkgs.systemd}/bin/systemctl --user restart qwen-inference.service";
-			};
-		};
-
-		systemd.user.timers.qwen-inference-health = {
-			description = "Verify Qwen inference every fifteen minutes";
-			wantedBy = [ "timers.target" ];
-			timerConfig = {
-				OnBootSec = "25min";
-				OnUnitActiveSec = "15min";
-				RandomizedDelaySec = "30s";
-				Unit = "qwen-inference-health.service";
-			};
-		};
 	};
 }

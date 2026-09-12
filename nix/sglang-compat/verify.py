@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Verify the reviewed opt-in source overlay without importing SGLang."""
+"""Verify the required reviewed runtime sources without importing SGLang."""
 
 import argparse
 import hashlib
@@ -62,8 +62,8 @@ def main() -> None:
         raise ValueError("invalid source NAR hash")
     if type(manifest.get("schema_version")) is not int or manifest["schema_version"] != 1:
         raise ValueError("unsupported manifest schema")
-    if manifest.get("status") != "reviewed_opt_in_runtime":
-        raise ValueError("unexpected reviewed opt-in runtime status")
+    if manifest.get("status") != "reviewed_runtime":
+        raise ValueError("unexpected reviewed runtime status")
     source_root = text(manifest.get("source_root"), "source_root")
     if source_root != "/sgl-workspace/sglang/python/sglang/srt":
         raise ValueError("unexpected installed source root")
@@ -113,7 +113,7 @@ def main() -> None:
             digest = hashlib.file_digest(stream, "sha256").hexdigest()
         if digest != fields[f"{args.phase}_sha256"]:
             raise ValueError(f"{args.phase} source digest mismatch: {relative}")
-    print(f"[sglang-compat] verified {args.phase} source; reviewed opt-in runtime")
+    print(f"[sglang-compat] verified {args.phase} source; reviewed runtime")
 
 
 if __name__ == "__main__":

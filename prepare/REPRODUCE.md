@@ -1,7 +1,8 @@
-# Preparation assets only
+# Reproduce the compact embedding artifact
 
-These files do not change the selected model, entrypoint, Nix service, or image.
-End-to-end quality and deployment approval remain separate gates.
+The current SGLang service uses the retained artifact recorded in `manifest.json`, plus the original quantized W4 DFlash2 draft. Serving verifies these files; it never runs this conversion, downloads a substitute or falls back automatically. This document describes a separate, explicitly approved CPU reproduction, not service startup or deployment.
+
+Final-profile quality, short-suite speed and bounded memory/cache checks have completed; see [../TRIALS.md](../TRIALS.md). Deployment is not yet activated. The pinned manifest and proof authenticate artifact reproduction; current qualification results do not authorize changing their bytes or skipping verification.
 
 1. **Verify provenance first.** `manifest.json` pins the native image, exact converter and numerical proof. `source.sha256` pins all17 retained fast-source files. The revision labels describe source ancestry; the file hashes identify the assembled source. Before reproduction, verify the converter/proof hashes against manifest.json, require the source directory inventory to be exactly the17 manifest entries, reject symlinks, and run `sha256sum --check` against source.sha256 from the source directory. Do not use a fresh download merely because its model name matches.
 2. **Create an exclusively owned empty work directory.** Preserve retained originals. The exact script reads `/source`, writes `/work/artifact`, and rejects an existing artifact path. Use a fresh private directory per attempt; never mount an active artifact at `/work`. The script uses independent file copies, not hardlinks. Do not delete partial attempts automatically or treat a partial output as qualified.
@@ -17,4 +18,6 @@ docker run --rm --runtime runc --network none --read-only --cap-drop ALL --secur
 
 The original converter is intentionally copied byte-for-byte. It authenticates structure and unchanged source bytes during the run, not expected source revision by itself; step1 is mandatory. Its `validation.json` has source path `/source`, which is the reproducible container mount, not the host provenance path. The qualified host location is recorded in manifest.json.
 
-Only embeddings are converted. The target compressed head and draft compressed fc require the separately reviewed compatibility assets in `nix/sglang-compat/`; numerical embedding validation does not qualify those model execution paths or end-to-end quality. No fc or QKV conversion is included.
+Only embeddings are converted. The target compressed head and draft compressed FC require the separately reviewed compatibility assets in [../nix/sglang-compat/](../nix/sglang-compat/NOTES.md); numerical embedding validation alone does not qualify those execution paths or end-to-end quality. No FC or QKV conversion is included. The selected runtime also includes the reviewed Mamba checkpoint correction, qualified narrowly for `extra_buffer`, not `extra_buffer_lazy`.
+
+For serving, preserve the guarded service's prepare-before-inference contract. `prepare` authenticates original pinned-image source without replacements and verifies the retained models. Inference authenticates the three read-only replacements and verifies the models again. Do not launch only the inference Compose service. Reproduction completion does not replace these checks or authorize activation. Independent guarded-generation rollback is documented in [../README.md](../README.md).

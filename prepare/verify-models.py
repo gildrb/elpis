@@ -256,7 +256,7 @@ def verify(target: Path, draft: Path) -> None:
         print(f"Verified {len(hashes)} model files: {path}", flush=True)
     layout(target, TARGET_NAMES)
     layout(draft, DRAFT_NAMES, draft=True)
-    print("Model bytes verified; runtime quality gates remain separate and pending.", flush=True)
+    print("Model bytes verified; runtime qualification and activation are separate.", flush=True)
 
 
 def main() -> int:

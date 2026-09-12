@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
-  "status": "reviewed_opt_in_runtime",
-  "quality_status": "end_to_end_quality_and_promotion_pending",
+  "status": "reviewed_runtime",
+  "quality_status": "scoped_final_profile_checks_recorded_not_activated",
   "base_image": "lmsysorg/sglang@sha256:d6e7288627be8b02be88e4bba38e73f6d50e2826869f753c13a4c4385ab3eda9",
   "source_root": "/sgl-workspace/sglang/python/sglang/srt",
   "runtime": {
@@ -41,11 +41,11 @@
   "qualification": {
     "independent_source_review": "approved_for_single_full_initial_DefaultModelLoader",
     "native_cpu_source_and_ast_validation": "passed_exit_0",
-    "parent_gpu_evidence": "selector graph capture and corrected-fc short-probe acceptance passed; not full quality promotion",
+    "parent_gpu_evidence": "Current SGLang C1/extra_buffer/logprob-chunk256 runtime qualification covers native chat decode, prefill/TTFT, sampled power draw, GSM8K, cold long-input logprobs, generated-prefix cache consistency, warm cache reuse, and context-boundary behavior. See ../../benchmark-results.json and ../../TRIALS.md for current measurements, exact workload scope, and activation state. No universal quality parity or OOM guarantee.",
     "restrictions": [
       "No hot reload or partial weight loading.",
       "No permissive source rebase; original and replacement hashes must match.",
-      "No production integration is enabled by these files."
+      "The enabled service requires reviewed runtime sources; deployment activation is separate."
     ]
   },
   "source": {

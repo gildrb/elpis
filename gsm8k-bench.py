@@ -10,7 +10,9 @@ import urllib.request
 fixture = sys.argv[1] if len(sys.argv) > 1 else "gsm8k-200.json"
 key_path = os.environ.get("QWEN_API_KEY_FILE", "/mnt/ssd/storage/ai/qwen3.8-27b/api-key")
 api = os.environ.get("QWEN_API", "http://127.0.0.1:18020/v1")
-workers = int(os.environ.get("GSM8K_WORKERS", "32"))
+workers = int(os.environ.get("GSM8K_WORKERS", "1"))
+if workers < 1:
+    raise SystemExit("GSM8K_WORKERS must be a positive integer.")
 rows = json.load(open(fixture))
 key = open(key_path).read().strip()
 
