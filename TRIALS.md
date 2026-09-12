@@ -1,64 +1,66 @@
-# Current SGLang qualification
+# Current 64K SGLang qualification
 
-## Configuration and deployment status
+## Configuration and status
 
-- Runtime: SGLang v0.5.19, image `sha256:d6e7288627be8b02be88e4bba38e73f6d50e2826869f753c13a4c4385ab3eda9`, with packed-head, quantized draft-FC and Mamba checkpoint corrections. Public source: `https://github.com/gildrb/sglang`, branch `fix/v0.5.19-packed-head-dflash-fc`, commit `3958762c198b7e9e0167e6aedda1b8c3f9a8afb1`.
-- Selected profile: compact Qwen target, DFLASH block 8, stock kernels, `extra_buffer`, one active server request, context **24,576**, input-logprob chunk **256**, `--sleep-on-idle`, and **280 W power cap**. A cap is distinct from actual draw; current NVML sample measurements and cold-input timing are recorded below.
-- Qualified artifact: `/mnt/ssd/storage/ai/qwen3.8-27b/models/compact-target-rholsc8k/artifact`; its parent contains `validation.json` and `convert.py`. Embedding conversion matched all 248,320 rows against the packed-value reference, with unrelated tensors preserved.
-- Inference integration `0662029` and evidence `2498b8a` are pushed. Locked `run-linux-validation.sh --host computer --without-vm` passed: all 27 flake checks, native contracts and the exact host closure built. **No activation or reboot occurred; runtime handover remains pending.** The active cap is operator-reported as 280 W; declarative activation is not established by the build.
+Current profile: `nccl-max-ctas-1-current`, **`NCCL_MAX_CTAS=1`**, context **65,536**, token-pool cap **66,560**, static memory fraction **0.94**, prefill chunk **1024**, one running request (**C1**), Mamba cache **K8**, DFlash block **8**, draft window **2048**, `extra_buffer`, BF16 Mamba state, FP8 KV, input-logprob chunk **256**, sleep-on-idle and **280 W power cap**. No NCCL minimum-CTA/channel overrides are selected. The pool flag is an upper bound, not a guaranteed minimum allocation; current runtime metadata reports an actual pool of **66,560**.
 
-## Current native chat, cold-input, active-power and idle measurements
+Runtime is `lmsysorg/sglang:v0.5.19@sha256:d6e7288627be8b02be88e4bba38e73f6d50e2826869f753c13a4c4385ab3eda9`, stock kernels and the three mandatory reviewed replacements from `gildrb/sglang` revision `3958762c198b7e9e0167e6aedda1b8c3f9a8afb1`. Target is `compact-target-rholsc8k/artifact`; draft is `Qwen3.8-27B-DFlash2-W4A16`. Source/model inventories and two-phase guards remain mandatory. Current entrypoint SHA256 is `c994f0a56914b8dddba2d347cbac5ee963af04a2d11818321979e4a622a108dd`. Runtime reported ready, health HTTP 200, context 65,536, pool 66,560 and maximum input 65,530.
 
-Canonical sanitized post-`--sleep-on-idle` evidence: `/tmp/inference-sleep-idle-1myt_akk/current-measurements.json`. Native SGLang chat completed **8/8** requests per run, each with **1,130 input tokens**, **7,829 output tokens** and **zero cached prompt tokens**. No raw prompts or generated outputs are included here.
+NixOS activation has not been performed. Before activation, the consumer must pin and validate the exact inference and dotfiles revisions, then satisfy staging, backup and transaction gates. The sanctioned staged activation/reboot unit is allowed by passwordless sudo and reboots the host. Runtime health and benchmarks do not establish consumer closure validation or system activation.
 
-| Native chat run | Completed | Decode tok/s | Aggregate output tok/s | Mean TPOT ms | Wall seconds |
-|---|---:|---:|---:|---:|---:|
-| A | 8/8 | 137.086135 | 132.171700 | 7.294684 | 59.233557 |
-| B | 8/8 | 137.047285 | 132.157401 | 7.296752 | 59.239967 |
+## Native short and long measurements
 
-**Decode** is reciprocal arithmetic mean request TPOT, `1000 / mean_tpot_ms`. **Aggregate** is output tokens divided by benchmark wall time. Mean TTFT was **163.932 / 165.053 ms**; mean request E2E **7.400735 / 7.401488 s**. Stream chunks can contain multiple tokens; arrival intervals are not individual token-ready timestamps. These two runs support approximately **137 single-request decode tok/s on this workload**, not a fixed-speed guarantee or broad quality/distribution parity. The summary does not provide text-identity evidence; run-order, thermal and limited-repeat caveats remain.
+| Native run | Completed | Decode tok/s | Aggregate output tok/s | Mean TPOT ms | Mean TTFT ms | Benchmark wall s |
+|---|---:|---:|---:|---:|---:|---:|
+| A | 8/8 | 137.686001940 | 132.778447411 | 7.262902444 | 162.468612875 | 58.962882551 |
+| B | 8/8 | 135.900829746 | 130.989520388 | 7.358306803 | 168.374690124 | 59.768140053 |
 
-One post-flag prefix-cold synthetic natural-language request completed **24,000 inputs**, **128 outputs** and **zero cached tokens**. Client TTFT was **22.641913 s**, giving effective input-to-first-token rate **1059.981124 tokens/s**. This includes overhead and is **not pure GPU prefill throughput**. Full invocation duration was **23.161875 s**, with **1,036.185563 input tokens/s** under that separate denominator. One cold sample is not a tail-latency or arbitrary-input capacity result.
+Both runs had **1,130 input / 7,829 output tokens**, zero cached prompt tokens and exit 0. Decode is `1000 / mean_tpot_ms`, using arithmetic mean request TPOT. Aggregate output is output tokens divided by benchmark wall time. Neither is a universal throughput guarantee. Invocation wall brackets include work outside the benchmark's reported duration; do not substitute one denominator for the other. Cache flushing does not unload weights or compiled graphs. Two short runs do not establish text identity or a broad latency distribution.
 
-Post-flag chat B actual draw: **294 NVML samples**, every **200 ms**, selected at rolling GPU utilization **>=90%** within the invocation bracket. Mean draw was **278.769626 W**, range **204.51–280.71 W**, at a reported **280 W cap**; temperature **54–65°C**. These are selected invocation samples, **not phase-exact energy, whole-run mean draw or tokens/J**. No corresponding post-flag A power summary is claimed.
+Cold **65,000 input / 128 output** passed HTTP 200 with zero cached tokens/retractions. Client TTFT was **74.668278194 s**, client decode **114.944469652 tok/s**, and client duration **75.773159537 s**. Client decode uses `(completion_tokens - 1) / (client_end - first_positive_completion_event)`, not reciprocal mean TPOT. Streaming chunks can contain multiple tokens. This full-context measurement is lower than the short-suite decode values. Input count divided by TTFT includes overhead, not just GPU prefill.
 
-Idle observations used **100 samples per condition at 200 ms**, both **P8**: GPU mean **24.6198 W without sleep-on-idle / 25.2126 W with it**. Thermal states differed; **no GPU power saving was demonstrated**. Container CPU snapshots changed from **102.91% to 0.51%**; these are snapshots, not time-integrated CPU utilization or energy measurements. No idle-performance causality beyond this bounded observation is claimed.
+A separate full-input-logprob request returned HTTP 200 with **65,000 rows**, **128 outputs**, zero cached tokens/retractions and duration **77.594354026 s**, finish reason length 128. These are bounded capacity probes, not arbitrary-input or concurrent-long-request OOM guarantees.
 
-## Quality and generated-checkpoint reuse
+## Numeric quality and generated-checkpoint reuse
 
-The current profile completed the existing 200-question numeric quality gate at **193/200 (96.5%)**, in **331.871401 seconds**, with mean **379.6 output tokens** and one worker. Seven items failed; four reached the 768-token cap. Conditions were temperature 0, thinking disabled and max 768 outputs. Fixture SHA256: `c33dcc6090f023fef25fe87711f6bd09d4de81658edb14468162cc9a9e5679fe`. Result: `/tmp/inference-final-qualification-o9vcvml2/final-quality.json`.
+The current numeric gate passed **191/200 (95.5%)** in **334.177168214 s**, with **nine failures**, mean **379.95 output tokens**, one worker and exit 0. It used the unchanged `gsm8k-bench.py` / `gsm8k-200.json`, temperature 0, thinking disabled and a 768-output-token cap; fixture SHA256 `c33dcc6090f023fef25fe87711f6bd09d4de81658edb14468162cc9a9e5679fe`. The existing 95% gate passed. The current sanitized report does not enumerate individual failures, so no cap-hit breakdown or independent full rescore is claimed. This is one capped numeric fixture, not broad quality or distribution equivalence.
 
-The corrected `extra_buffer` generated-checkpoint diagnostic passed its **predeclared 0.001 approximate-KL cutoff** on two frozen prompts: mean **0.000035783726386075915**; individual values **0.000007992375402146286** and **0.00006357507737000554**. Cached boundaries were **4,352 and 4,096 tokens**, both 256-aligned and extending into generated output. Each trajectory was compared with its own cold recomputation. Both completed diagnostics used input-logprob chunk 256 without an observed OOM. Evidence: `/tmp/inference-dflash-mamba-checkpoint-qualification.md` and `/tmp/inference-checkpoint-validation-vq8o7o22/fixed-chunk256.log` with its server log.
+The same-process checkpoint probe reused **65,024 cached tokens**, beyond the first **65,000-input** prompt. Its second request had **65,129 inputs and 128 outputs**. Cold recomputation had **65,257 input-logprob rows**, zero outputs, zero cached tokens and zero retractions. The final **128 output token IDs** aligned. The diagnostic is `mean(expm1(cold_logprob - warm_logprob) - (cold_logprob - warm_logprob))`, measured **1.485160174869604e-05**, below the predeclared **0.001** cutoff. This emitted-token estimator is **not full-vocabulary KL**.
 
-These are narrow numeric and checkpoint-reuse gates. They do not establish broad intelligence, sampling-distribution equivalence, `extra_buffer_lazy` correctness, arbitrary concurrency, cancellation/reclamation safety or every checkpoint boundary. The separate FlashInfer window issue remains outside this qualification.
+This supports the measured `extra_buffer` generated-prefix path only. It does not qualify `extra_buffer_lazy`, every checkpoint boundary, cancellation/reclamation, arbitrary concurrency or broad speculative/non-speculative equivalence. The separate FlashInfer window finding remains draft-only; no target-greedy accepted-output divergence is established here.
 
-## Memory, admission and queueing
+## Admission, output budget and retrieval
 
-- Two authenticated cold requests each completed **24,000 input tokens**, all **24,000 input-logprob rows** and **128 output tokens**, HTTP 200, with zero cached tokens. Evidence: `/tmp/inference-final-qualification-o9vcvml2/long-logprob-authenticated-response.json` and `long-logprob-warm-response.json`. Despite the second filename, its metadata records a cold request.
-- A separate 24K request without input logprobs completed HTTP 200 with **20,480 cached tokens** and **128 outputs**: `long-cache-response.json` in the same directory.
-- A **24,576-token input** was rejected with HTTP 400. A near-boundary **24,569-token input with six requested outputs** completed HTTP 200 with **five outputs**, finish reason length 5. Rejection and clamping are request-specific; not every over-budget request necessarily returns HTTP 400.
+Native maximum input is **65,530**, not 65,536. Combined input/output accounting reserves two tokens. Current probes:
+
+| Input / requested output | Observed response |
+|---|---|
+| 57,342 / 8,192 | HTTP 200, 8,192 outputs; 65,534 combined; zero cache hits/retractions; finish length 8,192 |
+| 65,406 / 128 | HTTP 200, 128 outputs; 65,534 combined; zero cache hits/retractions; finish length 128 |
+| 65,529 / 6 | HTTP 200, clamped to five outputs; zero cache hits/retractions; finish length 5 |
+| 65,536 / 1 | HTTP 400 |
+
+These show request-specific clamping and rejection, not uniform over-budget rejection or universal no-OOM behavior. The 8,192-output probe is **capacity evidence only**: cumulative SSE client parsing caused backlog, with client wall **185.904314 s** versus server E2E **136.973994 s**. Do not report its client-derived rate as GPU decode speed or compare it with the declared native metrics.
+
+The separate synthetic retrieval probe returned HTTP 200 with **65,000 actual inputs, 25 outputs and zero cached tokens**, in **76.175448 s**. Both planted facts passed at offsets **6,503 / 32,525**. The payload was validated for unique facts, retained question and chat framing. This is one two-fact spot check, not broad long-context comprehension or position coverage.
+
+## Hermes compatibility
+
+A fresh-home Hermes task passed after native discovery of context **65,536**, with **no context override**. It ran `cat /fixture/README.md`, returned the correct cited facts, and completed a final answer. Exact-session resume passed with the prior tool result in history and **zero new tool calls**. Native auxiliary title generation also passed. This is bounded agent compatibility, not a broad agent benchmark. Persisted `cache_read_tokens` was **0**: conversation-history reuse is proven, not a measured prefix-cache hit.
+
+Task wall time was **15.538119 s**; resume wall time **3.893181 s**. These are task-level observations, not decode benchmarks. Main requests used temperature 0, max 512 outputs and thinking disabled. The successful title used native defaults. A separate current native title replay passed HTTP 200 and returned a valid JSON title completion with temperature 0.3, no explicit max-token setting and no thinking override; it returned 519 completion tokens, including 502 reasoning tokens. Do not combine auxiliary-title usage with main task totals or infer broad tool/agent reliability from this bounded task.
+
+## Power and concurrency scope
+
+The configured 280 W value is a cap, not measured draw or energy. Active-power performance, idle savings and queue performance were not measured here. C1 remains selected; no batching benefit or simultaneous long-request capacity is qualified. No phase-aligned energy or tokens/J result is claimed.
+
+## Reproduction and evidence
+
+Use [README.md](README.md) for the exact native short-fixture command, approved exclusive access, authentication, cache flushing and private output handling. Publish only allowlisted metrics, never raw `server_info`, keys, private prompts or generated text.
+
+The long-capacity input repeats public LongBench-v2 Kalamang material; it is not a purely synthetic corpus. The UUID prefix is already present in the sample, not a proven freshly added cache-busting prefix. Preparation used the pinned image helper `sglang.test.kl_test_utils.get_input_ids`, `random.seed(0)`, `max_prompt_tokens=3000`, `num_samples=48`, `trust_remote_code=False` and the retained tokenizer. Dataset-cache metadata identifies `THUDM/LongBench-v2` train revision `2b48e494f2c7a2f0af81aae178e05c7e1dde0fe9`. The helper did not explicitly pass a dataset revision. Independent rebuilding must pin that revision and verify the hashes; a fresh network reconstruction was not run here. The frozen 48-sample fixture SHA256 is `df118399f26d3550f1d23e937734d980831661df1584099617a53de1ba5ffc13`. The first native fixture has 4,033 token IDs; its canonical compact ID-JSON SHA256 is `036a9ac23c3ade2524593e91a6fc1314469d83a708b935099ab222d870dfe735`. Construct `seed24000 = (first4033 * 6)[:24000]`, then `long_ids = (seed24000 * 3)[:N]`. Keep long-request token counts tokenizer-verified and record actual response metadata; full-input-logprob output must contain the expected row count.
+
+The retained procedure is documented at `/tmp/inference-64k-qualification-dkzu7258/methodology-sanitized.md`; that file describes the protocol, not the current run results. Native capacity requests use authenticated `/generate` with exact `input_ids`, temperature 0, `ignore_eos=true` and the stated output budget. Full-input-logprob requests add `return_logprob=true`, `logprob_start_len=0`, `top_logprobs_num=0`. Each cold probe first requires successful POST `/flush_cache`, without restarting. For checkpoint reuse, append the first 128 output IDs and token ID 11 to the 65,000 inputs; request 128 outputs with `return_logprob=true`, `logprob_start_len=-1` and no flush. Append those outputs, flush, then recompute full input logprobs with zero new tokens. Align the final 128 token IDs before scoring. Client long-probe decode is `(completion_tokens - 1) / (client_end - first_positive_completion_event)`; it is not the short suite's reciprocal mean TPOT metric.
 
 
-Response metadata was independently audited; HTTP statuses and the near-boundary/queue observations include execution-agent evidence. These completed probes support bounded memory and admission behavior, not universal no-OOM, unrelated long-request concurrency or all-input safety. Initial authentication failures were excluded. Runtime deployment remains pending; current draw and cold-input timing are recorded above.
-
-
-## Client-concurrency scope: measured before sleep-on-idle
-
-Evidence: `/tmp/inference-current-native-leyns4zq/current-concurrency.json`. **These client-C1/C2/C4 measurements predate `--sleep-on-idle`; they have not been rerun for the current flag setting.** The server limit in these measurements was **one running request**. Higher client concurrency queues work; **actual server batching is false**. Each run completed 8/8 with 1,130 input and 7,829 output tokens.
-
-| Client concurrency | Decode tok/s | Aggregate output tok/s | Mean TTFT seconds |
-|---|---:|---:|---:|
-| 1 | 137.044857 | 132.134457 | 0.164485 |
-| 2 | 137.205600 | 132.314392 | 6.288577 |
-| 4 | 136.474464 | 131.605880 | 15.669979 |
-
-Aggregate throughput is approximately unchanged while queueing increases TTFT. Server logs show one running request with queued requests, including queue depths two and three. Client concurrency is not simultaneous server decode concurrency; these results do not establish a batching gain or capacity for multiple active long sequences. Each concurrency setting has one measured run, not a repeated latency distribution. The separate true server-batch-two measurement below is completed; these queueing results must not be confused with it.
-
-
-## Separate true batch-two measurement and Hermes blocker
-
-Sanitized evidence: `/tmp/inference-current-batch2-cyoy588u/sanitized-results.json`. This is a **separate capacity configuration, not the production-default C1 profile**: context **8,192**, Mamba cache **K12**, token pool **18,000**, maximum running requests **two**, graph maximum batch size **two**, and sleep-on-idle enabled. Server evidence confirms **two requests actually running**.
-
-The native short suite completed **8/8**, with **1,130 input tokens**, **7,827 output tokens**, zero reported cached prompt tokens and duration **39.174914 s**. Aggregate output throughput was **199.796229 tok/s**; reciprocal mean TPOT decode was **114.279933 tok/s**, mean TPOT **8.750443 ms**, mean TTFT **242.299227 ms**. This is one short-workload run with a smaller context/state allocation, not the default C1's performance or a long-request concurrency qualification. The default remains the separately measured sleep-on-idle C1 profile above.
-
-**Hermes compatibility is blocked:** both empty-profile Hermes attempts were rejected by the client's minimum-context check **before generation**. Neither is a successful agent task or agent-performance benchmark. Synthetic API, numeric-quality and cache passes do not establish Hermes usability. The operator is restoring the default C1 candidate before commit, consumer repin and deployment; successful restoration, deployment and Hermes task completion are not yet established here. No further tuning is planned in this qualification closeout.
+Current native evidence: `/tmp/inference-64k-closeout-lc6qsqyl/final-max-ctas-results-native.json`. Current Hermes evidence: `/tmp/inference-hermes-64k-retry-wizy3p6a/hermes-result.json`. [benchmark-results.json](benchmark-results.json) is the repository's sanitized current result record. Local `/tmp` paths are evidence locations, not durable artifact hosting. All performance and quality values above come from the current `NCCL_MAX_CTAS=1` report; model/source provenance and fixture recipes are not runtime measurements.

@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Bounded retrieval fixture for the current compact SGLang profile.
 
-The 12,000 estimated-token ceiling is fixture policy, not the model's 24,576
-context limit. Actual prompt token usage is reported by the API. Set
+The 12,000 estimated-token ceiling is fixture policy, not the server's 65,536
+context setting. Actual prompt token usage is reported by the API. Set
 QWEN_API_KEY_FILE to the host key path when running outside the container.
 """
 import json

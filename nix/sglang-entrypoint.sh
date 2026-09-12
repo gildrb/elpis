@@ -15,6 +15,8 @@ export HF_HUB_DISABLE_TELEMETRY=1
 export DO_NOT_TRACK=1
 export HOME="${HOME:-/cache}"
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+# Bound the singleton NCCL communicator used by structured-output sampling.
+export NCCL_MAX_CTAS=1
 # Bound full-vocabulary input-logprob temporary allocations.
 export SGLANG_ENABLE_LOGPROB_CHUNK=1
 export SGLANG_LOGPROB_CHUNK_SIZE=256
@@ -44,7 +46,8 @@ exec python3 -m sglang.launch_server \
   --model-path "$model_path" \
   --served-model-name "$SERVED_MODEL_NAME" \
   --tp 1 \
-  --context-length 24576 \
+  --context-length 65536 \
+  --max-total-tokens 66560 \
   --attention-backend flashinfer \
   --speculative-algorithm DFLASH \
   --speculative-draft-model-path "$draft_path" \
@@ -53,9 +56,9 @@ exec python3 -m sglang.launch_server \
   --speculative-draft-window-size 2048 \
   --max-running-requests 1 \
   --sleep-on-idle \
-  --chunked-prefill-size 4096 \
+  --chunked-prefill-size 1024 \
   --mamba-radix-cache-strategy extra_buffer \
-  --mem-fraction-static 0.89 \
+  --mem-fraction-static 0.94 \
   --max-mamba-cache-size 8 \
   --mamba-ssm-dtype bfloat16 \
   --kv-cache-dtype fp8_e4m3 \
