@@ -13,6 +13,7 @@ AWQ_REVISION=63768c10df38c0395e12ef49edac1bd539eaeeea
 export HF_HUB_DISABLE_TELEMETRY=1
 export DO_NOT_TRACK=1
 export HOME="${HOME:-/cache}"
+export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 
 download_pinned_model() {
   local repository=$1
@@ -69,8 +70,10 @@ exec python3 -m sglang.launch_server \
   --max-running-requests 1 \
   --chunked-prefill-size 4096 \
   --mamba-radix-cache-strategy extra_buffer \
-  --mem-fraction-static 0.92 \
+  --mem-fraction-static 0.89 \
   --max-mamba-cache-size 8 \
+  --mamba-ssm-dtype bfloat16 \
+  --kv-cache-dtype fp8_e4m3 \
   --disable-prefill-cuda-graph \
   --cuda-graph-max-bs 8 \
   --reasoning-parser qwen3 \

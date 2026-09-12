@@ -61,3 +61,9 @@ The first real Hermes turn reached `http://127.0.0.1:18020/v1` but returned HTTP
 ## Hermes v0.21.0
 
 The pinned Hermes input moves from `v2026.8.19` / v0.20.5 to the latest stable `v2026.8.31` / v0.21.0 release at revision `29112bef099274229cadff79cdff7bf7b99c4b77`. The full x86_64 package, NixOS closure, generated managed configuration, and repository contract suite build successfully.
+
+## SGLang capacity repair
+
+The first SGLang boot served `max_total_num_tokens=13,758` and crash-looped under real Hermes load. Three separate measurements on the live card: the pinned AWQ weights load at 19.11 GB of 23.56 GB; post-init Triton JIT for the GDN kernels plus NCCL buffers consume about 1.8 GB outside the static pool; and `extra_buffer` reserves 5 mamba state slots per request, so `--max-mamba-cache-size 8` is already near the floor of 5. Hermes turns arrive with about a 12.2K-token prompt and an 8K output budget, which cannot fit a 13.7K pool: oversized requests were rejected and concurrent queueing hit the tokenizer stream timeout, which fail-fast kills the whole server.
+
+Measured remedies, applied together: `--mamba-ssm-dtype bfloat16` (halves the GDN state, default was wider), `--kv-cache-dtype fp8_e4m3` (halves full-attention KV bytes per token), `--mem-fraction-static 0.89` (moves about 0.7 GB back outside the pool for JIT and NCCL), and `PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True`. The result is `max_total_num_tokens=27,565` with 2.22 GB free after init. A live probe of that configuration passed the tool-call contract, completed a 10,163-token prompt with thinking enabled, and stayed healthy for follow-up requests, where the previous configuration died.
