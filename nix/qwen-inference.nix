@@ -12,86 +12,29 @@ let
 	stateRootParent = builtins.dirOf stateRoot;
 	port = cfg.port;
 	requiredMountPoint = cfg.requiredMountPoint;
-	qwenImage = "ghcr.io/syv-ai/qwen38-27b-rtx3090@sha256:9a4ef2b51316f3ce1a23dd4bffc5e5c93669703daa5c0b0818258408058039ae";
-	qwenBaseRevision = "1f05c441c4e64ae0549de44fa9ea5a6d43610314";
-	qwenFastRevision = "124c14e7e8c7d2f5402933b9af368e772a9fcf0c";
-	qwenDflashRevision = "4d30ec736ffc6b8688dc2ae2b502d9b48bdec279";
-	qwenPinnedPrepare = pkgs.writeText "qwen-inference-pinned-prepare.sh" ''
-    set -euo pipefail
-    cd /app
-    export PATH=/app/venv/bin:$PATH
-    export HF_HUB_DISABLE_TELEMETRY=1
-
-    marker=/app/models/.prepared-revisions
-    expected='image=8d832f8758ae4fd36c29a15d3c45888922bc4377
-base=${qwenBaseRevision}
-fast=${qwenFastRevision}
-dflash=${qwenDflashRevision}'
-    if [[ -f "$marker" ]] && [[ "$(cat "$marker")" == "$expected" ]]; then
-      echo "Pinned Qwen model set is already prepared."
-      exit 0
-    fi
-    if [[ -e "$marker" ]]; then
-      echo "Refusing to mutate a Qwen model set prepared from different revisions." >&2
-      exit 1
-    fi
-
-    base=/app/models/Qwen3.8-27B-W4A16-AutoRound
-    hf download dbirks/Qwen3.8-27B-W4A16-AutoRound \
-      --revision ${qwenBaseRevision} --local-dir "$base"
-
-    python - <<'PY'
-from pathlib import Path
-
-replacements = {
-    Path("prepare/fetch_fast_variant.py"): (
-        'snapshot_download("syvai/qwen3.8-27b-3090-fast-variant",',
-        'snapshot_download("syvai/qwen3.8-27b-3090-fast-variant", revision="${qwenFastRevision}",',
-    ),
-    Path("prepare/fetch_dflash2.py"): (
-        "snapshot_download(REPO, local_dir=D,",
-        'snapshot_download(REPO, revision=None if BF16 else "${qwenDflashRevision}", local_dir=D,',
-    ),
-}
-for path, (old, new) in replacements.items():
-    text = path.read_text()
-    if text.count(old) != 1:
-        raise SystemExit(f"expected one pinned-download patch point in {path}")
-    path.write_text(text.replace(old, new))
-PY
-
-    HF_REPO=dbirks/Qwen3.8-27B-W4A16-AutoRound \
-      FAST_VARIANT=1 DFLASH2=1 bash docker/prepare.sh
-    for required in \
-      /app/models/Qwen3.8-27B-W4A16-AutoRound-fast/model.safetensors.index.json \
-      /app/models/Qwen3.8-27B-DFlash2-W4A16/model.safetensors; do
-      [[ -s "$required" ]] || {
-        printf 'required prepared model artifact is missing: %s\n' "$required" >&2
-        exit 1
-      }
-    done
-    printf '%s\n' "$expected" >"$marker.tmp"
-    mv "$marker.tmp" "$marker"
-  '';
+	sglangImage = "lmsysorg/sglang:v0.5.19@sha256:d6e7288627be8b02be88e4bba38e73f6d50e2826869f753c13a4c4385ab3eda9";
+	sglangEntrypoint = ./sglang-entrypoint.sh;
 	qwenCompose = (pkgs.formats.yaml { }).generate "qwen-inference-compose.yaml" {
 		services = {
 			prepare = {
-				image = qwenImage;
+				image = sglangImage;
 				entrypoint = [
 					"bash"
-					"/prepare-pinned"
+					"/sglang-entrypoint"
 				];
 				command = [ ];
 				pull_policy = "missing";
 				environment = {
-					DFLASH2 = "1";
-					FAST_VARIANT = "1";
+					DO_NOT_TRACK = "1";
+					HF_HUB_DISABLE_TELEMETRY = "1";
 					HOME = "/cache";
+					MODELS_DIR = "/models";
+					PREPARE = "1";
 				};
 				volumes = [
-					"${stateRoot}/models:/app/models"
+					"${stateRoot}/models:/models"
 					"${stateRoot}/cache:/cache"
-					"${qwenPinnedPrepare}:/prepare-pinned:ro"
+					"${sglangEntrypoint}:/sglang-entrypoint:ro"
 				];
 				deploy.resources.limits = {
 					cpus = "8";
@@ -99,11 +42,15 @@ PY
 				};
 			};
 			inference = {
-				image = qwenImage;
-				command = [ "single" ];
+				image = sglangImage;
+				entrypoint = [
+					"bash"
+					"/sglang-entrypoint"
+				];
+				command = [ ];
 				pull_policy = "missing";
 				stop_grace_period = "60s";
-				shm_size = "8gb";
+				shm_size = "32gb";
 				read_only = true;
 				cap_drop = [ "ALL" ];
 				security_opt = [ "no-new-privileges:true" ];
@@ -113,27 +60,20 @@ PY
 				];
 				ports = [ "127.0.0.1:${toString port}:${toString port}" ];
 				environment = {
-					CTX = "fast";
-					DFLASH_TOKENS = "7";
+					API_KEY_FILE = "/app/api_key.txt";
 					DO_NOT_TRACK = "1";
 					HF_HUB_DISABLE_TELEMETRY = "1";
 					HOME = "/cache";
-					HOST = "0.0.0.0";
-					MAX_SEQS = "1";
+					MODELS_DIR = "/models";
 					PORT = toString port;
-					PREFIX_CACHE = "1";
 					PREPARE = "0";
-					SPEC = "dflash2";
-					TOOLS = "1";
-					VERIFY = "1";
-					VISION = "0";
-					VLLM_DFLASH2_CHAIN = "0";
-					VLLM_NO_USAGE_STATS = "1";
+					SERVED_MODEL_NAME = cfg.model;
 				};
 				volumes = [
-					"${stateRoot}/models:/app/models:ro"
+					"${stateRoot}/models:/models:ro"
 					"${stateRoot}/cache:/cache"
 					"${stateRoot}/api-key:/app/api_key.txt:ro"
+					"${sglangEntrypoint}:/sglang-entrypoint:ro"
 				];
 				deploy.resources = {
 					limits = {
@@ -151,9 +91,9 @@ PY
 				healthcheck = {
 					test = [
 						"CMD"
-						"curl"
-						"-fsS"
-						"http://127.0.0.1:${toString port}/health"
+						"python3"
+						"-c"
+						"import urllib.request; urllib.request.urlopen('http://127.0.0.1:${toString port}/health')"
 					];
 					interval = "30s";
 					timeout = "5s";
@@ -189,17 +129,13 @@ PY
       done
       if [[ ! -s ${lib.escapeShellArg "${stateRoot}/api-key"} ]]; then
         umask 077
-        key="$(openssl rand -hex 32)"
-        printf '%s\n' "$key" >${lib.escapeShellArg "${stateRoot}/api-key.tmp"}
-        printf 'QWEN_API_KEY=%s\n' "$key" >${lib.escapeShellArg "${stateRoot}/hermes.env.tmp"}
+        openssl rand -hex 32 >${lib.escapeShellArg "${stateRoot}/api-key.tmp"}
         mv ${lib.escapeShellArg "${stateRoot}/api-key.tmp"} ${lib.escapeShellArg "${stateRoot}/api-key"}
-        mv ${lib.escapeShellArg "${stateRoot}/hermes.env.tmp"} ${lib.escapeShellArg "${stateRoot}/hermes.env"}
-      elif [[ ! -s ${lib.escapeShellArg "${stateRoot}/hermes.env"} ]]; then
-        umask 077
-        printf 'QWEN_API_KEY=%s\n' "$(cat ${lib.escapeShellArg "${stateRoot}/api-key"})" \
-          >${lib.escapeShellArg "${stateRoot}/hermes.env.tmp"}
-        mv ${lib.escapeShellArg "${stateRoot}/hermes.env.tmp"} ${lib.escapeShellArg "${stateRoot}/hermes.env"}
       fi
+      umask 077
+      printf 'QWEN_API_KEY=%s\n' "$(cat ${lib.escapeShellArg "${stateRoot}/api-key"})" \
+        >${lib.escapeShellArg "${stateRoot}/hermes.env.tmp"}
+      mv ${lib.escapeShellArg "${stateRoot}/hermes.env.tmp"} ${lib.escapeShellArg "${stateRoot}/hermes.env"}
       chmod 0600 \
         ${lib.escapeShellArg "${stateRoot}/api-key"} \
         ${lib.escapeShellArg "${stateRoot}/hermes.env"}
@@ -209,19 +145,9 @@ PY
 		name = "qwen-inference-wait-gpu";
 		runtimeInputs = [
 			pkgs.coreutils
-			pkgs.curl
-			pkgs.jq
 			(config.hardware.nvidia.package.bin or config.hardware.nvidia.package)
 		];
 		text = ''
-      if models="$(curl -fsS --max-time 5 http://127.0.0.1:11434/api/ps 2>/dev/null)"; then
-        while IFS= read -r model; do
-          [[ -n "$model" ]] || continue
-          jq -n --arg model "$model" '{model: $model, keep_alive: 0}' |
-            curl -fsS --max-time 30 -H 'Content-Type: application/json' \
-              -d @- http://127.0.0.1:11434/api/generate >/dev/null
-        done < <(jq -r '.models[]?.name' <<<"$models")
-      fi
       for _ in {1..60}; do
         used="$(nvidia-smi --query-gpu=memory.used --format=csv,noheader,nounits | head -n 1)"
         if [[ "$used" =~ ^[0-9]+$ ]] && (( used < 1000 )); then
@@ -233,57 +159,13 @@ PY
       exit 1
     '';
 	};
-	qwenHealth = pkgs.writeShellApplication {
-		name = "qwen-inference-health";
-		runtimeInputs = [
-			pkgs.coreutils
-			pkgs.curl
-			pkgs.jq
-		];
-		text = ''
-      key_file=${lib.escapeShellArg "${stateRoot}/api-key"}
-      [[ -s "$key_file" ]] || {
-        echo "Qwen API key is missing." >&2
-        exit 1
-      }
-      response="$(mktemp)"
-      trap 'rm -f "$response"' EXIT
-      for _ in 1 2; do
-        if curl -fsS --max-time 120 \
-          -H "Authorization: Bearer $(cat "$key_file")" \
-          -H 'Content-Type: application/json' \
-          -o "$response" \
-          -d '{
-            "model": "qwen3.8-27b",
-            "messages": [{"role": "user", "content": "Call health_check with status ok."}],
-            "tools": [{
-              "type": "function",
-              "function": {
-                "name": "health_check",
-                "description": "Report inference health.",
-                "parameters": {
-                  "type": "object",
-                  "properties": {"status": {"type": "string"}},
-                  "required": ["status"]
-                }
-              }
-            }],
-            "tool_choice": {"type": "function", "function": {"name": "health_check"}},
-            "temperature": 0,
-            "max_tokens": 64,
-            "chat_template_kwargs": {"enable_thinking": false}
-          }' \
-          http://127.0.0.1:${toString port}/v1/chat/completions &&
-          jq -e '.choices[0].message.tool_calls[0].function.name == "health_check"' \
-            "$response" >/dev/null; then
-          exit 0
-        fi
-        sleep 5
-      done
-      jq -r '.error.message // "Qwen completion/tool health check failed."' \
-        "$response" >&2 2>/dev/null || true
-      exit 1
-    '';
+	qwenHealth = import ./qwen-inference-health.nix {
+		inherit
+			lib
+			pkgs
+			port
+			stateRoot
+			;
 	};
 	ensureQwenDirs = ''
     set -euo pipefail
@@ -301,7 +183,7 @@ PY
 in
 {
 	options.workstation.qwenInference = {
-		enable = lib.mkEnableOption "Qwen3.8-27B low-latency inference";
+		enable = lib.mkEnableOption "Qwen3.8-27B SGLang inference";
 
 		stateRoot = lib.mkOption {
 			type = lib.types.externalPath;
@@ -352,7 +234,7 @@ in
 		};
 		environment.systemPackages = [ qwenHealth ];
 		systemd.user.services.qwen-inference = {
-			description = "Qwen3.8-27B low-latency inference";
+			description = "Qwen3.8-27B SGLang inference";
 			wantedBy = [ "default.target" ];
 			wants = [ "docker.service" ];
 			startLimitBurst = 3;
@@ -400,6 +282,7 @@ in
 			serviceConfig = {
 				Type = "oneshot";
 				ExecStart = "${qwenHealth}/bin/qwen-inference-health";
+				TimeoutStartSec = "7min";
 			};
 		};
 
@@ -421,6 +304,5 @@ in
 				Unit = "qwen-inference-health.service";
 			};
 		};
-
 	};
 }
