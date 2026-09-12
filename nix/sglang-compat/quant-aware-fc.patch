@@ -1,0 +1,88 @@
+--- a/python/sglang/srt/models/dflash.py
++++ b/python/sglang/srt/models/dflash.py
+@@ -621,7 +621,10 @@
+         num_context_features = len(target_layer_ids)
+ 
+         self.num_context_features = int(num_context_features)
+-        if self.is_nemotron_35_draft:
++        self.use_replicated_fc = (
++            self.is_nemotron_35_draft or draft_config.selector_rank > 0
++        )
++        if self.use_replicated_fc:
+             fc_prefix = f"{prefix}.fc" if prefix else "fc"
+             self.fc = ReplicatedLinear(
+                 self.num_context_features * hidden_size,
+@@ -663,7 +666,7 @@
+     def project_target_hidden(self, target_hidden: torch.Tensor) -> torch.Tensor:
+         """Project concatenated target-layer hidden states into draft hidden_size."""
+         expected = int(
+-            self.fc.input_size if self.is_nemotron_35_draft else self.fc.in_features
++            self.fc.input_size if self.use_replicated_fc else self.fc.in_features
+         )
+         if target_hidden.ndim != 2 or int(target_hidden.shape[-1]) != expected:
+             raise ValueError(
+@@ -675,7 +678,7 @@
+                 "the draft checkpoint/config expects."
+             )
+         projected = self.fc(target_hidden)
+-        if self.is_nemotron_35_draft:
++        if self.use_replicated_fc:
+             projected = projected[0]
+         return self.hidden_norm(projected)
+ 
+@@ -729,6 +732,12 @@
+         ]
+ 
+         params_dict = dict(self.named_parameters())
++        required_fc_params = (
++            {name for name in params_dict if name.startswith("fc.")}
++            if self.draft_config.selector_rank > 0
++            else set()
++        )
++        loaded_fc_params: set[str] = set()
+ 
+         # Alias the native export's "encoder." names.
+         _VENDOR_ENCODER_ALIASES = {
+@@ -771,7 +780,7 @@
+                     continue
+                 param = params_dict[resolved_name]
+                 if resolved_name.endswith("fc.weight"):
+-                    if self.is_nemotron_35_draft:
++                    if self.use_replicated_fc:
+                         expected_shape = (
+                             int(self.config.hidden_size),
+                             int(self.num_context_features * self.config.hidden_size),
+@@ -799,6 +808,15 @@
+                         )
+                 weight_loader = getattr(param, "weight_loader", default_weight_loader)
+                 weight_loader(param, loaded_weight)
++                if resolved_name in required_fc_params:
++                    loaded_fc_params.add(resolved_name)
++
++        missing_fc_params = required_fc_params - loaded_fc_params
++        if len(missing_fc_params) > 0:
++            raise ValueError(
++                "DFlash2 context projection parameters were not loaded: "
++                f"{sorted(missing_fc_params)}"
++            )
+ 
+ 
+ class DFlashLagunaAttention(DFlashAttention):
+@@ -880,7 +898,7 @@
+ 
+     def project_target_hidden(self, target_hidden: torch.Tensor) -> torch.Tensor:
+         expected = int(
+-            self.fc.input_size if self.is_nemotron_35_draft else self.fc.in_features
++            self.fc.input_size if self.use_replicated_fc else self.fc.in_features
+         )
+         if target_hidden.ndim != 2 or int(target_hidden.shape[-1]) != expected:
+             raise ValueError(
+@@ -901,7 +919,7 @@
+             normed[:, i, :] = norm(slices[:, i, :])
+         fused = normed.reshape(target_hidden.shape[0], -1)
+         projected = self.fc(fused)
+-        if self.is_nemotron_35_draft:
++        if self.use_replicated_fc:
+             projected = projected[0]
+         return self.hidden_norm(projected)
+ 

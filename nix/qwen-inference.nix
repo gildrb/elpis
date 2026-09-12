@@ -14,11 +14,44 @@ let
 	requiredMountPoint = cfg.requiredMountPoint;
 	sglangImage = "lmsysorg/sglang:v0.5.19@sha256:d6e7288627be8b02be88e4bba38e73f6d50e2826869f753c13a4c4385ab3eda9";
 	sglangEntrypoint = ./sglang-entrypoint.sh;
+	compatManifest = builtins.fromJSON (builtins.readFile ./sglang-compat/manifest.json);
+	compatSource = pkgs.fetchzip {
+		url = "${compatManifest.source.repository}/archive/${compatManifest.source.revision}.tar.gz";
+		hash = compatManifest.source.nar_hash;
+	};
+	# Select reviewed Python files only; never build or replace the runtime package.
+	compatOverlay = pkgs.runCommand "sglang-reviewed-source-overlay" {
+		nativeBuildInputs = [ pkgs.python3 ];
+	} ''
+		python3 ${./sglang-compat/verify.py} \
+			--manifest ${./sglang-compat/manifest.json} \
+			--phase replacement --root ${compatSource}/python/sglang/srt \
+			--image ${lib.escapeShellArg sglangImage}
+		mkdir -p "$out/layers" "$out/models" "$out/speculative"
+		${lib.concatMapStringsSep "\n" (module: ''
+			cp ${compatSource}/python/sglang/srt/${module.installed_path} "$out/${module.installed_path}"
+		'') compatManifest.modules}
+	'';
+	compatVolumes = lib.optionals cfg.reviewedSource.enable [
+		"${./sglang-compat/manifest.json}:/sglang-compat-manifest.json:ro"
+		"${./sglang-compat/verify.py}:/sglang-compat-verify.py:ro"
+	];
+	modelVolumes = lib.optionals (cfg.profile == "compact-dflash") [
+		"${../prepare/verify-models.py}:/model-preparation/verify-models.py:ro"
+		"${../prepare/manifest.json}:/model-preparation/manifest.json:ro"
+		"${../prepare/artifact.sha256}:/model-preparation/artifact.sha256:ro"
+		"${../prepare/draft.sha256}:/model-preparation/draft.sha256:ro"
+		"${../prepare/embedding-validation.json}:/model-preparation/embedding-validation.json:ro"
+	];
 	qwenCompose = (pkgs.formats.yaml { }).generate "qwen-inference-compose.yaml" {
 		services = {
 			prepare = {
 				image = sglangImage;
-				entrypoint = [
+				entrypoint = if cfg.reviewedSource.enable then [
+					"bash"
+					"-c"
+					"python3 /sglang-compat-verify.py --manifest /sglang-compat-manifest.json --phase original --root ${lib.escapeShellArg compatManifest.source_root} --image ${lib.escapeShellArg sglangImage} && exec bash /sglang-entrypoint"
+				] else [
 					"bash"
 					"/sglang-entrypoint"
 				];
@@ -30,12 +63,13 @@ let
 					HOME = "/cache";
 					MODELS_DIR = "/models";
 					PREPARE = "1";
+					INFERENCE_PROFILE = cfg.profile;
 				};
 				volumes = [
-					"${stateRoot}/models:/models"
+					"${stateRoot}/models:/models${lib.optionalString (cfg.profile == "compact-dflash") ":ro"}"
 					"${stateRoot}/cache:/cache"
 					"${sglangEntrypoint}:/sglang-entrypoint:ro"
-				];
+				] ++ compatVolumes ++ modelVolumes;
 				deploy.resources.limits = {
 					cpus = "8";
 					memory = "48G";
@@ -43,7 +77,11 @@ let
 			};
 			inference = {
 				image = sglangImage;
-				entrypoint = [
+				entrypoint = if cfg.reviewedSource.enable then [
+					"bash"
+					"-c"
+					"python3 /sglang-compat-verify.py --manifest /sglang-compat-manifest.json --phase replacement --root ${lib.escapeShellArg compatManifest.source_root} --image ${lib.escapeShellArg sglangImage} && exec bash /sglang-entrypoint"
+				] else [
 					"bash"
 					"/sglang-entrypoint"
 				];
@@ -67,6 +105,7 @@ let
 					MODELS_DIR = "/models";
 					PORT = toString port;
 					PREPARE = "0";
+					INFERENCE_PROFILE = cfg.profile;
 					SERVED_MODEL_NAME = cfg.model;
 				};
 				volumes = [
@@ -74,7 +113,9 @@ let
 					"${stateRoot}/cache:/cache"
 					"${stateRoot}/api-key:/app/api_key.txt:ro"
 					"${sglangEntrypoint}:/sglang-entrypoint:ro"
-				];
+				] ++ compatVolumes ++ modelVolumes ++ lib.optionals cfg.reviewedSource.enable (
+					map (module: "${compatOverlay}/${module.installed_path}:${compatManifest.source_root}/${module.installed_path}:ro") compatManifest.modules
+				);
 				deploy.resources = {
 					limits = {
 						cpus = "8";
@@ -185,6 +226,14 @@ in
 	options.workstation.qwenInference = {
 		enable = lib.mkEnableOption "Qwen3.8-27B SGLang inference";
 
+		reviewedSource.enable = lib.mkEnableOption "reviewed SGLang source overlay";
+
+		profile = lib.mkOption {
+			type = lib.types.enum [ "awq" "compact-dflash" ];
+			default = "awq";
+			description = "Explicit model profile; compact-dflash requires reviewed source and preverified local artifacts.";
+		};
+
 		stateRoot = lib.mkOption {
 			type = lib.types.externalPath;
 			default = "/srv/ai/models/qwen3.8-27b";
@@ -212,6 +261,12 @@ in
 	};
 
 	config = lib.mkIf cfg.enable {
+		assertions = [
+			{
+				assertion = cfg.profile != "compact-dflash" || cfg.reviewedSource.enable;
+				message = "Qwen compact-dflash requires workstation.qwenInference.reviewedSource.enable.";
+			}
+		];
 		virtualisation.docker.rootless.daemon.settings.features.cdi = true;
 		systemd.services.qwen-inference-state-dirs = {
 			description = "Create Qwen inference state and credentials";

@@ -1,0 +1,21 @@
+--- a/python/sglang/srt/speculative/dflash_worker_v2.py
++++ b/python/sglang/srt/speculative/dflash_worker_v2.py
+@@ -1548,13 +1548,16 @@
+         mamba_steps_to_track = None
+ 
+         if batch.mamba_track_indices is not None:
++            seq_lens_post_verify = seq_lens_pre_verify + commit_lens.to(
++                seq_lens_pre_verify.dtype
++            )
+             mamba_track_interval = mamba_track_grid(batch.tree_cache.page_size)
+             to_track_mask = (
+                 seq_lens_pre_verify // mamba_track_interval
+-                != batch.seq_lens // mamba_track_interval
++                != seq_lens_post_verify // mamba_track_interval
+             )
+             tracking_point = (
+-                batch.seq_lens // mamba_track_interval * mamba_track_interval
++                seq_lens_post_verify // mamba_track_interval * mamba_track_interval
+             )
+             to_track_ith = torch.clamp(tracking_point - seq_lens_pre_verify - 1, min=0)
+             can_track_mask = to_track_mask & (

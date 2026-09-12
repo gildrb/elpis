@@ -1,0 +1,20 @@
+# Preparation assets only
+
+These files do not change the selected model, entrypoint, Nix service, or image.
+End-to-end quality and deployment approval remain separate gates.
+
+1. **Verify provenance first.** `manifest.json` pins the native image, exact converter and numerical proof. `source.sha256` pins all17 retained fast-source files. The revision labels describe source ancestry; the file hashes identify the assembled source. Before reproduction, verify the converter/proof hashes against manifest.json, require the source directory inventory to be exactly the17 manifest entries, reject symlinks, and run `sha256sum --check` against source.sha256 from the source directory. Do not use a fresh download merely because its model name matches.
+2. **Create an exclusively owned empty work directory.** Preserve retained originals. The exact script reads `/source`, writes `/work/artifact`, and rejects an existing artifact path. Use a fresh private directory per attempt; never mount an active artifact at `/work`. The script uses independent file copies, not hardlinks. Do not delete partial attempts automatically or treat a partial output as qualified.
+3. **Run only with explicit preparation approval.** This CPU conversion reads and hashes roughly17GB and writes a new model copy. Reserve32GiB RAM and adequate disk; it is not a serving command. Use absolute values for REPO, SOURCE and WORK in the documented invocation below. Do not mount API keys or any production writable path.
+4. **Verify completion.** Require exit0 and `/work/validation.json`. Require all output filenames to match artifact.sha256, then check every output file hash from the artifact directory. Compare numerical proof fields to embedding-validation.json: all248320 rows/1271398400 values, same dense tensor hash, same actual tensor-byte accounting, and unchanged source/output inventory. Rehash retained source. A newly reproduced safetensors file may have serialization-level differences across runtime changes; any mismatch is a failed exact reproduction requiring review, not permission to silently update the manifest.
+5. **Publish separately.** Only after validation, expose the immutable artifact through explicit approved configuration. Do not overwrite the current model or automatically alter serving defaults. Output files are0444 and artifact directory0555; owner permissions alone do not establish content authenticity, so retain the manifest checks. Keep conversion logs/proof with the artifact but exclude secrets.
+
+Reproduction invocation (not executed automatically):
+
+```sh
+docker run --rm --runtime runc --network none --read-only --cap-drop ALL --security-opt no-new-privileges:true --cpus 4 --memory 32g -e NVIDIA_VISIBLE_DEVICES=void -e CUDA_VISIBLE_DEVICES= -e PYTHONDONTWRITEBYTECODE=1 --tmpfs /tmp:rw,noexec,nosuid,size=1g --entrypoint python3 -v "$REPO/prepare:/preparation:ro" -v "$SOURCE:/source:ro" -v "$WORK:/work:rw" lmsysorg/sglang@sha256:d6e7288627be8b02be88e4bba38e73f6d50e2826869f753c13a4c4385ab3eda9 /preparation/convert-embedding.py
+```
+
+The original converter is intentionally copied byte-for-byte. It authenticates structure and unchanged source bytes during the run, not expected source revision by itself; step1 is mandatory. Its `validation.json` has source path `/source`, which is the reproducible container mount, not the host provenance path. The qualified host location is recorded in manifest.json.
+
+Only embeddings are converted. The target compressed head and draft compressed fc require the separately reviewed compatibility assets in `nix/sglang-compat/`; numerical embedding validation does not qualify those model execution paths or end-to-end quality. No fc or QKV conversion is included.

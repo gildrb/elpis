@@ -1,0 +1,138 @@
+--- a/python/sglang/srt/layers/logits_processor.py
++++ b/python/sglang/srt/layers/logits_processor.py
+@@ -100,12 +100,62 @@
+ 
+ 
+ def should_apply_lm_head_quant_method(lm_head, quant_method) -> bool:
+-    if (
+-        quant_method is None
+-        or not hasattr(lm_head, "weight")
+-        or not callable(getattr(quant_method, "apply", None))
+-    ):
++    if quant_method is None or not callable(getattr(quant_method, "apply", None)):
+         return False
++
++    if not hasattr(lm_head, "weight"):
++        if type(quant_method).__name__ != "CompressedTensorsLinearMethod":
++            return False
++        from sglang.srt.layers.quantization.compressed_tensors.compressed_tensors import (
++            CompressedTensorsLinearMethod,
++        )
++        from sglang.srt.layers.quantization.compressed_tensors.schemes.compressed_tensors_wNa16 import (
++            CompressedTensorsWNA16,
++        )
++
++        scheme = getattr(lm_head, "scheme", None)
++        if not isinstance(quant_method, CompressedTensorsLinearMethod) or not isinstance(
++            scheme, CompressedTensorsWNA16
++        ):
++            return False
++        # Check the runtime contract after successful Marlin weight processing.
++        weight = getattr(lm_head, "weight_packed", None)
++        scale = getattr(lm_head, "weight_scale", None)
++        workspace = getattr(scheme, "workspace", None)
++        if not (
++            isinstance(weight, torch.Tensor)
++            and isinstance(scale, torch.Tensor)
++            and isinstance(workspace, torch.Tensor)
++        ):
++            return False
++        if (
++            weight.dtype != torch.int32
++            or weight.ndim != 2
++            or weight.numel() == 0
++            or not weight.is_contiguous()
++            or weight.device.type != "cuda"
++            or scale.dtype not in (torch.float16, torch.bfloat16)
++            or scale.ndim != 2
++            or scale.numel() == 0
++            or not scale.is_contiguous()
++            or scale.device != weight.device
++            or workspace.dtype != torch.int32
++            or workspace.ndim != 1
++            or workspace.numel() == 0
++            or workspace.device != weight.device
++            or not isinstance(getattr(scheme, "is_k_full", None), bool)
++        ):
++            return False
++        for attr_name in ("weight_zero_point", "weight_g_idx", "g_idx_sort_indices"):
++            parameter = getattr(lm_head, attr_name, None)
++            if not (
++                isinstance(parameter, torch.Tensor)
++                and parameter.dtype == torch.int32
++                and parameter.device == weight.device
++                and parameter.is_contiguous()
++            ):
++                return False
++        return True
+ 
+     method_name = type(quant_method).__name__
+     if method_name in _UNQUANTIZED_LM_HEAD_METHODS:
+@@ -1181,12 +1231,62 @@
+ 
+ 
+ def should_apply_lm_head_quant_method(lm_head, quant_method) -> bool:
+-    if (
+-        quant_method is None
+-        or not hasattr(lm_head, "weight")
+-        or not callable(getattr(quant_method, "apply", None))
+-    ):
++    if quant_method is None or not callable(getattr(quant_method, "apply", None)):
+         return False
++
++    if not hasattr(lm_head, "weight"):
++        if type(quant_method).__name__ != "CompressedTensorsLinearMethod":
++            return False
++        from sglang.srt.layers.quantization.compressed_tensors.compressed_tensors import (
++            CompressedTensorsLinearMethod,
++        )
++        from sglang.srt.layers.quantization.compressed_tensors.schemes.compressed_tensors_wNa16 import (
++            CompressedTensorsWNA16,
++        )
++
++        scheme = getattr(lm_head, "scheme", None)
++        if not isinstance(quant_method, CompressedTensorsLinearMethod) or not isinstance(
++            scheme, CompressedTensorsWNA16
++        ):
++            return False
++        # Check the runtime contract after successful Marlin weight processing.
++        weight = getattr(lm_head, "weight_packed", None)
++        scale = getattr(lm_head, "weight_scale", None)
++        workspace = getattr(scheme, "workspace", None)
++        if not (
++            isinstance(weight, torch.Tensor)
++            and isinstance(scale, torch.Tensor)
++            and isinstance(workspace, torch.Tensor)
++        ):
++            return False
++        if (
++            weight.dtype != torch.int32
++            or weight.ndim != 2
++            or weight.numel() == 0
++            or not weight.is_contiguous()
++            or weight.device.type != "cuda"
++            or scale.dtype not in (torch.float16, torch.bfloat16)
++            or scale.ndim != 2
++            or scale.numel() == 0
++            or not scale.is_contiguous()
++            or scale.device != weight.device
++            or workspace.dtype != torch.int32
++            or workspace.ndim != 1
++            or workspace.numel() == 0
++            or workspace.device != weight.device
++            or not isinstance(getattr(scheme, "is_k_full", None), bool)
++        ):
++            return False
++        for attr_name in ("weight_zero_point", "weight_g_idx", "g_idx_sort_indices"):
++            parameter = getattr(lm_head, attr_name, None)
++            if not (
++                isinstance(parameter, torch.Tensor)
++                and parameter.dtype == torch.int32
++                and parameter.device == weight.device
++                and parameter.is_contiguous()
++            ):
++                return False
++        return True
+ 
+     method_name = type(quant_method).__name__
+     if method_name in _UNQUANTIZED_LM_HEAD_METHODS:

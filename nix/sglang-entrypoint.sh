@@ -6,6 +6,11 @@ MODELS="${MODELS_DIR:-/models}"
 SERVED_MODEL_NAME="${SERVED_MODEL_NAME:-qwen3.8-27b}"
 API_KEY_FILE="${API_KEY_FILE:-/app/api_key.txt}"
 PREPARE="${PREPARE:-0}"
+INFERENCE_PROFILE="${INFERENCE_PROFILE:-awq}"
+case "$PREPARE" in
+  0 | 1) ;;
+  *) echo "[entrypoint] PREPARE must be 0 or 1." >&2; exit 1 ;;
+esac
 AWQ="${MODELS}/Qwen3.8-27B-AWQ-INT4"
 AWQ_REPO=cyankiwi/Qwen3.8-27B-AWQ-INT4
 AWQ_REVISION=63768c10df38c0395e12ef49edac1bd539eaeeea
@@ -14,6 +19,9 @@ export HF_HUB_DISABLE_TELEMETRY=1
 export DO_NOT_TRACK=1
 export HOME="${HOME:-/cache}"
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+# Bound full-vocabulary input-logprob temporary allocations in both profiles.
+export SGLANG_ENABLE_LOGPROB_CHUNK=1
+export SGLANG_LOGPROB_CHUNK_SIZE=256
 
 download_pinned_model() {
   local repository=$1
@@ -45,7 +53,31 @@ PY
   mv "${revision_file}.tmp" "$revision_file"
 }
 
-download_pinned_model "$AWQ_REPO" "$AWQ_REVISION" "$AWQ" "$AWQ/model.safetensors.index.json"
+speculative_args=()
+case "$INFERENCE_PROFILE" in
+  awq)
+    download_pinned_model "$AWQ_REPO" "$AWQ_REVISION" "$AWQ" "$AWQ/model.safetensors.index.json"
+    model_path="$AWQ"
+    ;;
+  compact-dflash)
+    model_path="${MODELS}/compact-target-rholsc8k/artifact"
+    draft_path="${MODELS}/Qwen3.8-27B-DFlash2-W4A16"
+    # No download, conversion, stamp, or fallback for qualified local artifacts.
+    python3 /model-preparation/verify-models.py --target "$model_path" --draft "$draft_path"
+    speculative_args=(
+      --attention-backend flashinfer
+      --speculative-algorithm DFLASH
+      --speculative-draft-model-path "$draft_path"
+      --speculative-draft-attention-backend flashinfer
+      --speculative-dflash-block-size 8
+      --speculative-draft-window-size 2048
+    )
+    ;;
+  *)
+    echo "[entrypoint] unsupported inference profile: $INFERENCE_PROFILE" >&2
+    exit 1
+    ;;
+esac
 
 if [[ "$PREPARE" == "1" ]]; then
   echo "[entrypoint] pinned SGLang model set is prepared."
@@ -64,9 +96,11 @@ fi
 
 echo "[entrypoint] launching sglang on port $PORT as $SERVED_MODEL_NAME"
 exec python3 -m sglang.launch_server \
-  --model-path "$AWQ" \
+  --model-path "$model_path" \
   --served-model-name "$SERVED_MODEL_NAME" \
   --tp 1 \
+  --context-length 24576 \
+  "${speculative_args[@]}" \
   --max-running-requests 1 \
   --chunked-prefill-size 4096 \
   --mamba-radix-cache-strategy extra_buffer \
