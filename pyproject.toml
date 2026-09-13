@@ -1,0 +1,56 @@
+[project]
+name = "local-inference-benchmarks"
+version = "0.1.0"
+requires-python = ">=3.12,<3.14"
+dependencies = ["reasoning-gym", "httpx==0.28.1", "pydantic==2.12.5"]
+
+[tool.uv]
+package = false
+build-constraint-dependencies = [
+  "setuptools==84.0.0",
+  "wheel==0.48.0",
+  "hatchling==1.32.0",
+  "packaging==26.3",
+  "pathspec==1.1.1",
+  "pluggy==1.6.0",
+  "trove-classifiers==2026.6.1.19",
+]
+
+[tool.uv.sources]
+reasoning-gym = { git = "https://github.com/open-thought/reasoning-gym", rev = "49b07130b3fcd12f2d064bba7c43869543a0e7e7" }
+
+[dependency-groups]
+dev = [
+    "ruff==0.16.7",
+    "ty==0.0.80",
+]
+
+[tool.ruff]
+required-version = "==0.16.7"
+target-version = "py313"
+line-length = 88
+preview = true
+
+[tool.ruff.lint]
+select = ["ALL"]
+# D203 conflicts with D211; D213 conflicts with D212. The remaining rules
+# conflict with Ruff's formatter (see docs/development.md).
+ignore = [
+    "incorrect-blank-line-before-class", "multi-line-summary-second-line",
+    "missing-trailing-comma", "prohibited-trailing-comma", "docstring-tab-indentation", "triple-single-quotes", "indentation-with-invalid-multiple", "indentation-with-invalid-multiple-comment", "over-indented",
+    "bad-quotes-inline-string", "bad-quotes-multiline-string", "bad-quotes-docstring", "avoidable-escaped-quote", "tab-indentation",
+]
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
+docstring-code-format = true
+
+[tool.ty.environment]
+python-version = "3.13"
+
+[tool.ty.rules]
+all = "error"
+
+[tool.ty.terminal]
+error-on-warning = true

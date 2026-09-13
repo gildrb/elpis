@@ -24,7 +24,7 @@
     "Standalone generic Linear-only quantization_config.json preserved unchanged.",
     "Original conversion script is copied byte-for-byte, not reformatted or generalized.",
     "The script checks source stability but callers must authenticate pinned source hashes before invoking.",
-    "Draft inventory pins the retained original W4 config.json and model.safetensors bytes; source_revisions.draft records ancestry, not a fresh download. Runtime qualification covers the current C1/extra_buffer/logprob-chunk256 profile. See ../benchmark-results.json and ../TRIALS.md for current measurements, exact workload scope, and activation state; the embedding proof authenticates the current compact artifact, not global runtime quality."
+    "Draft inventory pins the retained original W4 config.json and model.safetensors bytes; source_revisions.draft records ancestry, not a fresh download. Runtime qualification covers the current C1/extra_buffer/logprob-chunk256 profile. See ../bench/results/native.json and ../docs/qualification.md for current measurements, exact workload scope, and activation state; the embedding proof authenticates the current compact artifact, not global runtime quality."
   ],
   "draft_inventory": "draft.sha256",
   "draft_inventory_sha256": "4d16c8841de796f0d1d637689b21bf1bf8464ab5db1793672b61bdbd1417cfc1",

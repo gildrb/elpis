@@ -1,0 +1,43 @@
+{
+  "schema_version": 1,
+  "status": "baseline_controls_not_passed",
+  "planned": 4,
+  "completed": 4,
+  "passed": 0,
+  "scope": "Bounded synthetic image/video compatibility controls; not broad vision quality or compaction/cache diagnosis.",
+  "fixture_sha256": "8f9f3e26ff637bf2fb6e5a9b850e0812890e00a87ea55073a632c6089b12abe9",
+  "request_settings": {
+    "max_tokens": 128,
+    "temperature": 0,
+    "thinking_requested": false
+  },
+  "cases": [
+    {
+      "id": "single-image",
+      "status": "answer_mismatch"
+    },
+    {
+      "id": "ordered-images",
+      "status": "answer_mismatch"
+    },
+    {
+      "id": "video-order",
+      "status": "request_failure"
+    },
+    {
+      "id": "long-image",
+      "status": "answer_mismatch"
+    }
+  ],
+  "video_failure": {
+    "http_status": 500,
+    "stage": "video preprocessing resize",
+    "exception": "CUDA OutOfMemoryError",
+    "requested_mib": 12,
+    "reported_free_mib": 3.19,
+    "other_process_ownership_established": false,
+    "following_request_completed": true
+  },
+  "cache_scope": "Reported zero cached tokens does not establish independently cold execution.",
+  "parity": "inconclusive; baseline controls failed"
+}

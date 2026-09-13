@@ -1,0 +1,18 @@
+# Allowlist: models, credentials, caches and local state never enter the context.
+**
+!Dockerfile
+!docker/
+!docker/**
+!serve/
+!serve/entrypoint.sh
+!serve/supervisor.py
+!patches/
+!patches/*.py
+!patches/*.patch
+!patches/manifest.json
+!prepare/
+!prepare/verify-models.py
+!prepare/manifest.json
+!prepare/artifact.sha256
+!prepare/draft.sha256
+!prepare/embedding-validation.json

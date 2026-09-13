@@ -1,0 +1,23 @@
+{
+  "schema_version": 1,
+  "scope": "isolated_offline_embedding_shard_only",
+  "image": "lmsysorg/sglang@sha256:d6e7288627be8b02be88e4bba38e73f6d50e2826869f753c13a4c4385ab3eda9",
+  "input_sha256": "55a14ee79d3e5a65a8731d89426f4df477e8bdc7daa7976d41254d8afb9432f0",
+  "output_sha256": "b2e0854ed3be3141ed79f4204f7aa8e616da626d4662017117330490747c2036",
+  "output_bytes": 1291274752,
+  "exit_code": 0,
+  "container_wall_seconds": 35.36095631699982,
+  "cpu_limit": 4,
+  "memory_bytes": 34359738368,
+  "memory_plus_swap_bytes": 34359738368,
+  "network": "none",
+  "gpu": "none",
+  "docker_mode": "rootless",
+  "container_uid": 0,
+  "host_uid": 1000,
+  "source_assembly_performed": false,
+  "compact_conversion_performed": false,
+  "publication_performed": false,
+  "quantization_script_sha256": "69bbe0a11ac8eb90688081624bf436d2f4be6f1f70294723a1af7cd96917da47",
+  "upstream_recipe_sha256": "fe507319ccd380672bacd7c76ec2a0d48fbf1118a49b468e832457218eefe8cf"
+}

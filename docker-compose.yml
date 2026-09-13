@@ -1,0 +1,59 @@
+# One guarded profile. See docs/docker.md. No model download or conversion.
+services:
+  inference:
+    image: qwen-inference:local
+    build: .
+    # Rootless default maps container root to the operator; rootful must set host UID:GID.
+    user: "${QWEN_CONTAINER_USER:-0:0}"
+    restart: unless-stopped
+    stop_grace_period: 60s
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    shm_size: 32gb
+    tmpfs:
+      - /run:rw,noexec,nosuid,size=64m
+      - /tmp:rw,noexec,nosuid,size=2g
+    ports:
+      - "127.0.0.1:18020:18020"
+    environment:
+      HOME: /cache
+      MODELS_DIR: /models
+      API_KEY_FILE: /app/api_key.txt
+      PORT: "18020"
+      SERVED_MODEL_NAME: qwen3.8-27b
+      PREPARE: "0"
+      SGLANG_HEALTH_CHECK_TIMEOUT: "300"
+    volumes:
+      - type: bind
+        source: ${QWEN_STATE_ROOT:?Set QWEN_STATE_ROOT to the existing model state directory}/qwen-inference-launch.lock
+        target: /run/qwen-inference-launch.lock
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ${QWEN_STATE_ROOT:?Set QWEN_STATE_ROOT to the existing model state directory}/models
+        target: /models
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ${QWEN_STATE_ROOT:?Set QWEN_STATE_ROOT to the existing model state directory}/api-key
+        target: /app/api_key.txt
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ${QWEN_STATE_ROOT:?Set QWEN_STATE_ROOT to the existing model state directory}/cache
+        target: /cache
+        bind:
+          create_host_path: false
+    deploy:
+      resources:
+        limits:
+          cpus: "8"
+          memory: 48G
+        reservations:
+          devices:
+            - driver: cdi
+              device_ids: ["nvidia.com/gpu=0"]
+              capabilities: [gpu]

@@ -1,0 +1,165 @@
+{
+  "status": "held_out_evaluation_fixed_8192_token_protocol",
+  "load": "shared live service; no restart/cache flush",
+  "deployment_identity": "sha256:a717c33248f123a9d3c184e460a805a4a9913839edbf70d5da66499ded7c1495",
+  "sources": {
+    "bench/reasoning.py": "cb941c7a0f35ac0eeb31194a453a7ec0764cb9d05a05daa576aff79be615bbc8",
+    "bench/reasoning-plan.json": "ef2991c8c5e36efddc85afee654e1c4ccc6707f24713feda8155465f2dfc1514",
+    "bench/transport.py": "eaec00247a8e828495444f5f25eb428ea6f5e0a13d93ec2bc4eacb0aad8146b5",
+    "pyproject.toml": "ee4bfcf4547abe21a4441d0b1edf0f3af7c0c48d94f9e3c21ef74fedbaa2e1b8",
+    "uv.lock": "c94f3cfdc00bd1122944c0068be721d6935d2ae64cb5330450a99b7c06d595f4"
+  },
+  "summary": {
+    "accuracy": 0.43333333333333335,
+    "commitment_sha256": "500f82f40e67b08cc52ced293076b1acd44256ed35b1c2524c14865ec1297065",
+    "completed": 180,
+    "completion_tokens": 1096845,
+    "concurrency": 1,
+    "conditioning_rejections": {
+      "knights-10-depth3": 0,
+      "knights-6-depth3": 0,
+      "knights-8-depth3": 0,
+      "path-24-long": 168,
+      "path-32-long": 166,
+      "rearc-three-examples": 0,
+      "sokoban-9x9-boxes5": 0,
+      "zebra-6x5": 0,
+      "zebra-7x6": 0
+    },
+    "count_per_stratum": 20,
+    "duplicate_rejections": 0,
+    "end_to_end_output_tokens_per_second": 182.78894457036364,
+    "frozen_sha256": "18f60d088e2df7172c8c964b3b42ee7abc51b99f60bd7c86289ff8ac8a851c51",
+    "full_credit": 78,
+    "generate_only": false,
+    "generation_failures": 0,
+    "item_elapsed_seconds": 6031.190002884006,
+    "max_tokens": 8192,
+    "mode": "evaluation",
+    "model_identity_sha256": "ef207d379d3ee107852c3a8038214cdb7a2d2721e15ca7d3a56f3603a651dd86",
+    "path_oracles": {
+      "path-24-long": {
+        "always_infeasible_accuracy": 0.0,
+        "feasible": 20,
+        "infeasible": 0,
+        "maximum_solution_steps": 40,
+        "minimum_solution_steps": 24
+      },
+      "path-32-long": {
+        "always_infeasible_accuracy": 0.0,
+        "feasible": 20,
+        "infeasible": 0,
+        "maximum_solution_steps": 53,
+        "minimum_solution_steps": 32
+      }
+    },
+    "path_sampling": {
+      "path-24-long": {
+        "candidate_feasible": 204,
+        "candidate_infeasible": 4,
+        "duplicate_rejections": 0,
+        "rejected_too_short": 164
+      },
+      "path-32-long": {
+        "candidate_feasible": 203,
+        "candidate_infeasible": 3,
+        "duplicate_rejections": 0,
+        "rejected_too_short": 163
+      }
+    },
+    "planned": 180,
+    "request_elapsed_seconds": 6000.609077195997,
+    "schema_version": 1,
+    "strata": {
+      "knights-10-depth3": {
+        "api_failure": 0,
+        "correct": 19,
+        "incorrect": 0,
+        "parser_failure": 0,
+        "scorer_failure": 0,
+        "truncation": 1
+      },
+      "knights-6-depth3": {
+        "api_failure": 0,
+        "correct": 20,
+        "incorrect": 0,
+        "parser_failure": 0,
+        "scorer_failure": 0,
+        "truncation": 0
+      },
+      "knights-8-depth3": {
+        "api_failure": 0,
+        "correct": 18,
+        "incorrect": 0,
+        "parser_failure": 0,
+        "scorer_failure": 0,
+        "truncation": 2
+      },
+      "path-24-long": {
+        "api_failure": 0,
+        "correct": 2,
+        "incorrect": 1,
+        "parser_failure": 0,
+        "scorer_failure": 0,
+        "truncation": 17
+      },
+      "path-32-long": {
+        "api_failure": 0,
+        "correct": 0,
+        "incorrect": 0,
+        "parser_failure": 0,
+        "scorer_failure": 0,
+        "truncation": 20
+      },
+      "rearc-three-examples": {
+        "api_failure": 0,
+        "correct": 0,
+        "incorrect": 0,
+        "parser_failure": 0,
+        "scorer_failure": 0,
+        "truncation": 20
+      },
+      "sokoban-9x9-boxes5": {
+        "api_failure": 0,
+        "correct": 2,
+        "incorrect": 5,
+        "parser_failure": 0,
+        "scorer_failure": 0,
+        "truncation": 13
+      },
+      "zebra-6x5": {
+        "api_failure": 0,
+        "correct": 13,
+        "incorrect": 0,
+        "parser_failure": 0,
+        "scorer_failure": 0,
+        "truncation": 7
+      },
+      "zebra-7x6": {
+        "api_failure": 0,
+        "correct": 4,
+        "incorrect": 0,
+        "parser_failure": 0,
+        "scorer_failure": 0,
+        "truncation": 16
+      }
+    },
+    "thinking": "enabled",
+    "threshold": null,
+    "upstream_revision": "49b07130b3fcd12f2d064bba7c43869543a0e7e7",
+    "usage_available_count": 180
+  },
+  "verification": {
+    "method": "read-only private artifact audit; no new inference or full scorer rerun",
+    "generated_items_verified": 360,
+    "selected_results_and_checkpoints_verified": 180,
+    "original_pilot_bank_prompts_excluded": 36,
+    "prompt_overlap_with_original_pilot": 0,
+    "duplicate_prompts": 0,
+    "conditioned_path_oracles_independently_bfs_checked": 80,
+    "pilot_frozen_sha256": "f00e048d6945694088dfec75fa075652a9f2da7c32c3425c673224573e186fed",
+    "frozen_before_first_response": true,
+    "producer_protocol": "Original cb941c7a runner and 8192-token thinking-enabled pilot protocol; not the newer bank-comparison runner."
+  },
+  "interpretation": "78/180 full credit (43.3%); 96 length truncations at 8192 and 6 incorrect completed answers. Zero API/parser/scorer/generation failures. All 180 remain in the denominator. Held-out under the fixed nine-stratum plan, not a passing quality threshold or contamination-free task-family claim. The 32768-token 13/18 result is a separate post-hoc same-pilot-bank comparison. Shared-load HTTP throughput is not decode speed."
+}

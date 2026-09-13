@@ -1,0 +1,123 @@
+{
+  "schema_version": 2,
+  "upstream_revision": "49b07130b3fcd12f2d064bba7c43869543a0e7e7",
+  "scoring": "upstream-full-credit-only",
+  "threshold": null,
+  "strata": [
+    {
+      "id": "knights-6-depth3",
+      "dataset": "knights_knaves",
+      "parameters": {
+        "n_people": 6,
+        "depth_constraint": 3,
+        "width_constraint": 3
+      },
+      "acceptance": "all"
+    },
+    {
+      "id": "knights-8-depth3",
+      "dataset": "knights_knaves",
+      "parameters": {
+        "n_people": 8,
+        "depth_constraint": 3,
+        "width_constraint": 3
+      },
+      "acceptance": "all"
+    },
+    {
+      "id": "knights-10-depth3",
+      "dataset": "knights_knaves",
+      "parameters": {
+        "n_people": 10,
+        "depth_constraint": 3,
+        "width_constraint": 3
+      },
+      "acceptance": "all"
+    },
+    {
+      "id": "zebra-6x5",
+      "dataset": "zebra_puzzles",
+      "parameters": {
+        "num_people": 6,
+        "num_characteristics": 5
+      },
+      "acceptance": "all"
+    },
+    {
+      "id": "zebra-7x6",
+      "dataset": "zebra_puzzles",
+      "parameters": {
+        "num_people": 7,
+        "num_characteristics": 6
+      },
+      "acceptance": "all"
+    },
+    {
+      "id": "path-24-long",
+      "dataset": "shortest_path",
+      "parameters": {
+        "min_rows": 24,
+        "max_rows": 24,
+        "min_cols": 24,
+        "max_cols": 24,
+        "p_blocked": 0.2
+      },
+      "acceptance": "feasible_min_side"
+    },
+    {
+      "id": "path-32-long",
+      "dataset": "shortest_path",
+      "parameters": {
+        "min_rows": 32,
+        "max_rows": 32,
+        "min_cols": 32,
+        "max_cols": 32,
+        "p_blocked": 0.2
+      },
+      "acceptance": "feasible_min_side"
+    },
+    {
+      "id": "sokoban-9x9-boxes5",
+      "dataset": "sokoban",
+      "parameters": {
+        "min_w": 9,
+        "max_w": 9,
+        "min_h": 9,
+        "max_h": 9,
+        "min_boxes": 5,
+        "max_boxes": 5,
+        "max_depth": 120
+      },
+      "acceptance": "all"
+    },
+    {
+      "id": "rearc-three-examples",
+      "dataset": "rearc",
+      "parameters": {
+        "min_examples": 3,
+        "max_examples": 3,
+        "diff_lb": 0.3,
+        "diff_ub": 0.7,
+        "rng_difficulty_ranges": [
+          [
+            0.3,
+            0.7
+          ]
+        ],
+        "rng_difficulty_weights": [
+          1.0
+        ],
+        "pso_difficulty_ranges": [
+          [
+            0.15,
+            0.6
+          ]
+        ],
+        "pso_difficulty_weights": [
+          1.0
+        ]
+      },
+      "acceptance": "all"
+    }
+  ]
+}

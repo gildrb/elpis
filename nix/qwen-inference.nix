@@ -3,6 +3,7 @@
 	lib,
 	pkgs,
 	username,
+	utils,
 	...
 }:
 
@@ -12,129 +13,16 @@ let
 	stateRootParent = builtins.dirOf stateRoot;
 	port = cfg.port;
 	requiredMountPoint = cfg.requiredMountPoint;
-	sglangImage = "lmsysorg/sglang:v0.5.19@sha256:d6e7288627be8b02be88e4bba38e73f6d50e2826869f753c13a4c4385ab3eda9";
-	sglangEntrypoint = ./sglang-entrypoint.sh;
-	compatManifest = builtins.fromJSON (builtins.readFile ./sglang-compat/manifest.json);
-	compatSource = pkgs.fetchzip {
-		url = "${compatManifest.source.repository}/archive/${compatManifest.source.revision}.tar.gz";
-		hash = compatManifest.source.nar_hash;
-	};
-	# Select reviewed Python files only; never build or replace the runtime package.
-	compatOverlay = pkgs.runCommand "sglang-reviewed-source-overlay" {
-		nativeBuildInputs = [ pkgs.python3 ];
-	} ''
-		python3 ${./sglang-compat/verify.py} \
-			--manifest ${./sglang-compat/manifest.json} \
-			--phase replacement --root ${compatSource}/python/sglang/srt \
-			--image ${lib.escapeShellArg sglangImage}
-		mkdir -p "$out/layers" "$out/models" "$out/speculative"
-		${lib.concatMapStringsSep "\n" (module: ''
-			cp ${compatSource}/python/sglang/srt/${module.installed_path} "$out/${module.installed_path}"
-		'') compatManifest.modules}
+	# A failed condition would skip the unit without applying Restart=.
+	mountPreflight = lib.optionalString (requiredMountPoint != null) ''
+		if ! ${pkgs.util-linux}/bin/mountpoint -q -- ${lib.escapeShellArg requiredMountPoint}; then
+			echo "Required Qwen filesystem is not mounted; retrying later." >&2
+			exit 1
+		fi
 	'';
-	compatVolumes = [
-		"${./sglang-compat/manifest.json}:/sglang-compat-manifest.json:ro"
-		"${./sglang-compat/verify.py}:/sglang-compat-verify.py:ro"
-	];
-	modelVolumes = [
-		"${../prepare/verify-models.py}:/model-preparation/verify-models.py:ro"
-		"${../prepare/manifest.json}:/model-preparation/manifest.json:ro"
-		"${../prepare/artifact.sha256}:/model-preparation/artifact.sha256:ro"
-		"${../prepare/draft.sha256}:/model-preparation/draft.sha256:ro"
-		"${../prepare/embedding-validation.json}:/model-preparation/embedding-validation.json:ro"
-	];
-	qwenCompose = (pkgs.formats.yaml { }).generate "qwen-inference-compose.yaml" {
-		services = {
-			prepare = {
-				image = sglangImage;
-				entrypoint = [
-					"bash"
-					"-c"
-					"python3 /sglang-compat-verify.py --manifest /sglang-compat-manifest.json --phase original --root ${lib.escapeShellArg compatManifest.source_root} --image ${lib.escapeShellArg sglangImage} && exec bash /sglang-entrypoint"
-				];
-				command = [ ];
-				pull_policy = "missing";
-				environment = {
-					DO_NOT_TRACK = "1";
-					HF_HUB_DISABLE_TELEMETRY = "1";
-					HOME = "/cache";
-					MODELS_DIR = "/models";
-					PREPARE = "1";
-				};
-				volumes = [
-					"${stateRoot}/models:/models:ro"
-					"${stateRoot}/cache:/cache"
-					"${sglangEntrypoint}:/sglang-entrypoint:ro"
-				] ++ compatVolumes ++ modelVolumes;
-				deploy.resources.limits = {
-					cpus = "8";
-					memory = "48G";
-				};
-			};
-			inference = {
-				image = sglangImage;
-				entrypoint = [
-					"bash"
-					"-c"
-					"python3 /sglang-compat-verify.py --manifest /sglang-compat-manifest.json --phase replacement --root ${lib.escapeShellArg compatManifest.source_root} --image ${lib.escapeShellArg sglangImage} && exec bash /sglang-entrypoint"
-				];
-				command = [ ];
-				pull_policy = "missing";
-				stop_grace_period = "60s";
-				shm_size = "32gb";
-				read_only = true;
-				cap_drop = [ "ALL" ];
-				security_opt = [ "no-new-privileges:true" ];
-				tmpfs = [
-					"/run:rw,noexec,nosuid,size=64m"
-					"/tmp:rw,noexec,nosuid,size=2g"
-				];
-				ports = [ "127.0.0.1:${toString port}:${toString port}" ];
-				environment = {
-					API_KEY_FILE = "/app/api_key.txt";
-					DO_NOT_TRACK = "1";
-					HF_HUB_DISABLE_TELEMETRY = "1";
-					HOME = "/cache";
-					MODELS_DIR = "/models";
-					PORT = toString port;
-					PREPARE = "0";
-					SERVED_MODEL_NAME = cfg.model;
-				};
-				volumes = [
-					"${stateRoot}/models:/models:ro"
-					"${stateRoot}/cache:/cache"
-					"${stateRoot}/api-key:/app/api_key.txt:ro"
-					"${sglangEntrypoint}:/sglang-entrypoint:ro"
-				] ++ compatVolumes ++ modelVolumes ++ (
-					map (module: "${compatOverlay}/${module.installed_path}:${compatManifest.source_root}/${module.installed_path}:ro") compatManifest.modules
-				);
-				deploy.resources = {
-					limits = {
-						cpus = "8";
-						memory = "48G";
-					};
-					reservations.devices = [
-						{
-							driver = "cdi";
-							device_ids = [ "nvidia.com/gpu=0" ];
-							capabilities = [ "gpu" ];
-						}
-					];
-				};
-				healthcheck = {
-					test = [
-						"CMD"
-						"python3"
-						"-c"
-						"import urllib.request; urllib.request.urlopen('http://127.0.0.1:${toString port}/health')"
-					];
-					interval = "30s";
-					timeout = "5s";
-					retries = 3;
-					start_period = "20m";
-				};
-			};
-		};
+	qwenCompose = import ./compose.nix {
+		inherit pkgs lib stateRoot port;
+		model = cfg.model;
 	};
 	qwenPrepare = pkgs.writeShellApplication {
 		name = "qwen-inference-prepare";
@@ -143,6 +31,7 @@ let
 			pkgs.openssl
 		];
 		text = ''
+      ${mountPreflight}
       for _ in {1..60}; do
         [[ -d ${lib.escapeShellArg stateRoot} ]] && break
         sleep 1
@@ -168,26 +57,9 @@ let
       chmod 0600 ${lib.escapeShellArg "${stateRoot}/api-key"}
     '';
 	};
-	qwenWaitGpu = pkgs.writeShellApplication {
-		name = "qwen-inference-wait-gpu";
-		runtimeInputs = [
-			pkgs.coreutils
-			(config.hardware.nvidia.package.bin or config.hardware.nvidia.package)
-		];
-		text = ''
-      for _ in {1..60}; do
-        used="$(nvidia-smi --query-gpu=memory.used --format=csv,noheader,nounits | head -n 1)"
-        if [[ "$used" =~ ^[0-9]+$ ]] && (( used < 1000 )); then
-          exit 0
-        fi
-        sleep 2
-      done
-      echo "GPU memory did not become free before Qwen startup." >&2
-      exit 1
-    '';
-	};
 	ensureQwenDirs = ''
     set -euo pipefail
+    ${mountPreflight}
     owner=${lib.escapeShellArg username}
     for path in ${lib.escapeShellArg stateRoot} \
       ${lib.escapeShellArg "${stateRoot}/models"} \
@@ -234,15 +106,20 @@ in
 		virtualisation.docker.rootless.daemon.settings.features.cdi = true;
 		systemd.services.qwen-inference-state-dirs = {
 			description = "Create Qwen inference state and credentials";
-			wantedBy = [ "multi-user.target" ];
+			# If a required mount starts late, request directory provisioning again.
+			wantedBy = [ "multi-user.target" ] ++ lib.optional (requiredMountPoint != null)
+				"${utils.escapeSystemdPath requiredMountPoint}.mount";
+			startLimitIntervalSec = 0;
 			after = [ "local-fs.target" ];
 			before = [
 				"systemd-user-sessions.service"
 			];
-			unitConfig.RequiresMountsFor = [ stateRoot ];
+			unitConfig.RequiresMountsFor = [ stateRoot ] ++ lib.optional (requiredMountPoint != null) requiredMountPoint;
 			serviceConfig = {
 				Type = "oneshot";
 				RemainAfterExit = true;
+				Restart = "on-failure";
+				RestartSec = "20s";
 			};
 			script = ''
 				${ensureQwenDirs}
@@ -254,29 +131,27 @@ in
 			description = "Qwen3.8-27B SGLang inference";
 			wantedBy = [ "default.target" ];
 			wants = [ "docker.service" ];
-			startLimitBurst = 3;
-			startLimitIntervalSec = 600;
+			# Retry transient failures indefinitely; every attempt reruns all guards.
+			startLimitIntervalSec = 0;
 			after = [
 				"docker.service"
 				"network-online.target"
 			];
-			unitConfig = lib.optionalAttrs (requiredMountPoint != null) {
-				ConditionPathIsMountPoint = requiredMountPoint;
-			};
+			path = [ pkgs.docker-compose (config.hardware.nvidia.package.bin or config.hardware.nvidia.package) ];
 			serviceConfig = {
-				Type = "simple";
+				Type = "notify";
+				NotifyAccess = "all";
+				KillMode = "mixed";
 				Environment = [
-					"COMPOSE_PROJECT_NAME=qwen-inference"
 					"DOCKER_HOST=unix://%t/docker.sock"
+					"QWEN_COMPOSE=${qwenCompose}"
+					"QWEN_SUPERVISOR=${../serve/supervisor.py}"
 				];
-				ExecStartPre = [
-					"${qwenPrepare}/bin/qwen-inference-prepare"
-					"${pkgs.docker-compose}/bin/docker-compose -f ${qwenCompose} run --rm prepare"
-					"${qwenWaitGpu}/bin/qwen-inference-wait-gpu"
-				];
-				ExecStart = "${pkgs.docker-compose}/bin/docker-compose -f ${qwenCompose} up --abort-on-container-exit --remove-orphans inference";
-				ExecStop = "${pkgs.docker-compose}/bin/docker-compose -f ${qwenCompose} down";
+				ExecStartPre = [ "${qwenPrepare}/bin/qwen-inference-prepare" ];
+				ExecStart = "${pkgs.python3}/bin/python3 ${../serve/launch.py} --state-root ${lib.escapeShellArg stateRoot} --port ${toString port} --systemd";
+				# Only the lock-owning launcher may clean up the Compose project.
 				Restart = "always";
+				RestartPreventExitStatus = [ 78 ];
 				RestartSec = "20s";
 				TimeoutStartSec = "45min";
 				TimeoutStopSec = "2min";

@@ -1,0 +1,1039 @@
+--- a/kernels/ops/speculative/dspark/dspark_accept.py
++++ b/kernels/ops/speculative/dspark/dspark_accept.py
+@@ -90,7 +90,11 @@
+ ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+     bs = candidates.shape[0]
+     device = candidates.device
+-    if not sampling_info.need_top_k_sampling and not sampling_info.need_top_p_sampling:
++    if (
++        not sampling_info.need_top_k_sampling
++        and not sampling_info.need_top_p_sampling
++        and not sampling_info.need_min_p_sampling
++    ):
+         target_probs = SoftmaxTemp.execute(
+             logits=target_logits,
+             temperatures=sampling_info.temperatures,
+@@ -119,7 +123,9 @@
+     )
+     uniform_samples = torch.rand((bs, gamma), dtype=torch.float32, device=device)
+     uniform_samples_final = torch.rand((bs,), dtype=torch.float32, device=device)
++    status = torch.empty((bs,), dtype=torch.int32, device=device)
+     chain_speculative_sampling_triton(
++        status=status,
+         predicts=predicts,
+         accept_index=accept_index,
+         accept_token_num=accept_token_num,
+--- a/kernels/ops/speculative/reject_sampling.py
++++ b/kernels/ops/speculative/reject_sampling.py
+@@ -1,3 +1,4 @@
++import torch
+ import triton
+ import triton.language as tl
+ 
+@@ -14,6 +15,7 @@
+     UniformSamplesFinal,
+     TargetProbs,
+     DraftProbs,
++    Status,
+     # Strides
+     stride_cand_b,
+     stride_cand_s,
+@@ -33,101 +35,118 @@
+     BLOCK_V: tl.constexpr,
+ ):
+     pid = tl.program_id(0)
+-    cur_prob_row = 0
+-
+-    cand_ptr_base = Candidates + pid * stride_cand_b
+-    idx_ptr_base = RetriveIndex + pid * stride_idx_b
+-    uni_ptr_base = UniformSamples + pid * stride_uni_b
+-
+-    root_global_idx = tl.load(idx_ptr_base + 0 * stride_idx_s)
+-    tl.store(AcceptIndex + pid * stride_idx_b + 0 * stride_idx_s, root_global_idx)
+-    last_accepted_global_idx = root_global_idx
+-
+-    num_accept = 0
+-
+-    # Verification Loop
+-    step = 1
+-    continue_verifying = 1
+-
+-    while (step < NUM_SLOTS) and (continue_verifying == 1):
+-        draft_token = tl.load(cand_ptr_base + step * stride_cand_s)
+-
+-        offset_prob = (
+-            (pid * stride_tp_b)
+-            + (cur_prob_row * stride_tp_s)
+-            + (draft_token * stride_tp_v)
+-        )
+-        offset_draft = (
+-            (pid * stride_dp_b)
+-            + (cur_prob_row * stride_dp_s)
+-            + (draft_token * stride_dp_v)
+-        )
+-
+-        p = tl.load(TargetProbs + offset_prob)
+-        q = tl.load(DraftProbs + offset_draft)
+-
+-        coin = tl.load(uni_ptr_base + (step - 1) * stride_uni_s)
+-
+-        if coin * q < p:
+-            num_accept += 1
+-            cur_prob_row = step
+-            tl.store(Predicts + last_accepted_global_idx, draft_token)
+-
+-            curr_global_idx = tl.load(idx_ptr_base + step * stride_idx_s)
+-            tl.store(
+-                AcceptIndex + pid * stride_idx_b + num_accept * stride_idx_s,
+-                curr_global_idx,
++    # Status is reset by every launch, not inherited from graph replay/cache.
++    # Bits: 1 p, 2 q, 4 impossible sampled q, 8 mass, 16 RNG,
++    #       32 CDF miss/nonfinite, 64 candidate outside vocabulary.
++    # FP32 probability row mass tolerance: abs(sum - 1) <= 1e-4.
++    # Validate only; never renormalize a malformed p or selector q.
++    status = 0
++    for row in range(NUM_SLOTS):
++        p_mass = 0.0
++        q_mass = 0.0
++        for v_start in range(0, VOCAB_SIZE, BLOCK_V):
++            offs = v_start + tl.arange(0, BLOCK_V)
++            mask = offs < VOCAB_SIZE
++            p_row = tl.load(TargetProbs + pid * stride_tp_b + row * stride_tp_s + offs * stride_tp_v, mask, 0.0)
++            bad_p = mask & ~((p_row >= 0.0) & (p_row < float("inf")))
++            if tl.sum(bad_p.to(tl.int32), axis=0) > 0:
++                status = status | 1
++            p_mass += tl.sum(p_row, axis=0)
++            if row < NUM_SLOTS - 1:
++                q_row = tl.load(DraftProbs + pid * stride_dp_b + row * stride_dp_s + offs * stride_dp_v, mask, 0.0)
++                bad_q = mask & ~((q_row >= 0.0) & (q_row < float("inf")))
++                if tl.sum(bad_q.to(tl.int32), axis=0) > 0:
++                    status = status | 2
++                q_mass += tl.sum(q_row, axis=0)
++        if ~((p_mass > 0.0) & (p_mass < float("inf"))) | (tl.abs(p_mass - 1.0) > 1.0e-4):
++            status = status | 8
++        if row < NUM_SLOTS - 1:
++            if ~((q_mass > 0.0) & (q_mass < float("inf"))) | (tl.abs(q_mass - 1.0) > 1.0e-4):
++                status = status | 8
++            token = tl.load(Candidates + pid * stride_cand_b + (row + 1) * stride_cand_s)
++            valid_token = (token >= 0) & (token < VOCAB_SIZE)
++            if valid_token == 0:
++                status = status | 64
++            sampled_q = tl.load(DraftProbs + pid * stride_dp_b + row * stride_dp_s + token * stride_dp_v, valid_token, 0.0)
++            if sampled_q <= 0.0:
++                status = status | 4
++            coin = tl.load(UniformSamples + pid * stride_uni_b + row * stride_uni_s)
++            if ~((coin >= 0.0) & (coin < 1.0)):
++                status = status | 16
++        global_idx = tl.load(RetriveIndex + pid * stride_idx_b + row * stride_idx_s)
++        tl.store(Predicts + global_idx, -1)
++    final_coin = tl.load(UniformSamplesFinal + pid)
++    if ~((final_coin >= 0.0) & (final_coin < 1.0)):
++        status = status | 16
++    tl.store(AcceptTokenNum + pid, 0)
++    if status == 0:
++        cur_prob_row = 0
++
++        cand_ptr_base = Candidates + pid * stride_cand_b
++        idx_ptr_base = RetriveIndex + pid * stride_idx_b
++        uni_ptr_base = UniformSamples + pid * stride_uni_b
++
++        root_global_idx = tl.load(idx_ptr_base + 0 * stride_idx_s)
++        tl.store(AcceptIndex + pid * stride_idx_b + 0 * stride_idx_s, root_global_idx)
++        last_accepted_global_idx = root_global_idx
++
++        num_accept = 0
++
++        # Verification Loop
++        step = 1
++        continue_verifying = 1
++
++        while (step < NUM_SLOTS) and (continue_verifying == 1):
++            draft_token = tl.load(cand_ptr_base + step * stride_cand_s)
++
++            offset_prob = (
++                (pid * stride_tp_b)
++                + (cur_prob_row * stride_tp_s)
++                + (draft_token * stride_tp_v)
+             )
+-            last_accepted_global_idx = curr_global_idx
+-
+-            step += 1
+-        else:
+-            continue_verifying = 0
+-
+-    tl.store(AcceptTokenNum + pid, num_accept)
+-
+-    # Final Sampling
+-    all_drafts_accepted = continue_verifying
+-    coin_final = tl.load(UniformSamplesFinal + pid)
+-    norm_sum = 0.0
+-
+-    tp_base_ptr = TargetProbs + (pid * stride_tp_b) + (cur_prob_row * stride_tp_s)
+-    # DraftProbs has only num_steps rows (TargetProbs has num_steps + 1). When
+-    # all drafts are accepted cur_prob_row == num_steps is out of bounds for
+-    # DraftProbs, but the all-accepted branch samples pure target p and never
+-    # dereferences this pointer; on rejection cur_prob_row <= num_steps - 1.
+-    dp_base_ptr_safe = DraftProbs + (pid * stride_dp_b) + (cur_prob_row * stride_dp_s)
+-
+-    # Pass 1: Sum
+-    for v_start in range(0, VOCAB_SIZE, BLOCK_V):
+-        v_offsets = v_start + tl.arange(0, BLOCK_V)
+-        mask = v_offsets < VOCAB_SIZE
+-
+-        p_ptr = tp_base_ptr + v_offsets * stride_tp_v
+-        p_val = tl.load(p_ptr, mask=mask, other=0.0)
+-
+-        if all_drafts_accepted:
+-            val = p_val
+-        else:
+-            q_ptr = dp_base_ptr_safe + v_offsets * stride_dp_v
+-            q_val = tl.load(q_ptr, mask=mask, other=0.0)
+-            # Treat NaN q (degenerate draft rows) as 0: residual falls back to p.
+-            q_val = tl.where(q_val == q_val, q_val, 0.0)
+-            diff = p_val - q_val
+-            val = tl.where(diff > 0.0, diff, 0.0)
+-
+-        norm_sum += tl.sum(val)
+-
+-    # Pass 2: CDF. Degenerate residual (norm_sum == 0, i.e. p == q everywhere on
+-    # rejection) leaves the cumsum at 0 <= target_u, so final_token falls back to
+-    # VOCAB_SIZE - 1; acceptable since this case is numerically near-impossible.
+-    target_u = coin_final * norm_sum
+-    cum_sum = 0.0
+-    final_token = VOCAB_SIZE - 1
+-    found = 0
+-
+-    for v_start in range(0, VOCAB_SIZE, BLOCK_V):
+-        if found == 0:
++            offset_draft = (
++                (pid * stride_dp_b)
++                + (cur_prob_row * stride_dp_s)
++                + (draft_token * stride_dp_v)
++            )
++
++            p = tl.load(TargetProbs + offset_prob)
++            q = tl.load(DraftProbs + offset_draft)
++
++            coin = tl.load(uni_ptr_base + (step - 1) * stride_uni_s)
++
++            if coin * q < p:
++                num_accept += 1
++                cur_prob_row = step
++                tl.store(Predicts + last_accepted_global_idx, draft_token)
++
++                curr_global_idx = tl.load(idx_ptr_base + step * stride_idx_s)
++                tl.store(
++                    AcceptIndex + pid * stride_idx_b + num_accept * stride_idx_s,
++                    curr_global_idx,
++                )
++                last_accepted_global_idx = curr_global_idx
++
++                step += 1
++            else:
++                continue_verifying = 0
++
++        tl.store(AcceptTokenNum + pid, num_accept)
++
++        # Final Sampling
++        all_drafts_accepted = continue_verifying
++        coin_final = tl.load(UniformSamplesFinal + pid)
++        norm_sum = 0.0
++
++        tp_base_ptr = TargetProbs + (pid * stride_tp_b) + (cur_prob_row * stride_tp_s)
++        # DraftProbs has only num_steps rows (TargetProbs has num_steps + 1). When
++        # all drafts are accepted cur_prob_row == num_steps is out of bounds for
++        # DraftProbs, but the all-accepted branch samples pure target p and never
++        # dereferences this pointer; on rejection cur_prob_row <= num_steps - 1.
++        dp_base_ptr_safe = DraftProbs + (pid * stride_dp_b) + (cur_prob_row * stride_dp_s)
++
++        # Pass 1: Sum
++        for v_start in range(0, VOCAB_SIZE, BLOCK_V):
+             v_offsets = v_start + tl.arange(0, BLOCK_V)
+             mask = v_offsets < VOCAB_SIZE
+ 
+@@ -139,25 +158,59 @@
+             else:
+                 q_ptr = dp_base_ptr_safe + v_offsets * stride_dp_v
+                 q_val = tl.load(q_ptr, mask=mask, other=0.0)
+-                # Same NaN-q guard as pass 1.
+-                q_val = tl.where(q_val == q_val, q_val, 0.0)
+                 diff = p_val - q_val
+                 val = tl.where(diff > 0.0, diff, 0.0)
+ 
+-            block_cumsum = tl.cumsum(val, axis=0)
+-            total_cumsum = cum_sum + block_cumsum
+-
+-            candidates_mask = total_cumsum > target_u
+-            has_match = tl.max(candidates_mask, axis=0)
+-
+-            if has_match:
+-                match_idx = tl.argmax(candidates_mask.to(tl.int32), axis=0)
+-                final_token = v_start + match_idx
+-                found = 1
+-
+-            cum_sum += tl.sum(val)
+-
+-    tl.store(Predicts + last_accepted_global_idx, final_token)
++            norm_sum += tl.sum(val)
++
++        # Strict residual normalizer: never substitute p or a vocabulary endpoint.
++        if ~((norm_sum > 0.0) & (norm_sum < float("inf"))):
++            status = status | 8
++        target_u = coin_final * norm_sum
++        cum_sum = 0.0
++        final_token = -1
++        found = 0
++
++        for v_start in range(0, VOCAB_SIZE, BLOCK_V):
++            if (found == 0) & (status == 0):
++                v_offsets = v_start + tl.arange(0, BLOCK_V)
++                mask = v_offsets < VOCAB_SIZE
++
++                p_ptr = tp_base_ptr + v_offsets * stride_tp_v
++                p_val = tl.load(p_ptr, mask=mask, other=0.0)
++
++                if all_drafts_accepted:
++                    val = p_val
++                else:
++                    q_ptr = dp_base_ptr_safe + v_offsets * stride_dp_v
++                    q_val = tl.load(q_ptr, mask=mask, other=0.0)
++                    diff = p_val - q_val
++                    val = tl.where(diff > 0.0, diff, 0.0)
++
++                block_cumsum = tl.cumsum(val, axis=0)
++                total_cumsum = cum_sum + block_cumsum
++
++                if tl.sum((mask & ~((total_cumsum >= 0.0) & (total_cumsum < float("inf")))).to(tl.int32), axis=0) > 0:
++                    status = status | 32
++                candidates_mask = mask & (total_cumsum > target_u) & (val > 0.0)
++                has_match = tl.max(candidates_mask, axis=0)
++
++                if has_match:
++                    match_idx = tl.argmax(candidates_mask.to(tl.int32), axis=0)
++                    final_token = v_start + match_idx
++                    found = 1
++
++                cum_sum += tl.sum(val)
++
++        if found == 0:
++            status = status | 32
++        tl.store(Predicts + last_accepted_global_idx, tl.where(status == 0, final_token, -1))
++    if status != 0:
++        tl.store(AcceptTokenNum + pid, 0)
++        for row in range(NUM_SLOTS):
++            global_idx = tl.load(RetriveIndex + pid * stride_idx_b + row * stride_idx_s)
++            tl.store(Predicts + global_idx, -1)
++    tl.store(Status + pid, status)
+ 
+ 
+ def chain_speculative_sampling_triton(
+@@ -175,10 +228,80 @@
+     threshold_single,
+     threshold_acc,
+     deterministic,  # not used
++    status: torch.Tensor | None = None,
+ ):
++    # Kernel pointers have a strict eager contract. Validate small metadata on
++    # host; probability value validation stays tiled in the kernel.
++    integer_inputs = (
++        ("predicts", predicts),
++        ("accept_index", accept_index),
++        ("accept_token_num", accept_token_num),
++        ("candidates", candidates),
++        ("retrive_index", retrive_index),
++    )
++    probability_inputs = (
++        ("target_probs", target_probs),
++        ("draft_probs", draft_probs),
++        ("uniform_samples", uniform_samples),
++        ("uniform_samples_for_final_sampling", uniform_samples_for_final_sampling),
++    )
++    for name, tensor in integer_inputs:
++        if not isinstance(tensor, torch.Tensor) or tensor.dtype not in (torch.int32, torch.int64):
++            raise ValueError(f"{name} must be an int32/int64 tensor")
++    for name, tensor in probability_inputs:
++        if not isinstance(tensor, torch.Tensor) or tensor.dtype != torch.float32:
++            raise ValueError(f"{name} must be a float32 tensor")
++    for name, tensor in integer_inputs + probability_inputs:
++        if tensor.device != candidates.device or tensor.layout != torch.strided:
++            raise ValueError(f"{name} must be strided on candidates device")
++    if candidates.is_cuda and torch.cuda.is_current_stream_capturing():
++        raise RuntimeError("Rejection status requires an eager host gate; capture is forbidden")
++    if candidates.ndim != 2 or target_probs.ndim != 3 or draft_probs.ndim != 3:
++        raise ValueError("chain rejection requires candidates [B,S] and probabilities [B,S,V]")
+     batch_size, num_slots = candidates.shape
+     vocab_size = target_probs.shape[-1]
+-
++    if batch_size < 1 or num_slots < 1 or vocab_size < 1 or target_probs.shape[:2] != (batch_size, num_slots) or (draft_probs.shape[0] != batch_size or draft_probs.shape[1] < num_slots - 1 or draft_probs.shape[2] != vocab_size):
++        raise ValueError("chain rejection probability dimensions do not match candidates")
++    if predicts.ndim != 1 or predicts.numel() < batch_size * num_slots:
++        raise ValueError("predicts must be a flat buffer holding every chain slot")
++    if accept_index.shape != (batch_size, num_slots) or retrive_index.shape != (batch_size, num_slots) or accept_token_num.shape != (batch_size,):
++        raise ValueError("accept/retrieval metadata dimensions do not match candidates")
++    for name, tensor in (("predicts", predicts), ("accept_index", accept_index), ("accept_token_num", accept_token_num), ("retrive_index", retrive_index)):
++        if not tensor.is_contiguous():
++            raise ValueError(f"{name} must be contiguous")
++    if uniform_samples.ndim != 2 or uniform_samples.shape[0] != batch_size or uniform_samples.shape[1] < num_slots - 1:
++        raise ValueError("uniform_samples must contain B rows and at least S-1 coins")
++    if uniform_samples_for_final_sampling.shape != (batch_size,) or not uniform_samples_for_final_sampling.is_contiguous():
++        raise ValueError("final uniforms must be contiguous [B]")
++    # Next-token/sibling pointers are compatibility arguments, never read by
++    # this chain kernel. Accept None, or well-formed integer chain metadata.
++    for name, tensor in (("retrive_next_token", retrive_next_token), ("retrive_next_sibling", retrive_next_sibling)):
++        if tensor is not None:
++            if not isinstance(tensor, torch.Tensor) or tensor.dtype not in (torch.int32, torch.int64) or tensor.device != candidates.device or tensor.layout != torch.strided or tensor.shape != (batch_size, num_slots):
++                raise ValueError(f"{name} must be None or integer [B,S] on candidates device")
++    if status is None:
++        status = torch.empty(batch_size, dtype=torch.int32, device=candidates.device)
++    if not isinstance(status, torch.Tensor) or status.shape != (batch_size,) or status.dtype != torch.int32 or status.device != candidates.device or status.layout != torch.strided or not status.is_contiguous():
++        raise ValueError("status must be contiguous per-request int32 on candidates device")
++    # Output buffers must not share storage with inputs or one another. This
++    # conservative rule also rejects disjoint views of one allocation.
++    writes = (("predicts", predicts), ("accept_index", accept_index), ("accept_token_num", accept_token_num), ("status", status))
++    reads = (("candidates", candidates), ("retrive_index", retrive_index)) + probability_inputs
++    for position, (name, tensor) in enumerate(writes):
++        storage = tensor.untyped_storage().data_ptr()
++        for other_name, other in writes[position + 1:] + reads:
++            if storage == other.untyped_storage().data_ptr():
++                raise ValueError(f"{name} must not share storage with {other_name}")
++    retrieve_cpu = retrive_index.cpu()
++    indices = retrieve_cpu.reshape(-1).tolist()
++    if min(indices) < 0 or max(indices) >= predicts.numel() or len(set(indices)) != len(indices):
++        raise ValueError("retrive_index must contain unique in-bounds predicts offsets")
++    if predicts.dtype == torch.int32 and vocab_size > torch.iinfo(torch.int32).max:
++        raise ValueError("vocabulary does not fit predicts dtype")
++    if accept_index.dtype == torch.int32 and max(indices) > torch.iinfo(torch.int32).max:
++        raise ValueError("retrieval offsets do not fit accept_index dtype")
++    if accept_token_num.dtype == torch.int32 and num_slots - 1 > torch.iinfo(torch.int32).max:
++        raise ValueError("chain length does not fit accept_token_num dtype")
+     grid = (batch_size,)
+     speculative_sampling_classic_kernel[grid](
+         predicts,
+@@ -190,6 +313,7 @@
+         uniform_samples_for_final_sampling,
+         target_probs,
+         draft_probs,
++        status,
+         candidates.stride(0),
+         candidates.stride(1),
+         retrive_index.stride(0),
+@@ -206,3 +330,7 @@
+         VOCAB_SIZE=vocab_size,
+         BLOCK_V=4096,
+     )
++    # This synchronization is mandatory: no caller can consume failed output.
++    status_cpu = status.cpu()
++    if bool(torch.any(status_cpu != 0).item()):
++        raise RuntimeError(f"Speculative rejection failed closed; per-request status={status_cpu.tolist()}")
+--- a/srt/sampling/sampling_batch_info.py
++++ b/srt/sampling/sampling_batch_info.py
+@@ -16,6 +16,8 @@
+ from sglang.srt.sampling.custom_logit_processor import CustomLogitProcessor
+ from sglang.srt.sampling.penaltylib.repetition_penalty import apply_scaling_penalties
+ from sglang.srt.sampling.sampling_params import TOP_K_ALL
++from sglang.srt.sampling.penaltylib.orchestrator import _BatchedPenalizer
++from sglang.srt.sampling.verify_penalties import snapshot_verify_penalties
+ from sglang.srt.utils.common import is_pin_memory_available
+ 
+ if TYPE_CHECKING:
+@@ -61,6 +63,8 @@
+     acc_scaling_penalties: Optional[torch.Tensor] = (
+         None  # Used in the overlap mode for repetition penalty
+     )
++
++    verify_penalty_snapshot: Optional[tuple[_BatchedPenalizer, ...]] = None
+ 
+     # Whether any request has custom logit processor
+     has_custom_logit_processor: bool = False
+@@ -475,7 +479,15 @@
+     def copy_for_forward(self):
+         # Accumulate the penalty into a pre-allocated buffer to get rid of the dependency of `penalizer_orchestrator` later
+         self.update_penalties()
+-        return dataclasses.replace(self, penalizer_orchestrator=None)
++        orchestrator = self.penalizer_orchestrator
++        snapshot = (
++            snapshot_verify_penalties(tuple(orchestrator.penalizers.values()))
++            if orchestrator is not None and orchestrator.is_required
++            else ()
++        )
++        return dataclasses.replace(
++            self, penalizer_orchestrator=None, verify_penalty_snapshot=snapshot
++        )
+ 
+ 
+ def merge_bias_tensor(
+--- /dev/null
++++ b/srt/sampling/verify_penalties.py
+@@ -0,0 +1,40 @@
++from __future__ import annotations
++
++from copy import copy
++
++import torch
++
++from sglang.srt.sampling.penaltylib import (
++    BatchedFrequencyPenalizer,
++    BatchedMinNewTokensPenalizer,
++    BatchedPresencePenalizer,
++    BatchedRepetitionPenalizer,
++)
++from sglang.srt.sampling.penaltylib.orchestrator import _BatchedPenalizer
++
++
++def snapshot_verify_penalties(
++    penalizers: tuple[_BatchedPenalizer, ...],
++) -> tuple[_BatchedPenalizer, ...]:
++    """Own mutable tensors without copying requests or their history.
++
++    The detached objects only use cumulate_output_tokens/apply, neither of
++    which reads the weak orchestrator reference in these four stock classes.
++    """
++    snapshots: list[_BatchedPenalizer] = []
++    for penalty in penalizers:
++        if not penalty.is_prepared():
++            continue
++        detached = copy(penalty)
++        if isinstance(detached, BatchedFrequencyPenalizer):
++            detached.cumulated_frequency_penalties = detached.cumulated_frequency_penalties.clone()
++        elif isinstance(detached, BatchedPresencePenalizer):
++            detached.cumulated_presence_penalties = detached.cumulated_presence_penalties.clone()
++        elif isinstance(detached, BatchedRepetitionPenalizer):
++            detached.cumulated_repetition_penalties = detached.cumulated_repetition_penalties.clone()
++        elif isinstance(detached, BatchedMinNewTokensPenalizer):
++            detached.len_output_tokens = detached.len_output_tokens.clone()
++        else:
++            raise TypeError(f"Unsupported verify penalizer: {type(detached).__name__}")
++        snapshots.append(detached)
++    return tuple(snapshots)
+--- a/srt/speculative/dflash_utils.py
++++ b/srt/speculative/dflash_utils.py
+@@ -1,6 +1,7 @@
+ from __future__ import annotations
+ 
+ import logging
++import math
+ from collections.abc import Sequence
+ from dataclasses import dataclass
+ from numbers import Integral
+@@ -17,7 +18,10 @@
+     top_p_normalize_probs_torch,
+ )
+ from sglang.srt.managers.schedule_batch import Req
+-from sglang.srt.runtime_context import get_spec
++from sglang.srt.constrained.base_grammar_backend import GrammarMask
++from sglang.srt.sampling.sampling_batch_info import SamplingBatchInfo
++from sglang.srt.sampling.verify_penalties import snapshot_verify_penalties
++from sglang.srt.runtime_context import get_exec, get_spec
+ from sglang.srt.speculative.spec_utils import sample_simulated_acc_len
+ from sglang.srt.utils import is_cuda, is_hip, is_musa, is_npu
+ 
+@@ -208,90 +212,87 @@
+ def apply_dflash_verify_logits_adjustments(
+     *,
+     next_token_logits: torch.Tensor,
+-    sampling_info: Any,
++    sampling_info: SamplingBatchInfo | None,
+     draft_token_num: int,
++    candidates: torch.Tensor,
++    grammar_mask: GrammarMask | None = None,
+ ) -> None:
+-    """Apply sampling-time logit adjustments for DFlash verify in place.
+-
+-    This keeps v1 and v2 verify semantics aligned while letting overlap scheduling
+-    use the cheaper precomputed `acc_linear_penalties` path instead of allocating a
+-    repeated `[bs * draft_token_num, vocab]` penalty tensor every step.
++    """Replay private penalty state, then grammar, bias, and custom processors.
++
++    Candidate zero is the pending anchor already in committed penalty state.
++    Row j sees only candidate positions 1..j. No live state is mutated.
+     """
+     if sampling_info is None:
++        if grammar_mask is not None:
++            grammar_mask.apply(next_token_logits)
+         return
+-    if next_token_logits.ndim != 2:
+-        raise ValueError(
+-            "next_token_logits must be 2D, "
+-            f"got shape={tuple(next_token_logits.shape)}."
+-        )
+-    if draft_token_num <= 0:
+-        raise ValueError(f"draft_token_num must be positive, got {draft_token_num}.")
+-
+     bs = len(sampling_info)
+-    if next_token_logits.shape[0] != bs * draft_token_num:
+-        raise ValueError(
+-            "next_token_logits row count mismatch for DFlash verify adjustments. "
+-            f"Expected {bs * draft_token_num}, got {next_token_logits.shape[0]}."
+-        )
+-
++    if draft_token_num <= 0 or next_token_logits.ndim != 2:
++        raise ValueError("Verify logits must be 2D and draft_token_num positive")
++    if next_token_logits.shape != (bs * draft_token_num, sampling_info.vocab_size):
++        raise ValueError("Verify logits shape does not match batch, block, and vocabulary")
++    if candidates.shape != (bs, draft_token_num):
++        raise ValueError("Verify candidates must have shape [batch, block]")
++    if candidates.dtype not in (torch.int32, torch.int64):
++        raise TypeError("Verify candidates must be int32 or int64")
++    if candidates.device != next_token_logits.device:
++        raise ValueError("Verify candidates and logits must share a device")
++    # Bounds are checked before scatter, including at the GPU boundary.
++    if bool(torch.any((candidates < 0) | (candidates >= sampling_info.vocab_size)).item()):
++        raise ValueError("Verify candidate outside vocabulary")
++    orchestrator = sampling_info.penalizer_orchestrator
++    overlap = orchestrator is None
++    if overlap:
++        source = sampling_info.verify_penalty_snapshot
++        if source is None:
++            if (sampling_info.acc_additive_penalties is not None
++                    or sampling_info.acc_scaling_penalties is not None):
++                raise RuntimeError("Verify needs a chronological penalty snapshot, not only accumulated penalties")
++            source = ()
++    else:
++        source = tuple(orchestrator.penalizers.values())
++    penalties = snapshot_verify_penalties(source)
++    # Match AR overlap's additive-then-scaling path; live AR retains its actual
++    # orchestrator iteration order. Keep at most one [batch, vocab] additive row.
++    additive = (
++        torch.empty((bs, sampling_info.vocab_size), dtype=torch.float32,
++                    device=next_token_logits.device)
++        if overlap and len(penalties) > 0 else None
++    )
++    for j in range(draft_token_num):
++        logits = next_token_logits[j::draft_token_num]
++        if j > 0:
++            token_ids = candidates[:, j].to(dtype=torch.int64)
++            for penalty in penalties:
++                penalty.cumulate_output_tokens(token_ids)
++        if additive is not None:
++            additive.zero_()
++            for penalty in penalties:
++                if not penalty.is_multiplicative:
++                    penalty.apply(additive)
++            logits.add_(additive)
++            for penalty in penalties:
++                if penalty.is_multiplicative:
++                    penalty.apply(logits)
++        else:
++            for penalty in penalties:
++                penalty.apply(logits)
++    if len(penalties) > 0:
++        del penalty
++    del penalties, additive
++    # A verify-specific mask already contains every chain row; never also apply
++    # the single AR-row sampling_info mask.
++    mask = grammar_mask if grammar_mask is not None else sampling_info.grammar_mask
++    if mask is not None:
++        mask.apply(next_token_logits)
++    if sampling_info.logit_bias is not None:
++        for j in range(draft_token_num):
++            next_token_logits[j::draft_token_num].add_(sampling_info.logit_bias)
+     if sampling_info.has_custom_logit_processor:
+-        apply_custom_logit_processor(
+-            next_token_logits,
+-            sampling_info,
+-            num_tokens_in_batch=draft_token_num,
+-        )
+-
+-    acc_linear_penalties = getattr(sampling_info, "acc_linear_penalties", None)
+-    penalizer = getattr(sampling_info, "penalizer_orchestrator", None)
+-    grammar_mask = getattr(sampling_info, "grammar_mask", None)
+-    logit_bias = getattr(sampling_info, "logit_bias", None)
+-
+-    logits_3d: Optional[torch.Tensor] = None
+-
+-    def get_logits_3d() -> torch.Tensor:
+-        nonlocal logits_3d
+-        if logits_3d is None:
+-            logits_3d = next_token_logits.reshape(bs, draft_token_num, -1)
+-        return logits_3d
+-
+-    # Dense fallback only when we need live penalizer application or a vocab mask.
+-    # In overlap scheduling the common path is `acc_linear_penalties`, which can be
+-    # broadcast over the verify block without materializing a repeated buffer.
+-    if (
+-        penalizer is not None and penalizer.is_required and acc_linear_penalties is None
+-    ) or grammar_mask is not None:
+-        linear_penalty = torch.zeros(
+-            (bs, next_token_logits.shape[1]),
+-            dtype=torch.float32,
+-            device=next_token_logits.device,
+-        )
+-        sampling_info.apply_logits_bias(linear_penalty)
+-        get_logits_3d().add_(
+-            linear_penalty[:, None, :].to(dtype=next_token_logits.dtype)
+-        )
+-        return
+-
+-    if acc_linear_penalties is not None:
+-        if (
+-            acc_linear_penalties.device != next_token_logits.device
+-            or acc_linear_penalties.dtype != next_token_logits.dtype
+-        ):
+-            acc_linear_penalties = acc_linear_penalties.to(
+-                device=next_token_logits.device,
+-                dtype=next_token_logits.dtype,
++        for j in range(draft_token_num):
++            apply_custom_logit_processor(
++                next_token_logits[j::draft_token_num], sampling_info
+             )
+-        get_logits_3d().add_(acc_linear_penalties[:, None, :])
+-
+-    if logit_bias is not None:
+-        if (
+-            logit_bias.device != next_token_logits.device
+-            or logit_bias.dtype != next_token_logits.dtype
+-        ):
+-            logit_bias = logit_bias.to(
+-                device=next_token_logits.device,
+-                dtype=next_token_logits.dtype,
+-            )
+-        get_logits_3d().add_(logit_bias[:, None, :])
+ 
+ 
+ def _get_or_create_chain_verify_buffers(
+@@ -1001,74 +1002,155 @@
+     return correct_len, bonus
+ 
+ 
++def _filter_dflash_probability_row(
++    probabilities: torch.Tensor,
++    *,
++    top_k: int,
++    top_p: float,
++    min_p: float,
++    sampling_backend: str,
++    sequential_min_p: bool,
++    use_sparse_topk: bool,
++) -> torch.Tensor:
++    """Filter one original-softmax row without changing verify logits.
++
++    FlashInfer joint sampling includes the entire equal-probability cutoff
++    group: its predicate counts/sums strictly greater probabilities. PyTorch
++    instead keeps sorted ranks and uses its inclusive cumulative boundary.
++    Only one vocabulary row of sort scratch is live, even at TOP_K_ALL.
++    """
++    vocab_size = probabilities.numel()
++    if sampling_backend == "flashinfer" and sequential_min_p and probabilities.is_cuda:
++        # Match AR's min-p branch, including its intermediate renormalizations.
++        row = probabilities.unsqueeze(0)
++        ks = torch.tensor([top_k], dtype=torch.int32, device=row.device)
++        ps = torch.tensor([top_p], dtype=torch.float32, device=row.device)
++        row = _dflash_top_k_renorm_prob(row, ks)
++        row = _dflash_top_p_renorm_prob(row, ps)
++        row.masked_fill_(row < row.amax(dim=-1, keepdim=True) * min_p, 0.0)
++        return row.squeeze(0)
++
++    if sampling_backend == "flashinfer":
++        # topk provides cutoff VALUES, never a token-id support mask. Including
++        # ties from the original row is necessary to match FlashInfer's pivot
++        # law even if the cutoff tie extends beyond the selected k indices.
++        count = top_k if use_sparse_topk else vocab_size
++        values = torch.topk(probabilities, k=count, sorted=True).values
++        cutoff_k = values[top_k - 1]
++        if sequential_min_p:
++            # CPU semantic reference for AR's sequential min-p branch.
++            filtered = probabilities.masked_fill(probabilities < cutoff_k, 0.0)
++            filtered.div_(filtered.sum())
++            values = torch.topk(filtered, k=count, sorted=True).values
++        else:
++            filtered = probabilities.clone()
++        if top_p < 1.0:
++            cumulative = values.cumsum(dim=-1)
++            before = torch.cat((values.new_zeros(1), cumulative[:-1]))
++            cutoff_p = values.masked_fill(before >= top_p, float("inf")).amin()
++            filtered.masked_fill_(filtered < cutoff_p, 0.0)
++        if not sequential_min_p:
++            filtered.masked_fill_(probabilities < cutoff_k, 0.0)
++        if min_p > 0.0:
++            filtered.masked_fill_(filtered < filtered.amax() * min_p, 0.0)
++        return filtered
++
++    # Same operations/order as the stock PyTorch AR sampler, including ties.
++    values, indices = probabilities.sort(descending=True)
++    cumulative = values.cumsum(dim=-1)
++    values[top_k:] = 0.0
++    values.masked_fill_((cumulative - values) > top_p, 0.0)
++    if min_p > 0.0:
++        values.masked_fill_(values < values[0] * min_p, 0.0)
++    return torch.zeros_like(probabilities).scatter_(0, indices, values)
++
++
+ def build_dflash_verify_target_probs(
+     *,
+     next_token_logits: torch.Tensor,
+-    sampling_info: Any,
++    sampling_info: SamplingBatchInfo,
+     draft_token_num: int,
+     bs: int,
+     max_top_k: Optional[int] = None,
+     uniform_top_k_value: Optional[int] = None,
+     use_sparse_topk: bool = True,
++    sampling_backend: Optional[str] = None,
+ ) -> torch.Tensor:
+-    device = next_token_logits.device
+-    need_top_k = bool(getattr(sampling_info, "need_top_k_sampling", True))
+-    need_top_p = bool(getattr(sampling_info, "need_top_p_sampling", False))
+-    expanded_temperature = torch.repeat_interleave(
+-        sampling_info.temperatures, draft_token_num, dim=0
+-    )
+-    scaled_logits = next_token_logits / expanded_temperature
+-    sparse_topk_applied = False
+-
+-    if use_sparse_topk and need_top_k:
+-        repeated_top_ks = torch.repeat_interleave(
+-            sampling_info.top_ks, draft_token_num, dim=0
+-        ).to(dtype=torch.int64)
+-        vocab_size = int(scaled_logits.shape[-1])
+-        repeated_top_ks.clamp_(min=1, max=vocab_size)
+-        if max_top_k is None:
+-            max_top_k = int(repeated_top_ks.max().item())
+-        else:
+-            max_top_k = int(max_top_k)
+-        if max_top_k < 1:
+-            max_top_k = 1
+-        elif max_top_k > vocab_size:
+-            max_top_k = vocab_size
+-
+-        # Sparse exact path for top-k/top-p (top-k-first semantics), then scatter to dense.
+-        if 0 < max_top_k < vocab_size:
+-            topk_logits, topk_indices = torch.topk(scaled_logits, k=max_top_k, dim=-1)
+-            if uniform_top_k_value is None or int(uniform_top_k_value) != max_top_k:
+-                ranks = torch.arange(max_top_k, device=device, dtype=torch.int64)[
+-                    None, :
+-                ]
+-                valid = ranks < repeated_top_ks.unsqueeze(1)
+-                topk_logits = topk_logits.masked_fill(~valid, float("-inf"))
+-
+-            topk_probs = F.softmax(topk_logits, dim=-1)
+-            if need_top_p:
+-                repeated_top_ps = torch.repeat_interleave(
+-                    sampling_info.top_ps, draft_token_num, dim=0
++    """Construct the selected AR backend's target law with bounded row scratch.
++
++    The full original FP32 softmax precedes filtering. A top-k-local softmax
++    changes joint top-p support. Verify logits remain unmodified because the
++    later speculative logprob processor still needs the adjusted raw logits.
++    max_top_k/uniform_top_k_value remain compatibility hints, never semantic
++    limits; each request's actual top_k is authoritative.
++    """
++    if bs <= 0 or draft_token_num <= 0:
++        raise ValueError("DFLASH verification needs positive batch and block sizes")
++    if next_token_logits.ndim != 2 or next_token_logits.shape[0] != bs * draft_token_num:
++        raise ValueError("DFLASH verify logits must have batch * block rows")
++    vocab_size = int(next_token_logits.shape[-1])
++    if vocab_size <= 0 or len(sampling_info) != bs:
++        raise ValueError("DFLASH verification has invalid vocabulary or sampling batch")
++    for hint in (max_top_k, uniform_top_k_value):
++        if hint is not None and hint <= 0:
++            raise ValueError("DFLASH top-k hints must be positive when supplied")
++    if sampling_backend is None:
++        sampling_backend = (
++            get_exec().kernel.sampling_backend
++            if next_token_logits.is_cuda
++            else "pytorch"
++        )
++    if sampling_backend not in {"flashinfer", "pytorch"}:
++        raise ValueError(f"Unsupported AR sampling backend: {sampling_backend}")
++    temperatures = sampling_info.temperatures.reshape(-1)
++    top_ks = sampling_info.top_ks.reshape(-1)
++    top_ps = sampling_info.top_ps.reshape(-1)
++    min_ps = sampling_info.min_ps.reshape(-1)
++    if any(t.numel() != bs for t in (temperatures, top_ks, top_ps, min_ps)):
++        raise ValueError("DFLASH sampler tensors must contain one value per request")
++    target_probs = torch.empty_like(next_token_logits, dtype=torch.float32)
++    for request_index in range(bs):
++        temperature = float(temperatures[request_index].item())
++        top_k = int(top_ks[request_index].item())
++        top_p = float(top_ps[request_index].item())
++        min_p = float(min_ps[request_index].item())
++        if not math.isfinite(temperature) or temperature <= 0.0:
++            raise ValueError("DFLASH sampling temperature must be finite and positive")
++        if top_k == -1:
++            top_k = vocab_size
++        elif top_k <= 0:
++            raise ValueError("DFLASH top_k must be positive or -1 (whole vocabulary)")
++        top_k = min(top_k, vocab_size)
++        if not math.isfinite(top_p) or not 0.0 < top_p <= 1.0:
++            raise ValueError("DFLASH top_p must be finite and in (0, 1]")
++        if not math.isfinite(min_p) or not 0.0 <= min_p <= 1.0:
++            raise ValueError("DFLASH min_p must be finite and in [0, 1]")
++        for position in range(draft_token_num):
++            row_index = request_index * draft_token_num + position
++            # No in-place temperature scaling of the shared logits buffer.
++            probabilities = F.softmax(
++                next_token_logits[row_index].float() / temperature, dim=-1
++            )
++            if not bool(torch.isfinite(probabilities).all().item()):
++                raise ValueError("DFLASH target logits produced an invalid distribution")
++            if (top_k < vocab_size or top_p < 1.0 or min_p > 0.0
++                    or sampling_info.need_min_p_sampling):
++                probabilities = _filter_dflash_probability_row(
++                    probabilities,
++                    top_k=top_k,
++                    top_p=top_p,
++                    min_p=min_p,
++                    sampling_backend=sampling_backend,
++                    sequential_min_p=sampling_info.need_min_p_sampling,
++                    use_sparse_topk=use_sparse_topk,
+                 )
+-                topk_probs = _dflash_top_p_renorm_prob(topk_probs, repeated_top_ps)
+-
+-            target_probs = torch.zeros_like(scaled_logits, dtype=topk_probs.dtype)
+-            target_probs.scatter_(1, topk_indices, topk_probs)
+-            sparse_topk_applied = True
+-
+-    if not sparse_topk_applied:
+-        target_probs = F.softmax(scaled_logits, dim=-1)
+-        if need_top_k:
+-            target_probs = _dflash_top_k_renorm_prob(
+-                target_probs,
+-                torch.repeat_interleave(sampling_info.top_ks, draft_token_num, dim=0),
+-            )
+-        if need_top_p:
+-            target_probs = _dflash_top_p_renorm_prob(
+-                target_probs,
+-                torch.repeat_interleave(sampling_info.top_ps, draft_token_num, dim=0),
+-            )
+-    return target_probs.view(bs, draft_token_num, -1).contiguous()
++                total = probabilities.sum()
++                if not bool(torch.isfinite(total).item()) or float(total.item()) <= 0.0:
++                    raise ValueError("DFLASH sampling filters removed all target probability mass")
++                probabilities.div_(total)
++            target_probs[row_index].copy_(probabilities)
++            del probabilities
++    return target_probs.view(bs, draft_token_num, vocab_size)
+ 
+ 
+ def validate_dflash_request(req: Req, enable_overlap: bool) -> Optional[str]:
+--- a/srt/speculative/dflash_worker_v2.py
++++ b/srt/speculative/dflash_worker_v2.py
+@@ -2180,10 +2180,10 @@
+                 next_token_logits=logits_output.next_token_logits,
+                 sampling_info=sampling_info,
+                 draft_token_num=int(self.block_size),
+-            )
+-
+-        # Constrain every chain position before accept picks from it.
+-        if grammar_mask is not None:
++                candidates=draft_tokens,
++                grammar_mask=grammar_mask,
++            )
++        elif grammar_mask is not None:
+             grammar_mask.apply(logits_output.next_token_logits)
+ 
+         candidates = draft_tokens
+--- a/srt/speculative/dspark_components/dspark_planner.py
++++ b/srt/speculative/dspark_components/dspark_planner.py
+@@ -20,6 +20,8 @@
+     ResolvedConfidence,
+ )
+ from sglang.srt.managers.schedule_batch import ScheduleBatch
++from sglang.srt.sampling.sampling_batch_info import SamplingBatchInfo
++from sglang.srt.constrained.base_grammar_backend import GrammarMask
+ from sglang.srt.runtime_context import get_disagg, get_parallel, get_schedule, get_spec
+ from sglang.srt.speculative.dflash_info_v2 import DFlashDraftInputV2
+ from sglang.srt.speculative.dflash_utils import apply_dflash_verify_logits_adjustments
+@@ -853,15 +855,17 @@
+ def apply_logits_adjustments_strided(
+     *,
+     next_token_logits: torch.Tensor,
+-    sampling_info,
++    sampling_info: SamplingBatchInfo | None,
+     verify_num_draft_tokens: int,
++    candidates: torch.Tensor,
++    grammar_mask: GrammarMask | None = None,
+ ) -> None:
+-    if sampling_info is None:
+-        return
+     apply_dflash_verify_logits_adjustments(
+         next_token_logits=next_token_logits,
+         sampling_info=sampling_info,
+         draft_token_num=verify_num_draft_tokens,
++        candidates=candidates,
++        grammar_mask=grammar_mask,
+     )
+ 
+ 
+--- a/srt/speculative/dspark_components/dspark_verify.py
++++ b/srt/speculative/dspark_components/dspark_verify.py
+@@ -38,7 +38,6 @@
+ )
+ from sglang.srt.speculative.dspark_components.dspark_planner import (
+     VerifyWindow,
+-    apply_logits_adjustments_strided,
+ )
+ from sglang.srt.speculative.ragged_verify import RaggedVerifyLayout
+ from sglang.srt.speculative.spec_tp_sync import SpecTpSync, SpecTpSyncSite
+@@ -61,7 +60,11 @@
+         return True
+     if sampling_info.has_custom_logit_processor:
+         return False
+-    if getattr(sampling_info, "acc_linear_penalties", None) is not None:
++    if sampling_info.acc_additive_penalties is not None:
++        return False
++    if sampling_info.acc_scaling_penalties is not None:
++        return False
++    if sampling_info.verify_penalty_snapshot is not None and len(sampling_info.verify_penalty_snapshot) > 0:
+         return False
+     penalizer = getattr(sampling_info, "penalizer_orchestrator", None)
+     if penalizer is not None and penalizer.is_required:
+@@ -279,13 +282,6 @@
+             seq_lens_sum_backup=seq_lens_sum_backup,
+         )
+ 
+-        if sampling_info is not None:
+-            apply_dflash_verify_logits_adjustments(
+-                next_token_logits=result.logits_output.next_token_logits,
+-                sampling_info=sampling_info,
+-                draft_token_num=verify_w,
+-            )
+-
+         return result
+ 
+     def _forward_prepared_verify(
+@@ -456,11 +452,6 @@
+                 fill_value=0.0,
+                 verify_num_draft_tokens=stride,
+             )
+-        apply_logits_adjustments_strided(
+-            next_token_logits=strided_logits,
+-            sampling_info=sampling_info,
+-            verify_num_draft_tokens=stride,
+-        )
+         logits_output.next_token_logits = strided_logits
+         logits_output.hidden_states = hidden_strided
+         return target_verify, hidden_strided
+--- a/srt/speculative/dspark_components/dspark_worker_v2.py
++++ b/srt/speculative/dspark_components/dspark_worker_v2.py
+@@ -59,6 +59,7 @@
+ )
+ from sglang.srt.speculative.dspark_components.dspark_planner import (
+     DSparkVerifyPlanner,
++    apply_logits_adjustments_strided,
+     alloc_verify_window,
+     dp_global_verify_tier_num_tokens,
+     idle_ragged_layout,
+@@ -735,6 +736,7 @@
+                 hidden_strided = None
+         logits_output = target_verify.logits_output
+         can_run_cuda_graph = target_verify.can_run_cuda_graph
++        grammar_mask = None
+         if batch.has_grammar:
+             # run_compact scatters its rows back to (bs * chain_len), so the mask
+             # lines up with the logits on both verify paths.
+@@ -745,8 +747,13 @@
+                 device=logits_output.next_token_logits.device,
+                 barrier=grammar_barrier,
+             )
+-            if grammar_mask is not None:
+-                grammar_mask.apply(logits_output.next_token_logits)
++        apply_logits_adjustments_strided(
++            next_token_logits=logits_output.next_token_logits,
++            sampling_info=sampling_info,
++            verify_num_draft_tokens=self.verify_num_draft_tokens,
++            candidates=verify_ids_2d,
++            grammar_mask=grammar_mask,
++        )
+ 
+         epilogue = self._verify_executor.verify_epilogue
+         folded_accept = fold_eligible and run_compact and can_run_cuda_graph

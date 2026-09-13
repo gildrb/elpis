@@ -12,10 +12,10 @@ import hashlib
 import json
 import math
 import os
-from pathlib import Path
 import re
 import stat
 import sys
+from pathlib import Path
 from typing import TypeAlias
 
 JSON: TypeAlias = "None | bool | int | float | str | list[JSON] | dict[str, JSON]"

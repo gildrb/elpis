@@ -1,0 +1,11 @@
+--- a/python/sglang/srt/managers/mm_utils.py
++++ b/python/sglang/srt/managers/mm_utils.py
+@@ -583,7 +583,7 @@
+             input_ids.shape[0],
+             input_embedding.embedding_dim * num_deepstack_embeddings,
+             device=input_ids.device,
+-            dtype=input_embedding.weight.dtype,
++            dtype=input_embeds.dtype,
+         )
+         other_info["input_deepstack_embeds"] = input_deepstack_embeds
+ 

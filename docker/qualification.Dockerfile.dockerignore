@@ -1,0 +1,16 @@
+# This allowlist overrides the root ignore file only for the qualification build.
+**
+!docker/
+!docker/qualification.Dockerfile
+!patches/
+!patches/chain.py
+!patches/LICENSE.sglang
+!patches/packed-head-predicate.patch
+!patches/quant-aware-fc.patch
+!patches/mamba-cache-prefix.patch
+!patches/base/
+!patches/base/**
+!patches/qualification/
+!patches/qualification/**
+**/__pycache__/
+**/*.pyc

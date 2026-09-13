@@ -1,0 +1,57 @@
+{
+  "schema_version": 1,
+  "status": "reviewed_runtime",
+  "quality_status": "scoped_final_profile_checks_recorded_not_activated",
+  "base_image": "lmsysorg/sglang@sha256:d6e7288627be8b02be88e4bba38e73f6d50e2826869f753c13a4c4385ab3eda9",
+  "source_root": "/sgl-workspace/sglang/python/sglang/srt",
+  "runtime": {
+    "sglang": "0.5.19",
+    "torch": "2.13.0+cu130",
+    "triton": "3.7.1"
+  },
+  "modules": [
+    {
+      "file": "logits_processor.py",
+      "installed_path": "layers/logits_processor.py",
+      "original_sha256": "05cfcbd9c1439af751a22fb03490a2e5a252ea4bf5ad5febdae1eb87dce1e9a7",
+      "replacement_sha256": "b3f6649541db592898754f37c7f395b1f29475f2fb690df91a541c18c77937b3",
+      "patch": "packed-head-predicate.patch",
+      "patch_sha256": "4142de575ae778793864eb964b55e30abd1ef601d2ebe0aecb88b8446154518f",
+      "purpose": "Admit successfully loaded compressed WNA16 target head to DFlash2 selector while preserving existing head guards."
+    },
+    {
+      "file": "dflash.py",
+      "installed_path": "models/dflash.py",
+      "original_sha256": "bfdef4b6ebe54f0ed88e04295310102c88b4b85798604f736cdb46320f3929ef",
+      "replacement_sha256": "56ceed99827f7142580820da1e3951f1f7bdf72256d6072a7b3a3d94915171a3",
+      "patch": "quant-aware-fc.patch",
+      "patch_sha256": "f5dca6a51f996d39d30eb86df68fce3d1eb956e8879aa6fd65b11af20e5ca1e9",
+      "purpose": "Load selector draft context projection through quant-aware ReplicatedLinear and fail on missing initial fc parameters."
+    },
+    {
+      "file": "dflash_worker_v2.py",
+      "installed_path": "speculative/dflash_worker_v2.py",
+      "original_sha256": "75d064936b54db9062de80e9d1c2a25ae01d5fc69b0885e9c265b25c8ce3a399",
+      "replacement_sha256": "bc0bd9318a91bd28c396a2e6832d1451a15934c18fb32d5c6db2ebd24995df83",
+      "patch": "mamba-cache-prefix.patch",
+      "patch_sha256": "a9592305b414b0b4faefb93eeb306bd62579249990bb834cea926d0787289404",
+      "purpose": "Track the Mamba checkpoint boundary from committed post-verify sequence lengths; qualified generated-prefix cache consistency only, not universal quality parity."
+    }
+  ],
+  "qualification": {
+    "independent_source_review": "approved_for_single_full_initial_DefaultModelLoader",
+    "native_cpu_source_and_ast_validation": "passed_exit_0",
+    "parent_gpu_evidence": "Current SGLang C1/extra_buffer/logprob-chunk256 runtime qualification covers native chat decode, prefill/TTFT, sampled power draw, GSM8K, cold long-input logprobs, generated-prefix cache consistency, warm cache reuse, and context-boundary behavior. See ../bench/results/native.json and ../docs/qualification.md for current measurements, exact workload scope, and activation state. No universal quality parity or OOM guarantee.",
+    "restrictions": [
+      "No hot reload or partial weight loading.",
+      "No permissive source rebase; original and replacement hashes must match.",
+      "The enabled service requires reviewed runtime sources; deployment activation is separate."
+    ]
+  },
+  "source": {
+    "repository": "https://github.com/gildrb/sglang",
+    "revision": "3958762c198b7e9e0167e6aedda1b8c3f9a8afb1",
+    "base_revision": "0bcd822377da7b5718e674eaf9c870d349424dd1",
+    "nar_hash": "sha256-7LlzakXbaA08+Pc1rxoz6i9lzVvDvK5WUY6cOJTUjtc="
+  }
+}
