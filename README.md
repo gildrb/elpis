@@ -10,6 +10,11 @@ can use the authenticated API; no agent application is required.
 back to different weights. Follow [offline preparation](prepare/REPRODUCE.md)
 to reproduce and verify the exact supplied artifacts.
 
+## Uploaded patches and recorded runs
+
+- [Complete patch chain](patches/README.md): eight patch files covering 38 upstream files.
+- [Benchmark run reports](bench/results/README.md): reasoning, cache, vision and trial results.
+
 ## Single-profile target
 
 The final deployment targets **245,760 total tokens with DFlash2**, using this
