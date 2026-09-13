@@ -1,7 +1,10 @@
 # Documentation
 
-1. [Quick start](../README.md): the single model/stack and repository layout.
-2. [Docker](docker.md) and [Nix](../nix/STANDALONE.md): installation, ownership and recovery.
-3. [Offline preparation](../prepare/REPRODUCE.md): user-supplied models and exact artifact checks.
-4. [Architecture](architecture.md), [complete patch chain](patches.md), and [strict development](development.md): source coverage, contracts and tooling.
-5. [Benchmarks](benchmarks.md), [cache diagnostics](cache.md) and [qualification](qualification.md): methods, measured results and limits.
+1. [Recipe and status](../README.md), [Docker](docker.md), [Nix](../nix/STANDALONE.md).
+2. [Public model preparation](../prepare/REPRODUCE.md) and artifact identities.
+3. [Architecture](architecture.md), [patch lifecycle](patches.md),
+   [reference audit](reference-audit.md), [development](development.md), [validation ledger](validation.md).
+4. [Benchmark protocol](benchmarks.md), [cache diagnostic](cache.md), [capacity probe](capacity.md),
+   [qualification gates and evidence](qualification.md).
+5. [Prime Envs capability evaluation](../eval/README.md) and
+   [diagnosing incorrect output](diagnose-quality.md).

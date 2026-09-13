@@ -1,0 +1,18 @@
+[project]
+name = "local-inference-direct-graphwalks"
+version = "0.1.0"
+requires-python = ">=3.12,<3.13"
+dependencies = [
+    "verifiers==0.1.15.dev17",
+    "datasets==4.6.1",
+    "graphwalks==0.1.0",
+]
+
+[tool.uv]
+package = false
+required-version = "==0.12.1"
+build-constraint-dependencies = ["hatchling==1.32.0"]
+
+[tool.uv.sources]
+verifiers = { path = "../.sources/verifiers-graphwalks", editable = true }
+graphwalks = { path = "../.sources/prime-envs/environments/graphwalks", editable = true }

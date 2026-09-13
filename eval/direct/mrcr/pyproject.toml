@@ -1,0 +1,14 @@
+[project]
+name = "inference-direct-mrcr-v1"
+version = "0.1.0"
+requires-python = ">=3.12,<3.13"
+dependencies = ["verifiers==0.1.15.dev17", "mrcr-v2==0.1.1"]
+
+[tool.uv]
+package = false
+required-version = "==0.12.1"
+build-constraint-dependencies = ["hatchling==1.32.0"]
+
+[tool.uv.sources]
+verifiers = { path = "../.sources/verifiers", editable = true }
+mrcr-v2 = { path = "../.sources/prime-envs/environments/mrcr_v2", editable = true }

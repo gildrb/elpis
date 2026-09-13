@@ -261,7 +261,6 @@
   "status": "measured_runtime_profile; reorganized_packaging_not_live_qualified",
   "qualification_limits": [
     "Throughput fixture is a timing control, not a reasoning quality gate.",
-    "Fresh procedural reasoning results are reported separately.",
     "These measurements do not qualify the reorganized Docker/Nix lifecycle or universal reliability.",
     "Historical manifest digest records measurement provenance, not the digest of subsequently edited documentation."
   ]

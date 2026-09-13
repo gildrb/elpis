@@ -1,0 +1,44 @@
+model = "qwen3.8-27b"
+api_base_url = "http://127.0.0.1:18020/v1"
+api_key_var = "QWEN_API_KEY"
+api_client_type = "openai_chat_completions"
+max_concurrent = 1
+independent_scoring = true
+num_workers = 1
+disable_env_server = true
+disable_tui = true
+save_results = true
+save_to_hf_hub = false
+output_dir = "results"
+max_retries = 0
+
+num_examples = -1
+rollouts_per_example = 1
+
+[sampling]
+max_tokens = 8192
+temperature = 0.6
+top_p = 0.95
+frequency_penalty = 0.0
+presence_penalty = 0.0
+
+[sampling.extra_body]
+top_k = 20
+min_p = 0.0
+repetition_penalty = 1.0
+
+[sampling.extra_body.chat_template_kwargs]
+enable_thinking = true
+
+[[eval]]
+id = "graphwalks"
+name = "direct-graphwalks-bfs"
+
+[eval.args]
+split = "train"
+scoring = "exact"
+problem_type = "bfs"
+prompt_chars_filter = "<=262144"
+shuffle = false
+seed = 0
+num_examples = -1

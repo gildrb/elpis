@@ -1,3 +1,4 @@
+# Copyright (c) 2026 Gil Rodrigues
 """Salt-isolated, emitted-token cache consistency diagnostic; see docs/cache.md."""
 
 import argparse
@@ -19,13 +20,19 @@ MODEL = "qwen3.8-27b"
 CUTOFF = 0.001
 OUTPUT_TOKENS = 128
 MAX_BODY = 16 * 1024 * 1024
-MAX_TOKEN_IDS = 65536
+NATIVE_CONTEXT_TOKENS = 262144
+MAX_TOKEN_IDS = NATIVE_CONTEXT_TOKENS
+CONTINUATION_TOKEN = 11
+MAX_IDENTITY_BYTES = 65536
+SHA256_LENGTH = 64
+GIT_COMMIT_LENGTH = 40
+MAX_PATCHES = 1024
 MAX_TOKEN_ID = 2147483647
 LOGPROB_FIELDS = 3
 HTTP_OK = 200
 MAX_PORT = 65535
 MIN_INPUT_TOKENS = 1024
-MAX_INPUT_TOKENS = 65000
+MAX_INPUT_TOKENS = NATIVE_CONTEXT_TOKENS - 2 * OUTPUT_TOKENS - 1
 MIN_TIMEOUT = 30
 MAX_TIMEOUT = 1800
 MAX_KEY_BYTES = 4096
@@ -204,6 +211,7 @@ class Settings:
 
     endpoint: str
     key_file: str
+    runtime_identity: str
     input_tokens: int
     timeout: int
 
@@ -221,12 +229,18 @@ class Settings:
         values = mapping(vars(namespace))
         endpoint = values.get("endpoint")
         key_file = values.get("key_file")
-        if not isinstance(endpoint, str) or not isinstance(key_file, str):
-            message = "invalid endpoint or credential path"
+        runtime_identity = values.get("runtime_identity")
+        if (
+            not isinstance(endpoint, str)
+            or not isinstance(key_file, str)
+            or not isinstance(runtime_identity, str)
+        ):
+            message = "invalid endpoint, credential or runtime identity path"
             raise BenchError(message)
         return cls(
             endpoint,
             key_file,
+            runtime_identity,
             integer(values.get("input_tokens")),
             integer(values.get("timeout")),
         )
@@ -240,6 +254,7 @@ class Client:
     port: int
     key: str
     timeout: int
+    context_length: int
 
     def request(
         self, path: str, payload: dict[str, object] | None = None
@@ -293,7 +308,13 @@ class Client:
             connection.close()
 
     def generate(
-        self, ids: list[int], salt: str, outputs: int, *, input_scores: bool
+        self,
+        ids: list[int],
+        salt: str,
+        outputs: int,
+        *,
+        input_scores: bool,
+        include_text: bool = False,
     ) -> tuple[list[int], dict[str, object]]:
         """Generate tokens and validate allowlisted scoring metadata.
 
@@ -304,6 +325,13 @@ class Client:
             BenchError: If validation or request preconditions fail.
 
         """
+        if (
+            len(ids) == 0
+            or outputs not in {0, OUTPUT_TOKENS}
+            or len(ids) + outputs > self.context_length
+        ):
+            message = "generation exceeds bounded native context budget"
+            raise BenchError(message)
         started = time.monotonic()
         response = self.request(
             "/generate",
@@ -339,7 +367,7 @@ class Client:
         if finish.get("type") != "length":
             message = "unexpected finish reason"
             raise BenchError(message)
-        selected = {
+        selected: dict[str, object] = {
             "prompt_tokens": len(ids),
             "completion_tokens": outputs,
             "cached_tokens": cached,
@@ -355,10 +383,27 @@ class Client:
                 allow_initial_null=input_scores,
             ),
         }
+        if include_text:
+            text = response.get("text")
+            if not isinstance(text, str) or len(text.strip()) == 0:
+                message = "generated text is missing or empty"
+                raise BenchError(message)
+            selected["output_text"] = text
         return output, selected
 
 
-def _client_from_settings(args: Settings) -> Client:
+def client_from_settings(
+    args: Settings, context_length: int, *, reserved_tokens: int = 2 * OUTPUT_TOKENS + 1
+) -> Client:
+    """Validate local request settings, credentials and reserved token budget.
+
+    Returns:
+        A bounded authenticated loopback client.
+
+    Raises:
+        BenchError: If settings or credentials fail validation.
+
+    """
     endpoint = urlsplit(args.endpoint)
     invalid_suffix = (
         endpoint.path not in {"", "/"}
@@ -379,7 +424,8 @@ def _client_from_settings(args: Settings) -> Client:
         message = "endpoint requires a valid explicit port"
         raise BenchError(message)
     if (
-        not MIN_INPUT_TOKENS <= args.input_tokens <= MAX_INPUT_TOKENS
+        reserved_tokens < OUTPUT_TOKENS
+        or not MIN_INPUT_TOKENS <= args.input_tokens <= context_length - reserved_tokens
         or not MIN_TIMEOUT <= args.timeout <= MAX_TIMEOUT
     ):
         message = "input count or timeout outside supported bounds"
@@ -395,10 +441,19 @@ def _client_from_settings(args: Settings) -> Client:
     ):
         message = "invalid credential format"
         raise BenchError(message)
-    return Client(endpoint.hostname, port, key, args.timeout)
+    return Client(endpoint.hostname, port, key, args.timeout, context_length)
 
 
-def _fixture(client: Client, input_tokens: int) -> tuple[str, list[int], list[int]]:
+def make_fixture(client: Client, input_tokens: int) -> tuple[str, list[int], list[int]]:
+    """Verify the served model and build exact IDs from authenticated tokenization.
+
+    Returns:
+        Synthetic source text, seed IDs and repeated/truncated input IDs.
+
+    Raises:
+        BenchError: If model identity or tokenizer counts do not match.
+
+    """
     models = client.request("/v1/models").get("data")
     if (
         not isinstance(models, list)
@@ -428,51 +483,129 @@ def _fixture(client: Client, input_tokens: int) -> tuple[str, list[int], list[in
     return text, seed, ids
 
 
+def _validate_provenance(identity: dict[str, object]) -> None:
+    patches = identity.get("ordered_patch_sha256")
+    if not isinstance(patches, list) or len(patches) > MAX_PATCHES:
+        message = "runtime identity requires a bounded ordered patch digest list"
+        raise BenchError(message)
+    digests = [
+        identity.get("image_sha256"),
+        identity.get("launch_config_sha256"),
+        identity.get("weights_sha256"),
+        *patches,
+    ]
+    for value in digests:
+        if (
+            not isinstance(value, str)
+            or len(value) != SHA256_LENGTH
+            or not all(character in "0123456789abcdef" for character in value)
+        ):
+            message = "runtime identity requires lowercase SHA256 provenance digests"
+            raise BenchError(message)
+    commit = identity.get("engine_base_commit")
+    if (
+        not isinstance(commit, str)
+        or len(commit) != GIT_COMMIT_LENGTH
+        or not all(character in "0123456789abcdef" for character in commit)
+    ):
+        message = "runtime identity requires the exact engine base commit"
+        raise BenchError(message)
+
+
+def load_runtime_identity(directory: Path, path: str) -> tuple[str, int]:
+    """Validate and exclusively snapshot exact operator-declared identity bytes.
+
+    Returns:
+        Identity SHA256 and declared runtime context length.
+
+    Raises:
+        BenchError: If the bounded identity declaration is invalid.
+
+    """
+    with Path(path).open("rb") as handle:
+        raw = handle.read(MAX_IDENTITY_BYTES + 1)
+    if len(raw) > MAX_IDENTITY_BYTES:
+        message = "runtime identity size limit exceeded"
+        raise BenchError(message)
+    identity = mapping(
+        json.loads(
+            raw,
+            object_pairs_hook=json_object,
+            parse_float=json_float,
+            parse_constant=json_constant,
+        )
+    )
+    context_length = integer(identity.get("context_length"))
+    if identity.keys() != {
+        "image_sha256",
+        "engine_base_commit",
+        "ordered_patch_sha256",
+        "launch_config_sha256",
+        "weights_sha256",
+        "model",
+        "context_length",
+        "execution",
+        "speculation",
+        "cache_salt_scope",
+        "external_cache_enabled",
+    }:
+        message = "runtime identity field set mismatch"
+        raise BenchError(message)
+    if (
+        identity.get("model") != MODEL
+        or not MIN_INPUT_TOKENS + 2 * OUTPUT_TOKENS + 1
+        <= context_length
+        <= NATIVE_CONTEXT_TOKENS
+        or identity.get("cache_salt_scope") != "in_process"
+        or identity.get("external_cache_enabled") is not False
+    ):
+        message = (
+            "runtime identity requires bounded native context and local salt scope"
+        )
+        raise BenchError(message)
+    execution = identity.get("execution")
+    speculation = identity.get("speculation")
+    if (
+        not isinstance(execution, str)
+        or execution not in {"eager", "cuda_graphs"}
+        or not isinstance(speculation, str)
+        or speculation not in {"DFLASH", "none"}
+    ):
+        message = "runtime identity requires declared execution and speculation modes"
+        raise BenchError(message)
+    _validate_provenance(identity)
+    with (directory / "runtime-identity.json").open("xb") as handle:
+        handle.write(raw)
+    return hashlib.sha256(raw).hexdigest(), context_length
+
+
 def _save_plan(
-    directory: Path, ids: list[int], salts: tuple[str, str], timeout: int
+    directory: Path,
+    ids: list[int],
+    salts: tuple[str, str],
+    client: Client,
+    identity_sha256: str,
 ) -> None:
     salt_a, salt_b = salts
-    profile = {
-        "image": (
-            "lmsysorg/sglang:v0.5.19@sha256:"
-            "d6e7288627be8b02be88e4bba38e73f6d50e2826869f753c13a4c4385ab3eda9"
-        ),
-        "historical_source_revision": "3958762c198b7e9e0167e6aedda1b8c3f9a8afb1",
-        "source_manifest": "patches/manifest.json",
-        "entrypoint_sha256": (
-            "c994f0a56914b8dddba2d347cbac5ee963af04a2d11818321979e4a622a108dd"
-        ),
-        "target": "compact-target-rholsc8k/artifact",
-        "draft": "Qwen3.8-27B-DFlash2-W4A16",
-        "context_length": 65536,
-        "max_total_tokens": 66560,
-        "max_running_requests": 1,
-        "mamba_cache": "extra_buffer/K8/BF16",
-        "kv_cache_dtype": "fp8_e4m3",
-        "mem_fraction_static": 0.94,
-        "chunked_prefill_size": 1024,
-        "input_logprob_chunk_size": 256,
-        "dflash_block_size": 8,
-        "draft_window": 2048,
-        "attention": "FlashInfer target and draft",
-        "NCCL_MAX_CTAS": 1,
-        "sleep_on_idle": True,
-    }
     save(
         directory,
         "plan.json",
         {
-            "schema_version": 1,
+            "schema_version": 2,
             "model": MODEL,
-            "profile_operator_confirmed_not_api_verified": profile,
+            "runtime_identity_sha256": identity_sha256,
+            "runtime_identity_api_verified": False,
+            "runtime_identity_source": "operator_declared",
+            "observed_model_id": MODEL,
+            "context_length_operator_declared": client.context_length,
             "input_tokens": len(ids),
             "prime_outputs": OUTPUT_TOKENS,
             "warm_outputs": OUTPUT_TOKENS,
-            "continuation_token": 11,
+            "continuation_token": CONTINUATION_TOKEN,
             "salt_a": salt_a,
             "salt_b": salt_b,
             "cutoff": CUTOFF,
-            "request_timeout_seconds": timeout,
+            "request_timeout_seconds": client.timeout,
             "input_ids_sha256": hashlib.sha256(
                 json.dumps(ids, separators=(",", ":")).encode()
             ).hexdigest(),
@@ -513,11 +646,14 @@ def execute(args: Settings, directory: Path) -> bool:
         BenchError: If validation or request preconditions fail.
 
     """
-    client = _client_from_settings(args)
-    fixture = _fixture(client, args.input_tokens)
+    identity_sha256, context_length = load_runtime_identity(
+        directory, args.runtime_identity
+    )
+    client = client_from_settings(args, context_length)
+    fixture = make_fixture(client, args.input_tokens)
     ids = fixture[2]
-    salt_a, salt_b = secrets.token_hex(32), secrets.token_hex(32)
-    if salt_a == salt_b:
+    salts = secrets.token_hex(32), secrets.token_hex(32)
+    if salts[0] == salts[1]:
         message = "cache namespace collision"
         raise BenchError(message)
     save(
@@ -525,19 +661,21 @@ def execute(args: Settings, directory: Path) -> bool:
         "fixture.json",
         {"synthetic_text": fixture[0], "seed_ids": fixture[1], "input_ids": ids},
     )
-    _save_plan(directory, ids, (salt_a, salt_b), args.timeout)
-    prime_ids, prime = client.generate(ids, salt_a, OUTPUT_TOKENS, input_scores=False)
+    _save_plan(directory, ids, salts, client, identity_sha256)
+    prime_ids, prime = client.generate(ids, salts[0], OUTPUT_TOKENS, input_scores=False)
     save(directory, "prime.json", prime)
     if prime["cached_tokens"] != 0 or prime["num_retractions"] != 0:
         message = "prime was not cold or retracted"
         raise BenchError(message)
-    history = ids + prime_ids + [11]
-    warm_ids, warm = client.generate(history, salt_a, OUTPUT_TOKENS, input_scores=False)
+    history = ids + prime_ids + [CONTINUATION_TOKEN]
+    warm_ids, warm = client.generate(
+        history, salts[0], OUTPUT_TOKENS, input_scores=False
+    )
     save(directory, "warm.json", warm)
     if integer(warm["cached_tokens"]) <= len(ids) or warm["num_retractions"] != 0:
         message = "generated-prefix cache reuse not established or warm retracted"
         raise BenchError(message)
-    _, cold = client.generate(history + warm_ids, salt_b, 0, input_scores=True)
+    cold = client.generate(history + warm_ids, salts[1], 0, input_scores=True)[1]
     save(directory, "cold.json", cold)
     if cold["cached_tokens"] != 0 or cold["num_retractions"] != 0:
         message = "cold recomputation reused cache or retracted"
@@ -549,6 +687,10 @@ def execute(args: Settings, directory: Path) -> bool:
         "result.json",
         {
             "status": "pass" if passed else "fail",
+            "runtime_identity_sha256": identity_sha256,
+            "runtime_identity_api_verified": False,
+            "runtime_identity_source": "operator_declared",
+            "observed_model_id": MODEL,
             "emitted_token_approx_kl": estimator,
             "cutoff": CUTOFF,
             "aligned_token_count": OUTPUT_TOKENS,
@@ -574,13 +716,21 @@ def main() -> int:
     parser.add_argument("--endpoint", default="http://127.0.0.1:18020")
     parser.add_argument("--key-file", required=True)
     parser.add_argument(
+        "--runtime-identity", required=True, help="operator-supplied identity JSON"
+    )
+    parser.add_argument(
         "--output", required=True, help="new private directory; must not exist"
     )
     parser.add_argument("--model", choices=[MODEL], default=MODEL)
-    parser.add_argument("--input-tokens", type=int, default=45000)
+    parser.add_argument(
+        "--input-tokens",
+        type=int,
+        default=45000,
+        help=f"{MIN_INPUT_TOKENS}..{MAX_INPUT_TOKENS}; bounded by declared context",
+    )
     parser.add_argument("--timeout", type=int, default=900)
     parser.add_argument(
-        "--confirm-qualified-profile", action="store_true", required=True
+        "--confirm-runtime-identity", action="store_true", required=True
     )
     args = parser.parse_args()
     os.umask(0o077)

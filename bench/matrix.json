@@ -1,0 +1,130 @@
+{
+  "schema_version": 1,
+  "status": "planned_not_measured",
+  "objective_context_tokens": 262144,
+  "engine": "sglang",
+  "engine_base_commit": "0bcd822377da7b5718e674eaf9c870d349424dd1",
+  "hardware": {
+    "gpu": "NVIDIA RTX 3090",
+    "count": 1,
+    "memory_gib": 24,
+    "compute_capability": "8.6",
+    "tensor_parallel": 1
+  },
+  "capacity_total_tokens": [
+    131072,
+    163840,
+    196608,
+    229376,
+    245760,
+    262144
+  ],
+  "capacity_output_tokens": 128,
+  "capacity_engine_reserve_tokens": 2,
+  "depth_prompt_tokens": [
+    1024,
+    8192,
+    32768,
+    65536,
+    131072,
+    196608,
+    245760,
+    261118
+  ],
+  "throughput_output_tokens": 1024,
+  "throughput_num_prompts": 8,
+  "concurrency": [
+    1,
+    2,
+    4
+  ],
+  "power_limit_watts": [
+    200,
+    225,
+    250,
+    280,
+    300,
+    350
+  ],
+  "recommended_power_limit_watts": null,
+  "power_num_prompts": 32,
+  "power_repetitions": 3,
+  "kv_candidates": [
+    "bfloat16",
+    "fp8_e4m3",
+    "fp4_mx_block16",
+    "kvarn_k4v2_g128"
+  ],
+  "speculation_candidates": [
+    "none",
+    "DFLASH"
+  ],
+  "dflash_block_sizes": [
+    4,
+    8,
+    12,
+    16
+  ],
+  "draft_window_tokens": [
+    1024,
+    2048,
+    4096
+  ],
+  "prefill_chunk_tokens": [
+    512,
+    1024,
+    2048,
+    4096
+  ],
+  "recurrent_state_candidates": [
+    "float32",
+    "bfloat16",
+    "float16"
+  ],
+  "execution_candidates": [
+    "eager",
+    "cuda_graphs"
+  ],
+  "prefix_cases": [
+    "cold",
+    "identical_prefix",
+    "prefix_extension",
+    "divergent_continuation",
+    "recurrent_state_restore"
+  ],
+  "result_fields": [
+    "recipe_identity",
+    "before",
+    "after",
+    "decode_tokens_per_second",
+    "prefill_tokens_per_second",
+    "ttft_seconds",
+    "tpot_seconds",
+    "peak_vram_mib",
+    "usable_context_tokens",
+    "per_environment_quality",
+    "speculative_acceptance",
+    "accepted_tokens_per_verify",
+    "errors",
+    "truncations"
+  ],
+  "rules": [
+    "Candidates are questions, not admitted or recommended configurations; check pinned source constraints before launch.",
+    "Freeze exact token IDs, template, sampling, budgets, source/model/image hashes and cache conditions before paired runs.",
+    "Change one meaningful variable; KVarN on/off uses same experimental image because sampler repairs are active.",
+    "Current eager wrapper also disables overlap and autotune; it is an execution bundle, not a graph-only attribution.",
+    "No percentages are combined across fixtures. Report unavailable telemetry as null, not zero.",
+    "Prime Envs owns quality scoring; engineering diagnostics do not qualify model capability.",
+    "Near-max depth must be within the proven usable context minus output and engine reserve; do not silently clamp.",
+    "Unsupported FP4, recurrent precision, block size or graph combinations must be recorded as unsupported, not GPU measurements."
+  ],
+  "throughput_dataset": {
+    "repo": "anon8231489123/ShareGPT_Vicuna_unfiltered",
+    "revision": "192ab2185289094fc556ec8ce5ce1e8e587154ca",
+    "file": "ShareGPT_V3_unfiltered_cleaned_split.json",
+    "sha256": "35f0e213ce091ed9b9af2a1f0755e9d39f9ccec34ab281cd4ca60d70f6479ba4",
+    "bytes": 672837942,
+    "evidence": "HF public LFS metadata; full download not performed in this refactor",
+    "sampling": "official random dataset, token IDs, seed20260913, range_ratio1; no chat template"
+  }
+}

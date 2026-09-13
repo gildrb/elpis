@@ -1,5 +1,5 @@
 {
-  "status": "source-only-not-image-built-not-GPU-qualified",
+  "status": "experimental-source-preserved-not-full-model-qualified",
   "source_image": "lmsysorg/sglang@sha256:d6e7288627be8b02be88e4bba38e73f6d50e2826869f753c13a4c4385ab3eda9",
   "baseline_revision": "3958762c198b7e9e0167e6aedda1b8c3f9a8afb1",
   "baseline_base_revision": "0bcd822377da7b5718e674eaf9c870d349424dd1",
@@ -24,6 +24,11 @@
     "Hashes identify private evidence; private evidence is not a build dependency or shipped execution proof.",
     "Sampler CPU Triton interpreter is not CUDA compiler or GPU parity proof.",
     "No source-only result qualifies memory, scheduler/cache lifecycle, full-model quality, graph execution or 245760-token serving.",
-    "The existing baseline remains the only serving configuration; promotion requires separately approved qualification."
-  ]
+    "The experimental patch set is build-only; promotion requires separately approved qualification."
+  ],
+  "gpu_packing_evidence": {
+    "first_full_model_attempt": "../../bench/results/240k-native-attempt-01.json: CUDA illegal memory access before startup; no candidate performance or quality result",
+    "repair": "../../bench/results/240k-packing-repair-01.json: 90 attention and two status small-fixture cases; zero memory-check errors",
+    "limit": "No full-model 240K capacity, quality, cache lifecycle or graph qualification"
+  }
 }

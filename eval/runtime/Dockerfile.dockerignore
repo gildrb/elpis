@@ -1,0 +1,8 @@
+# Strict build-context allowlist. No keys, datasets, model weights or traces.
+**
+!.cache/
+!.cache/runtime/
+!.cache/runtime/*.py
+!.cache/runtime/*.py.lock
+!runtime/
+!runtime/Dockerfile

@@ -1,0 +1,485 @@
+{
+  "schema": 1,
+  "recorded_at_utc": "2026-09-13T11:10:57.246108+00:00",
+  "scope": "CPU-only upstream direct-context configuration/import/loader validation; no endpoint requests, scoring execution, token-window qualification or GPU qualification",
+  "sources": {
+    "schema": 1,
+    "python": "3.12",
+    "uv": "0.12.1",
+    "sources": [
+      {
+        "directory": "prime-envs",
+        "repository": "https://github.com/PrimeIntellect-ai/prime-envs.git",
+        "revision": "a6f4ceedfd79cad4586064fb1c27f5ea5f4a10fd"
+      },
+      {
+        "directory": "verifiers",
+        "repository": "https://github.com/PrimeIntellect-ai/verifiers.git",
+        "revision": "977e3fc4050893d938f68163ae0bd79a8672e8d7"
+      },
+      {
+        "directory": "verifiers-graphwalks",
+        "repository": "https://github.com/PrimeIntellect-ai/verifiers.git",
+        "revision": "977e3fc4050893d938f68163ae0bd79a8672e8d7"
+      }
+    ]
+  },
+  "sha256": {
+    "eval/direct/.gitignore": "7f9e7146c7196a3495f0896386a59712652aada9bdab79e75786d813eed79419",
+    "eval/direct/GUIDE.md": "49b78de378f3fb8232af1944d7e4ebf7d2b01e63b6deae0ded8291ad2b6f9891",
+    "eval/direct/sources.lock": "e1c0b40a710f98f694a8e7e7b83a27a90bdf1eaf7555cbd54783f57e01d10c1e",
+    "eval/direct/setup": "5c8f940867d0b42a105fe0305513fead08ba5184a8893d9825cf1ee986a4f998",
+    "eval/direct/run": "6aca11c28b8bb958552d3b43d816fecdbc6a02e278c522ff918b15085c32e176",
+    "eval/direct/inspect_dataset.py": "9fe17792e136b65584a943331da3d39ca9afa366e45c96c0e792011e8b4d2918",
+    "eval/direct/mrcr/pyproject.toml": "30c05895a8e833d409b343fe0b1b3d93ebe5203584adae45dcddf6ef47ac4c08",
+    "eval/direct/mrcr/uv.lock": "72d21753f31d3ebee610af6047a54632b11cf35cd7ccc8e25bc4b4be981eb4eb",
+    "eval/direct/graphwalks/pyproject.toml": "0f828edd2e894b76010502444ef13ed5d92fa9ec68e5947976bdbb1644d5ec05",
+    "eval/direct/graphwalks/uv.lock": "61121296bcfc0f9d7d74bb9bcbca9ceb57229eb7bfffa20c0fc106e6495e3460",
+    "eval/direct/configs/full/graphwalks-bfs.toml": "46cdc74f393bd890dd901f19bb6941af2698ec642d9bb131ab03129a0dba1d20",
+    "eval/direct/configs/full/graphwalks-parents.toml": "c66827e4033b213c29f84ea42516864391aa1edaf41311981735cc527ff6386f",
+    "eval/direct/configs/full/mrcr-128k-256k.toml": "4eccee344047e5194aee05eaad2951fc67b72475a8842cfeb758e4df55cf4db3",
+    "eval/direct/configs/full/mrcr-32k-64k.toml": "7c749745dedd9d05eb475b5a0e6e73552d71fe8642f0e2ab7f805966438b68da",
+    "eval/direct/configs/quick/graphwalks-bfs.toml": "4e24d389033750ae3ff17722dc35efff60b7762d96a23201b38bc3f2ea44b015",
+    "eval/direct/configs/quick/graphwalks-parents.toml": "f4a2ba0d6b35e025ec69e36a03222ae106fc1b3a04125b988551e0b07a5e860e",
+    "eval/direct/configs/quick/mrcr-128k-256k.toml": "9e764492841c137dd72e31aa4cf41b0e3b0271855b470892e5f3071eb2552e0e",
+    "eval/direct/configs/quick/mrcr-32k-64k.toml": "8ffd7a1f68f064b4801650b7dd182ca1c4af7cca4cf5b1621fd0b0001f597ca7",
+    "eval/direct/configs/smoke/graphwalks-bfs.toml": "04afec5f0cbd62374d7d8285853df323e19d705c76b015147bf2ba939703994b",
+    "eval/direct/configs/smoke/graphwalks-parents.toml": "c965ae8d975204855dcb22b3ba3ba52cd0877dcf554dffd8007e2afadec0e7a4",
+    "eval/direct/configs/smoke/mrcr-32k-64k.toml": "d577f17ec831cd9de73561a8847b6f341a812eacf491256d7128dfd2dd45ba0c"
+  },
+  "dataset_lock_sha256": "83a1ae74e1f094d1df852d50fda89e8fbf65d356f777c7adbb9005675a10d372",
+  "checks": [
+    {
+      "name": "bash syntax",
+      "command": "bash -n eval/direct/setup eval/direct/run",
+      "exit_code": 0
+    },
+    {
+      "name": "ruff strict lint",
+      "command": "nix develop . --no-write-lock-file --command uv run --locked --python python3.13 --no-managed-python ruff check eval/direct/inspect_dataset.py",
+      "exit_code": 0
+    },
+    {
+      "name": "ruff format",
+      "command": "nix develop . --no-write-lock-file --command uv run --locked --python python3.13 --no-managed-python ruff format --check eval/direct/inspect_dataset.py",
+      "exit_code": 0
+    },
+    {
+      "name": "ty native compatible environment",
+      "command": "nix develop . --no-write-lock-file --command env -u PYTHONPATH -u PYTHONHOME uv run --project eval/direct/mrcr --locked --no-sync --with ty==0.0.80 ty check --python eval/direct/mrcr/.venv/bin/python eval/direct/inspect_dataset.py",
+      "exit_code": 0
+    },
+    {
+      "name": "no approval gate",
+      "command": "nix develop . --no-write-lock-file --command env -u QWEN_EVAL_ALLOW_REQUESTS eval/direct/run smoke mrcr",
+      "expected_exit_code": 1,
+      "exit_code": 1,
+      "observed_error": "Endpoint approval required: set QWEN_EVAL_ALLOW_REQUESTS=1 explicitly."
+    },
+    {
+      "name": "MRCR native vf-eval --help",
+      "exit_code": 0
+    },
+    {
+      "name": "GraphWalks native vf-eval --help",
+      "passed": true,
+      "evidence": "Native child report /tmp/inference-graphwalks-legacy-report.md"
+    },
+    {
+      "name": "source/runtime provenance isolation",
+      "passed": true,
+      "evidence": "git check-ignore confirmed upstream checkouts, both virtualenvs and owned run provenance ignored; git ls-files --others --exclude-standard eval/direct listed only authored wrappers/docs/configs/locks"
+    }
+  ],
+  "profiles": [
+    {
+      "profile": "smoke",
+      "command": "nix develop . --no-write-lock-file --command eval/direct/run smoke --dry-run",
+      "exit_code": 0,
+      "native_selections": [
+        {
+          "character_counts_are_not_model_tokens": true,
+          "environment": "graphwalks",
+          "environment_type": "SingleTurnEnv",
+          "examples": 1,
+          "independent_scoring": true,
+          "max_concurrent": 1,
+          "name": "direct-graphwalks-bfs",
+          "prompt_characters_max": 2788,
+          "prompt_characters_min": 2788,
+          "prompt_message_counts": [
+            1
+          ],
+          "requests_sent": 0,
+          "rollouts_per_example": 1,
+          "sampling": {
+            "extra_body": {
+              "chat_template_kwargs": {
+                "enable_thinking": true
+              },
+              "min_p": 0.0,
+              "repetition_penalty": 1.0,
+              "top_k": 20
+            },
+            "frequency_penalty": 0.0,
+            "max_tokens": 8192,
+            "presence_penalty": 0.0,
+            "temperature": 0.6,
+            "top_p": 0.95
+          }
+        },
+        {
+          "character_counts_are_not_model_tokens": true,
+          "environment": "graphwalks",
+          "environment_type": "SingleTurnEnv",
+          "examples": 1,
+          "independent_scoring": true,
+          "max_concurrent": 1,
+          "name": "direct-graphwalks-parents",
+          "prompt_characters_max": 2709,
+          "prompt_characters_min": 2709,
+          "prompt_message_counts": [
+            1
+          ],
+          "requests_sent": 0,
+          "rollouts_per_example": 1,
+          "sampling": {
+            "extra_body": {
+              "chat_template_kwargs": {
+                "enable_thinking": true
+              },
+              "min_p": 0.0,
+              "repetition_penalty": 1.0,
+              "top_k": 20
+            },
+            "frequency_penalty": 0.0,
+            "max_tokens": 8192,
+            "presence_penalty": 0.0,
+            "temperature": 0.6,
+            "top_p": 0.95
+          }
+        },
+        {
+          "character_counts_are_not_model_tokens": true,
+          "environment": "mrcr-v2",
+          "environment_type": "Env",
+          "examples": 1,
+          "independent_scoring": true,
+          "max_concurrent": 1,
+          "name": "direct-mrcr-32k-64k",
+          "prompt_characters_max": 297958,
+          "prompt_characters_min": 297958,
+          "prompt_message_counts": [
+            1
+          ],
+          "requests_sent": 0,
+          "rollouts_per_example": 1,
+          "sampling": {
+            "extra_body": {
+              "chat_template_kwargs": {
+                "enable_thinking": true
+              },
+              "min_p": 0.0,
+              "repetition_penalty": 1.0,
+              "top_k": 20
+            },
+            "frequency_penalty": 0.0,
+            "max_tokens": 8192,
+            "presence_penalty": 0.0,
+            "temperature": 0.6,
+            "top_p": 0.95
+          }
+        }
+      ],
+      "planned_completions_not_executed": 3
+    },
+    {
+      "profile": "quick",
+      "command": "nix develop . --no-write-lock-file --command eval/direct/run quick --dry-run",
+      "exit_code": 0,
+      "native_selections": [
+        {
+          "character_counts_are_not_model_tokens": true,
+          "environment": "graphwalks",
+          "environment_type": "SingleTurnEnv",
+          "examples": 8,
+          "independent_scoring": true,
+          "max_concurrent": 1,
+          "name": "direct-graphwalks-bfs",
+          "prompt_characters_max": 2813,
+          "prompt_characters_min": 2788,
+          "prompt_message_counts": [
+            1
+          ],
+          "requests_sent": 0,
+          "rollouts_per_example": 1,
+          "sampling": {
+            "extra_body": {
+              "chat_template_kwargs": {
+                "enable_thinking": true
+              },
+              "min_p": 0.0,
+              "repetition_penalty": 1.0,
+              "top_k": 20
+            },
+            "frequency_penalty": 0.0,
+            "max_tokens": 8192,
+            "presence_penalty": 0.0,
+            "temperature": 0.6,
+            "top_p": 0.95
+          }
+        },
+        {
+          "character_counts_are_not_model_tokens": true,
+          "environment": "graphwalks",
+          "environment_type": "SingleTurnEnv",
+          "examples": 8,
+          "independent_scoring": true,
+          "max_concurrent": 1,
+          "name": "direct-graphwalks-parents",
+          "prompt_characters_max": 2759,
+          "prompt_characters_min": 2709,
+          "prompt_message_counts": [
+            1
+          ],
+          "requests_sent": 0,
+          "rollouts_per_example": 1,
+          "sampling": {
+            "extra_body": {
+              "chat_template_kwargs": {
+                "enable_thinking": true
+              },
+              "min_p": 0.0,
+              "repetition_penalty": 1.0,
+              "top_k": 20
+            },
+            "frequency_penalty": 0.0,
+            "max_tokens": 8192,
+            "presence_penalty": 0.0,
+            "temperature": 0.6,
+            "top_p": 0.95
+          }
+        },
+        {
+          "character_counts_are_not_model_tokens": true,
+          "environment": "mrcr-v2",
+          "environment_type": "Env",
+          "examples": 8,
+          "independent_scoring": true,
+          "max_concurrent": 1,
+          "name": "direct-mrcr-128k-256k",
+          "prompt_characters_max": 1213846,
+          "prompt_characters_min": 1213844,
+          "prompt_message_counts": [
+            1
+          ],
+          "requests_sent": 0,
+          "rollouts_per_example": 1,
+          "sampling": {
+            "extra_body": {
+              "chat_template_kwargs": {
+                "enable_thinking": true
+              },
+              "min_p": 0.0,
+              "repetition_penalty": 1.0,
+              "top_k": 20
+            },
+            "frequency_penalty": 0.0,
+            "max_tokens": 8192,
+            "presence_penalty": 0.0,
+            "temperature": 0.6,
+            "top_p": 0.95
+          }
+        },
+        {
+          "character_counts_are_not_model_tokens": true,
+          "environment": "mrcr-v2",
+          "environment_type": "Env",
+          "examples": 8,
+          "independent_scoring": true,
+          "max_concurrent": 1,
+          "name": "direct-mrcr-32k-64k",
+          "prompt_characters_max": 297958,
+          "prompt_characters_min": 297956,
+          "prompt_message_counts": [
+            1
+          ],
+          "requests_sent": 0,
+          "rollouts_per_example": 1,
+          "sampling": {
+            "extra_body": {
+              "chat_template_kwargs": {
+                "enable_thinking": true
+              },
+              "min_p": 0.0,
+              "repetition_penalty": 1.0,
+              "top_k": 20
+            },
+            "frequency_penalty": 0.0,
+            "max_tokens": 8192,
+            "presence_penalty": 0.0,
+            "temperature": 0.6,
+            "top_p": 0.95
+          }
+        }
+      ],
+      "planned_completions_not_executed": 32
+    },
+    {
+      "profile": "full",
+      "command": "nix develop . --no-write-lock-file --command eval/direct/run full --dry-run",
+      "exit_code": 0,
+      "native_selections": [
+        {
+          "character_counts_are_not_model_tokens": true,
+          "environment": "graphwalks",
+          "environment_type": "SingleTurnEnv",
+          "examples": 350,
+          "independent_scoring": true,
+          "max_concurrent": 1,
+          "name": "direct-graphwalks-bfs",
+          "prompt_characters_max": 219589,
+          "prompt_characters_min": 2788,
+          "prompt_message_counts": [
+            1
+          ],
+          "requests_sent": 0,
+          "rollouts_per_example": 1,
+          "sampling": {
+            "extra_body": {
+              "chat_template_kwargs": {
+                "enable_thinking": true
+              },
+              "min_p": 0.0,
+              "repetition_penalty": 1.0,
+              "top_k": 20
+            },
+            "frequency_penalty": 0.0,
+            "max_tokens": 8192,
+            "presence_penalty": 0.0,
+            "temperature": 0.6,
+            "top_p": 0.95
+          }
+        },
+        {
+          "character_counts_are_not_model_tokens": true,
+          "environment": "graphwalks",
+          "environment_type": "SingleTurnEnv",
+          "examples": 400,
+          "independent_scoring": true,
+          "max_concurrent": 1,
+          "name": "direct-graphwalks-parents",
+          "prompt_characters_max": 219509,
+          "prompt_characters_min": 2709,
+          "prompt_message_counts": [
+            1
+          ],
+          "requests_sent": 0,
+          "rollouts_per_example": 1,
+          "sampling": {
+            "extra_body": {
+              "chat_template_kwargs": {
+                "enable_thinking": true
+              },
+              "min_p": 0.0,
+              "repetition_penalty": 1.0,
+              "top_k": 20
+            },
+            "frequency_penalty": 0.0,
+            "max_tokens": 8192,
+            "presence_penalty": 0.0,
+            "temperature": 0.6,
+            "top_p": 0.95
+          }
+        },
+        {
+          "character_counts_are_not_model_tokens": true,
+          "environment": "mrcr-v2",
+          "environment_type": "Env",
+          "examples": 141,
+          "independent_scoring": true,
+          "max_concurrent": 1,
+          "name": "direct-mrcr-128k-256k",
+          "prompt_characters_max": 1213867,
+          "prompt_characters_min": 1213837,
+          "prompt_message_counts": [
+            1
+          ],
+          "requests_sent": 0,
+          "rollouts_per_example": 8,
+          "sampling": {
+            "extra_body": {
+              "chat_template_kwargs": {
+                "enable_thinking": true
+              },
+              "min_p": 0.0,
+              "repetition_penalty": 1.0,
+              "top_k": 20
+            },
+            "frequency_penalty": 0.0,
+            "max_tokens": 8192,
+            "presence_penalty": 0.0,
+            "temperature": 0.6,
+            "top_p": 0.95
+          }
+        },
+        {
+          "character_counts_are_not_model_tokens": true,
+          "environment": "mrcr-v2",
+          "environment_type": "Env",
+          "examples": 85,
+          "independent_scoring": true,
+          "max_concurrent": 1,
+          "name": "direct-mrcr-32k-64k",
+          "prompt_characters_max": 297980,
+          "prompt_characters_min": 297955,
+          "prompt_message_counts": [
+            1
+          ],
+          "requests_sent": 0,
+          "rollouts_per_example": 8,
+          "sampling": {
+            "extra_body": {
+              "chat_template_kwargs": {
+                "enable_thinking": true
+              },
+              "min_p": 0.0,
+              "repetition_penalty": 1.0,
+              "top_k": 20
+            },
+            "frequency_penalty": 0.0,
+            "max_tokens": 8192,
+            "presence_penalty": 0.0,
+            "temperature": 0.6,
+            "top_p": 0.95
+          }
+        }
+      ],
+      "planned_completions_not_executed": 2558
+    }
+  ],
+  "facts": {
+    "graphwalks_problem_types": [
+      "bfs",
+      "parents"
+    ],
+    "graphwalks_source_rows": 1150,
+    "graphwalks_smoke_source_filter_eligible": {
+      "bfs": 250,
+      "parents": 300
+    },
+    "graphwalks_full_source_filter_eligible": {
+      "bfs": 350,
+      "parents": 400
+    },
+    "graphwalks_filter_units": "upstream prompt_chars column; not necessarily full normalized prompt characters; never model tokens",
+    "mrcr_source_bucket_rows": {
+      "32k-64k": 85,
+      "128k-256k": 141
+    },
+    "context_objective_tokens": 262144,
+    "context_qualification": "not performed",
+    "native_task_and_scoring_sources_modified": false,
+    "server_requests_sent": 0
+  }
+}

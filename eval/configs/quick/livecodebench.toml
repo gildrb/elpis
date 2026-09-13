@@ -1,0 +1,37 @@
+# Native taskset settings; shared endpoint/sampling in ../local.toml.
+num_tasks = 12
+num_rollouts = 1
+max_concurrent = 1
+shuffle = true
+push = false
+
+[env.taskset]
+id = "livecodebench"
+version = "v6"
+start_date = "8/1/2024"
+end_date = "5/1/2025"
+
+[env.agent]
+max_turns = 1
+max_output_tokens = 8192
+
+[env.agent.timeout]
+setup = 600.0
+rollout = 1800.0
+scoring = 600.0
+
+[env.agent.harness]
+id = "null"
+
+[env.agent.harness.env]
+UV_LOCKED = "true"
+UV_PYTHON = "3.12"
+UV_PYTHON_DOWNLOADS = "never"
+
+[env.agent.runtime]
+type = "docker"
+image = "qwen-prime-eval:locked"
+workdir = "/workspace"
+cpu = 2.0
+memory = 4.0
+allow = []

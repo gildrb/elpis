@@ -1,5 +1,6 @@
---- a/kernels/ops/kvarn/store.py
-+++ b/kernels/ops/kvarn/store.py
+diff --git a/python/sglang/kernels/ops/kvarn/store.py b/python/sglang/kernels/ops/kvarn/store.py
+--- a/python/sglang/kernels/ops/kvarn/store.py
++++ b/python/sglang/kernels/ops/kvarn/store.py
 @@ -302,11 +302,11 @@
  
  

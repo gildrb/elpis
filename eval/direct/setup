@@ -1,0 +1,37 @@
+#!/usr/bin/env bash
+# Install only pinned upstream loaders and their separately locked legacy runtimes.
+set -euo pipefail
+unset PYTHONPATH PYTHONHOME
+root=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)
+check=false
+case "${1:-}" in "") ;; --check) check=true ;; *) echo "Usage: eval/direct/setup [--check]" >&2; exit 2 ;; esac
+if (( $# > 1 )); then exit 2; fi
+for executable in git jq uv; do command -v "$executable" >/dev/null; done
+[[ "$(uv --version)" == "uv 0.12.1 "* ]] || { echo "Enter nix develop . for pinned uv 0.12.1." >&2; exit 1; }
+jq -e '.schema == 1 and .uv == "0.12.1" and .python == "3.12" and
+  (.sources | length == 3) and
+  ([.sources[] | (.directory | test("^[a-z][a-z0-9-]*$")) and
+    (.repository | test("^https://github.com/PrimeIntellect-ai/(prime-envs|verifiers)[.]git$")) and
+    (.revision | test("^[a-f0-9]{40}$"))] | all)' "$root/sources.lock" >/dev/null
+[[ ! -L "$root/.sources" ]] || { echo "Refusing symlink source root." >&2; exit 1; }
+mkdir -p -- "$root/.sources"
+while IFS=$'\t' read -r directory repository revision; do
+  checkout="$root/.sources/$directory"
+  [[ ! -L "$checkout" ]] || { echo "Refusing symlink source checkout." >&2; exit 1; }
+  if [[ ! -e "$checkout" ]]; then
+    if [[ "$check" == true ]]; then echo "Run eval/direct/setup first." >&2; exit 1; fi
+    git clone --filter=blob:none --no-checkout "$repository" "$checkout"
+    git -C "$checkout" checkout --detach "$revision"
+  fi
+  [[ "$(git -C "$checkout" rev-parse HEAD)" == "$revision" ]] || { echo "Wrong source revision: $directory" >&2; exit 1; }
+  [[ -z "$(git -C "$checkout" status --porcelain --untracked-files=all)" ]] || { echo "Dirty upstream source: $directory" >&2; exit 1; }
+done < <(jq -r '.sources[] | [.directory, .repository, .revision] | @tsv' "$root/sources.lock")
+for project in mrcr graphwalks; do
+  if [[ "$check" == true ]]; then
+    [[ -x "$root/$project/.venv/bin/vf-eval" ]] || { echo "Run eval/direct/setup first." >&2; exit 1; }
+    uv lock --project "$root/$project" --check --offline
+    uv pip check --python "$root/$project/.venv/bin/python"
+  else
+    uv sync --project "$root/$project" --locked
+  fi
+done

@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Assemble supplied, pinned model files in a new private directory; no network."""
+
 from __future__ import annotations
 
 import argparse
@@ -15,6 +16,7 @@ ROOT = Path(__file__).resolve().parent
 
 
 def copy_checked(source: Path, destination: Path, expected: str, size: int) -> None:
+    """Copy an input exclusively and authenticate its size and digest."""
     guard.regular(source)
     checksum = hashlib.sha256()
     count = 0
@@ -30,27 +32,38 @@ def copy_checked(source: Path, destination: Path, expected: str, size: int) -> N
             outgoing.write(block)
         outgoing.flush()
         os.fsync(outgoing.fileno())
-    guard.require(count == size and checksum.hexdigest() == expected,
-                  f"Input SHA256/size mismatch: {source}; partial attempt retained")
+    guard.require(
+        count == size and checksum.hexdigest() == expected,
+        f"Input SHA256/size mismatch: {source}; partial attempt retained",
+    )
     destination.chmod(0o444)
 
 
-def assemble(base: Path, fast: Path, draft: Path, embedding: Path, destination: Path) -> None:
+def assemble(
+    base: Path, fast: Path, draft: Path, embedding: Path, destination: Path
+) -> None:
+    """Authenticate supplied files and copy them into a new attempt."""
     for directory in (base, fast, draft, embedding.parent, destination.parent):
         guard.directory(directory)
-    guard.require(destination.is_absolute() and ".." not in destination.parts,
-                  "Destination must be absolute without parent traversal")
+    guard.require(
+        destination.is_absolute() and ".." not in destination.parts,
+        "Destination must be absolute without parent traversal",
+    )
     provenance = guard.document(guard.read_bytes(ROOT / "source-provenance.json"))
     manifest = guard.document(guard.read_bytes(ROOT / "manifest.json"))
     repositories = guard.obj(provenance["repositories"])
     revisions = guard.obj(manifest["source_revisions"])
     for label, value in repositories.items():
-        guard.require(guard.obj(value)["revision"] == revisions[label], "Revision mismatch")
+        guard.require(
+            guard.obj(value)["revision"] == revisions[label], "Revision mismatch"
+        )
     files = guard.obj(provenance["files"])
     plans: list[tuple[Path, str, str, str, int]] = []
     roots = {"base": base, "fast": fast, "draft": draft}
-    for group, names, inventory_file in (("source", guard.TARGET_NAMES, "source.sha256"),
-                                         ("draft", guard.DRAFT_NAMES, "draft.sha256")):
+    for group, names, inventory_file in (
+        ("source", guard.TARGET_NAMES, "source.sha256"),
+        ("draft", guard.DRAFT_NAMES, "draft.sha256"),
+    ):
         inventory = guard.inventory(guard.read_bytes(ROOT / inventory_file), names)
         entries = guard.obj(files[group])
         guard.require(set(entries) == names, "Provenance inventory mismatch")
@@ -62,14 +75,21 @@ def assemble(base: Path, fast: Path, draft: Path, embedding: Path, destination: 
             size = guard.integer(entry["size"])
             guard.require(size > 0, "Invalid input size")
             if origin == "quantized-embedding":
-                guard.require(group == "source" and name == "model-00006-of-00007.safetensors",
-                              "Unexpected derived file")
+                guard.require(
+                    group == "source" and name == "model-00006-of-00007.safetensors",
+                    "Unexpected derived file",
+                )
                 continue
             guard.require(origin in roots, "Unknown origin")
             plans.append((roots[origin] / name, group, name, checksum, size))
     raw = guard.obj(provenance["embedding_input"])
-    plans.append((embedding, "input", guard.filename(raw["filename"]),
-                  guard.sha256(raw["sha256"]), guard.integer(raw["size"])))
+    plans.append((
+        embedding,
+        "input",
+        guard.filename(raw["filename"]),
+        guard.sha256(raw["sha256"]),
+        guard.integer(raw["size"]),
+    ))
     for source, _, _, _, size in plans:
         guard.regular(source)
         guard.require(source.stat().st_size == size, f"Input size mismatch: {source}")
@@ -82,10 +102,13 @@ def assemble(base: Path, fast: Path, draft: Path, embedding: Path, destination: 
         print(f"Copied and authenticated {group}/{name}", flush=True)
     (destination / "draft").chmod(0o555)
     (destination / "input").chmod(0o555)
-    print("Offline inputs authenticated. Source is incomplete until quantize-embedding.py succeeds.")
+    print(
+        "Offline inputs authenticated. Source is incomplete until quantize-embedding.py succeeds."
+    )
 
 
 def main() -> int:
+    """Run the command and report validation failures."""
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--base", type=Path, required=True)
     parser.add_argument("--fast", type=Path, required=True)
@@ -94,7 +117,9 @@ def main() -> int:
     parser.add_argument("--destination", type=Path, required=True)
     args = parser.parse_args()
     try:
-        assemble(args.base, args.fast, args.draft, args.embedding_input, args.destination)
+        assemble(
+            args.base, args.fast, args.draft, args.embedding_input, args.destination
+        )
     except (OSError, ValueError, KeyError, TypeError) as error:
         print(f"Offline assembly failed: {error}", file=sys.stderr)
         return 1

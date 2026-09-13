@@ -1,0 +1,4 @@
+# Linux/amd64 helper tags required by upstream Verifiers.
+# tag registry-manifest-digest image-config-digest
+python:3.11-alpine sha256:bdcf7e55ece5a89572d4a951b2ce894ebf67a4813df05e03652ea7ead7efca63 sha256:0c3bd7631f7671dbc7a1cbb4f145b284b909b16cc6746e20cf4c773d7f515b38
+alpine:3.22 sha256:7c8cb692ae09657cbc4a3f3cbd0e8d5a2690ba38386aaaf252dbb060bf5eb2e6 sha256:b66e0ce64844f5c6435b0c4bfd965558199ab0f53270846861c979cb1ac29365

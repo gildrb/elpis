@@ -1,3 +1,5 @@
+diff --git a/python/sglang/kernels/ops/kvarn/__init__.py b/python/sglang/kernels/ops/kvarn/__init__.py
+new file mode 100644
 --- /dev/null
 +++ b/python/sglang/kernels/ops/kvarn/__init__.py
 @@ -0,0 +1,4 @@
@@ -5,6 +7,8 @@
 +# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 +# Adapted from syv-ai KVarN 18349177b7962ef1d699dc154844f9c04317a474.
 +"""Portable, eager-only KVarN tile operations."""
+diff --git a/python/sglang/kernels/ops/kvarn/decode.py b/python/sglang/kernels/ops/kvarn/decode.py
+new file mode 100644
 --- /dev/null
 +++ b/python/sglang/kernels/ops/kvarn/decode.py
 @@ -0,0 +1,298 @@
@@ -306,6 +310,8 @@
 +        OUTPUT_Q_STRIDE=output.stride(0), OUTPUT_H_STRIDE=output.stride(1),
 +        D=d, SPLITS=partial.shape[2], num_warps=4, num_stages=1)
 +    return output
+diff --git a/python/sglang/kernels/ops/kvarn/gather.py b/python/sglang/kernels/ops/kvarn/gather.py
+new file mode 100644
 --- /dev/null
 +++ b/python/sglang/kernels/ops/kvarn/gather.py
 @@ -0,0 +1,150 @@
@@ -459,6 +465,8 @@
 +        K_TOKEN=o.k_token, V_PACKED=o.v_packed, V_CHANNEL=o.v_channel,
 +        V_SCALE=o.v_scale, V_ZERO=o.v_zero, num_warps=4, num_stages=1)
 +    return keys, values
+diff --git a/python/sglang/kernels/ops/kvarn/sinkhorn.py b/python/sglang/kernels/ops/kvarn/sinkhorn.py
+new file mode 100644
 --- /dev/null
 +++ b/python/sglang/kernels/ops/kvarn/sinkhorn.py
 @@ -0,0 +1,192 @@
@@ -654,6 +662,8 @@
 +        R=rows, C=columns, ITERATIONS=iterations,
 +        CLIP_STD_MIN=1e-3, CLIP_STD_MAX=1e3, LOG_S_MIN=-0.3, LOG_S_MAX=10.0,
 +        num_warps=8, num_stages=2)
+diff --git a/python/sglang/kernels/ops/kvarn/store.py b/python/sglang/kernels/ops/kvarn/store.py
+new file mode 100644
 --- /dev/null
 +++ b/python/sglang/kernels/ops/kvarn/store.py
 @@ -0,0 +1,492 @@
@@ -1149,6 +1159,8 @@
 +        B=triton.next_power_of_2(width), num_warps=4, num_stages=1)
 +    discard_provisional_out(view, workspace)
 +    complete_tiles_out(view, workspace, seal=True)
+diff --git a/python/sglang/srt/arg_groups/kvarn_hook.py b/python/sglang/srt/arg_groups/kvarn_hook.py
+new file mode 100644
 --- /dev/null
 +++ b/python/sglang/srt/arg_groups/kvarn_hook.py
 @@ -0,0 +1,73 @@
@@ -1225,6 +1237,7 @@
 +        raise ValueError("Portable KVarN transactions require serialized scheduling")
 +    if not cfg.disable_flashinfer_autotune:
 +        raise ValueError("KVarN qualification requires --disable-flashinfer-autotune for owned dummy inputs")
+diff --git a/python/sglang/srt/arg_groups/pipeline.py b/python/sglang/srt/arg_groups/pipeline.py
 --- a/python/sglang/srt/arg_groups/pipeline.py
 +++ b/python/sglang/srt/arg_groups/pipeline.py
 @@ -367,4 +367,7 @@
@@ -1235,6 +1248,7 @@
 +
 +    validate_kvarn_candidate(server_args)
      server_args._resolution_finished = True
+diff --git a/python/sglang/srt/arg_groups/speculative_hook.py b/python/sglang/srt/arg_groups/speculative_hook.py
 --- a/python/sglang/srt/arg_groups/speculative_hook.py
 +++ b/python/sglang/srt/arg_groups/speculative_hook.py
 @@ -547,6 +547,7 @@
@@ -1245,6 +1259,7 @@
          "flashinfer",
          "fa3",
          "fa4",
+diff --git a/python/sglang/srt/layers/attention/attention_registry.py b/python/sglang/srt/layers/attention/attention_registry.py
 --- a/python/sglang/srt/layers/attention/attention_registry.py
 +++ b/python/sglang/srt/layers/attention/attention_registry.py
 @@ -45,6 +45,24 @@
@@ -1272,6 +1287,8 @@
  
  
  @register_attention_backend("flashinfer")
+diff --git a/python/sglang/srt/layers/attention/kvarn_backend.py b/python/sglang/srt/layers/attention/kvarn_backend.py
+new file mode 100644
 --- /dev/null
 +++ b/python/sglang/srt/layers/attention/kvarn_backend.py
 @@ -0,0 +1,198 @@
@@ -1473,6 +1490,8 @@
 +            ))
 +            self.pool.finish_attention(local_layer)
 +        return result.reshape(-1, layer.tp_q_head_num * layer.v_head_dim)
+diff --git a/python/sglang/srt/layers/attention/kvarn_draft_backend.py b/python/sglang/srt/layers/attention/kvarn_draft_backend.py
+new file mode 100644
 --- /dev/null
 +++ b/python/sglang/srt/layers/attention/kvarn_draft_backend.py
 @@ -0,0 +1,296 @@
@@ -1772,6 +1791,7 @@
 +        save_kv_cache: bool = True,
 +    ) -> torch.Tensor:
 +        raise NotImplementedError("KVarN draft uses eight-token block forwards")
+diff --git a/python/sglang/srt/mem_cache/allocation.py b/python/sglang/srt/mem_cache/allocation.py
 --- a/python/sglang/srt/mem_cache/allocation.py
 +++ b/python/sglang/srt/mem_cache/allocation.py
 @@ -26,6 +26,7 @@
@@ -1821,6 +1841,7 @@
  
      # DSV4-NPU allocator also needs req_pool_indices for C128 KV allocation and
      # returns a DSV4OutCacheLoc bundle; hasattr-gated so others stay unchanged.
+diff --git a/python/sglang/srt/mem_cache/kv_cache_configurator.py b/python/sglang/srt/mem_cache/kv_cache_configurator.py
 --- a/python/sglang/srt/mem_cache/kv_cache_configurator.py
 +++ b/python/sglang/srt/mem_cache/kv_cache_configurator.py
 @@ -1122,6 +1122,63 @@
@@ -1944,6 +1965,7 @@
              token_capacity = min(token_capacity, user_limit)
  
          # Sync across PP ranks (each may have different layer counts)
+diff --git a/python/sglang/srt/mem_cache/kv_cache_dtype.py b/python/sglang/srt/mem_cache/kv_cache_dtype.py
 --- a/python/sglang/srt/mem_cache/kv_cache_dtype.py
 +++ b/python/sglang/srt/mem_cache/kv_cache_dtype.py
 @@ -55,6 +55,9 @@
@@ -1956,6 +1978,8 @@
      elif server_args_kv_cache_dtype == "mxfp8":
          kv_cache_dtype = torch.float8_e4m3fn
      elif server_args_kv_cache_dtype in ("bf16", "bfloat16"):
+diff --git a/python/sglang/srt/mem_cache/kvarn/__init__.py b/python/sglang/srt/mem_cache/kvarn/__init__.py
+new file mode 100644
 --- /dev/null
 +++ b/python/sglang/srt/mem_cache/kvarn/__init__.py
 @@ -0,0 +1,7 @@
@@ -1966,6 +1990,8 @@
 +from .types import KVarNCapacity, KVarNLayerView, KVarNLayout, KVarNWorkspace
 +
 +__all__ = ["KVarNCapacity", "KVarNLayerView", "KVarNLayout", "KVarNWorkspace"]
+diff --git a/python/sglang/srt/mem_cache/kvarn/kernels.py b/python/sglang/srt/mem_cache/kvarn/kernels.py
+new file mode 100644
 --- /dev/null
 +++ b/python/sglang/srt/mem_cache/kvarn/kernels.py
 @@ -0,0 +1,9 @@
@@ -1978,6 +2004,8 @@
 +from sglang.kernels.ops.kvarn.store import store_tile
 +
 +__all__ = ["packed_attention", "gather_visible", "store_tile"]
+diff --git a/python/sglang/srt/mem_cache/kvarn/layout.py b/python/sglang/srt/mem_cache/kvarn/layout.py
+new file mode 100644
 --- /dev/null
 +++ b/python/sglang/srt/mem_cache/kvarn/layout.py
 @@ -0,0 +1,57 @@
@@ -2038,6 +2066,8 @@
 +    raw = 2 * capacity.tail_slots * 128 * layout.kv_heads * layout.head_dim * dtype.itemsize
 +    metadata = pages * (4 + 4 + 128 + 128 + 1 + 1) + capacity.tail_slots * 4
 +    return len(layout.layer_ids) * (packed + raw + metadata) + capacity.workspace_bytes
+diff --git a/python/sglang/srt/mem_cache/kvarn/pool.py b/python/sglang/srt/mem_cache/kvarn/pool.py
+new file mode 100644
 --- /dev/null
 +++ b/python/sglang/srt/mem_cache/kvarn/pool.py
 @@ -0,0 +1,600 @@
@@ -2641,6 +2671,8 @@
 +
 +    def get_kv_buffer(self, layer_id: int) -> tuple[torch.Tensor, torch.Tensor]:
 +        raise NotImplementedError("KVarN cannot expose a whole-pool dense KV buffer")
+diff --git a/python/sglang/srt/mem_cache/kvarn/types.py b/python/sglang/srt/mem_cache/kvarn/types.py
+new file mode 100644
 --- /dev/null
 +++ b/python/sglang/srt/mem_cache/kvarn/types.py
 @@ -0,0 +1,118 @@
@@ -2762,6 +2794,8 @@
 +                   torch.zeros((1,), dtype=torch.int32, device=device),
 +                   torch.full((capacity.tail_slots,), -1, dtype=torch.int32, device=device),
 +                   torch.empty((capacity.tail_slots, layout.kv_heads, layout.head_dim, 128), dtype=torch.float32, device=device))
+diff --git a/python/sglang/srt/mem_cache/kvarn_allocator.py b/python/sglang/srt/mem_cache/kvarn_allocator.py
+new file mode 100644
 --- /dev/null
 +++ b/python/sglang/srt/mem_cache/kvarn_allocator.py
 @@ -0,0 +1,115 @@
@@ -2880,6 +2914,8 @@
 +        return self.available_size() >= num_tokens and all(
 +            pool.available_tail_slots() >= required for pool in self.kvarn_pools
 +        )
+diff --git a/python/sglang/srt/mem_cache/kvarn_budget.py b/python/sglang/srt/mem_cache/kvarn_budget.py
+new file mode 100644
 --- /dev/null
 +++ b/python/sglang/srt/mem_cache/kvarn_budget.py
 @@ -0,0 +1,36 @@
@@ -2919,6 +2955,7 @@
 +        return self.fixed_bytes + token_capacity * (
 +            self.packed_bytes_per_token + self.metadata_bytes_per_token
 +        )
+diff --git a/python/sglang/srt/model_executor/model_runner_components/spec_aux_hidden_state.py b/python/sglang/srt/model_executor/model_runner_components/spec_aux_hidden_state.py
 --- a/python/sglang/srt/model_executor/model_runner_components/spec_aux_hidden_state.py
 +++ b/python/sglang/srt/model_executor/model_runner_components/spec_aux_hidden_state.py
 @@ -236,6 +236,16 @@
@@ -2947,6 +2984,7 @@
          logger.warning(
              "Could not resolve DFLASH draft KV bytes/token (%s); falling back to "
              "layer-count scaling for the KV pool budget.",
+diff --git a/python/sglang/srt/model_executor/pool_configurator.py b/python/sglang/srt/model_executor/pool_configurator.py
 --- a/python/sglang/srt/model_executor/pool_configurator.py
 +++ b/python/sglang/srt/model_executor/pool_configurator.py
 @@ -147,6 +147,38 @@
@@ -2997,6 +3035,7 @@
      if is_deepseek_v4(kvc.model_config.hf_config) and kvc.is_hybrid_swa:
          return DSV4PoolConfigurator(kvc)
      if kvc.is_hybrid_swa:
+diff --git a/python/sglang/srt/server_args.py b/python/sglang/srt/server_args.py
 --- a/python/sglang/srt/server_args.py
 +++ b/python/sglang/srt/server_args.py
 @@ -173,6 +173,8 @@
@@ -3048,6 +3087,7 @@
          ),
          NS("spec"),
      ] = None
+diff --git a/python/sglang/srt/speculative/dflash_worker_v2.py b/python/sglang/srt/speculative/dflash_worker_v2.py
 --- a/python/sglang/srt/speculative/dflash_worker_v2.py
 +++ b/python/sglang/srt/speculative/dflash_worker_v2.py
 @@ -26,6 +26,8 @@

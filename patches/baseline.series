@@ -1,0 +1,3 @@
+71fcf894281ea12367d9aa2aac5b8f8303fc4b7e21a84fc849c1c05a36889b4e  packed-head-predicate.patch
+fb8abf81343bb1e99fc8c8037a12a794d946b86e6564903c691b435bd3d0e8ab  quant-aware-fc.patch
+06ebc7c718253b8294c0e01a8419e1bbdea054ac19bf20239210ade4a322e9bf  mamba-cache-prefix.patch

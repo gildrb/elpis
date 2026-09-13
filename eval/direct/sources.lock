@@ -1,0 +1,22 @@
+{
+  "schema": 1,
+  "python": "3.12",
+  "uv": "0.12.1",
+  "sources": [
+    {
+      "directory": "prime-envs",
+      "repository": "https://github.com/PrimeIntellect-ai/prime-envs.git",
+      "revision": "a6f4ceedfd79cad4586064fb1c27f5ea5f4a10fd"
+    },
+    {
+      "directory": "verifiers",
+      "repository": "https://github.com/PrimeIntellect-ai/verifiers.git",
+      "revision": "977e3fc4050893d938f68163ae0bd79a8672e8d7"
+    },
+    {
+      "directory": "verifiers-graphwalks",
+      "repository": "https://github.com/PrimeIntellect-ai/verifiers.git",
+      "revision": "977e3fc4050893d938f68163ae0bd79a8672e8d7"
+    }
+  ]
+}

@@ -1,0 +1,128 @@
+#!/usr/bin/env bash
+# Invoke native upstream evaluation. No prompts, task selection, or scoring here.
+set -euo pipefail
+set +x
+export LC_ALL=C
+unset PYTHONPATH PYTHONHOME
+umask 077
+root=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)
+repo=$(cd -- "$root/.." && pwd -P)
+profile=${1:?Usage: eval/scripts/run PROFILE [TASKSET] [--dry-run]}
+shift
+case "$profile" in smoke|quick|full|agentic|agentic-full) ;; *) printf 'Unknown profile: %s\n' "$profile" >&2; exit 2 ;; esac
+selection=""
+dry=false
+for argument in "$@"; do
+    if [[ "$argument" == --dry-run ]]; then dry=true
+    elif [[ -z "$selection" && "$argument" =~ ^[a-z0-9-]+$ ]]; then selection=$argument
+    else printf 'Usage: eval/scripts/run PROFILE [TASKSET] [--dry-run]\n' >&2; exit 2
+    fi
+done
+if [[ -n "$selection" ]]; then
+    configs=("$root/configs/$profile/$selection.toml")
+    [[ -f "${configs[0]}" ]] || { printf 'No such profile taskset: %s\n' "$selection" >&2; exit 2; }
+else
+    configs=("$root/configs/$profile/"*.toml)
+fi
+[[ -x "$root/.venv/bin/eval" ]] || { printf 'Run eval/scripts/setup first\n' >&2; exit 1; }
+"$root/scripts/setup" --check
+if [[ "$dry" == false ]]; then
+    : "${QWEN_API_KEY_FILE:?Set the absolute path to the serving API key file}"
+    [[ "$QWEN_API_KEY_FILE" == /* && -f "$QWEN_API_KEY_FILE" && -r "$QWEN_API_KEY_FILE" ]] || { printf 'API key file must be absolute and readable\n' >&2; exit 1; }
+    [[ $(stat --format='%u' "$QWEN_API_KEY_FILE") -eq $(id -u) ]]
+    case $(stat --format='%a' "$QWEN_API_KEY_FILE") in 400|600) ;; *) printf 'API key must be private (0400/0600)\n' >&2; exit 1 ;; esac
+    [[ $(wc -c <"$QWEN_API_KEY_FILE") -le 4097 ]]
+    grep -Iq . "$QWEN_API_KEY_FILE" || { printf 'API key must be nonempty text without NUL bytes\n' >&2; exit 1; }
+    QWEN_API_KEY=$(cat -- "$QWEN_API_KEY_FILE")
+    [[ "$QWEN_API_KEY" =~ ^[!-~]+$ && ${#QWEN_API_KEY} -le 4096 ]] || { printf 'Invalid API key file\n' >&2; exit 1; }
+    export QWEN_API_KEY
+    for config in "${configs[@]}"; do
+        taskset=$(basename -- "$config" .toml)
+        case "$taskset" in mrcr-v2-*) taskset=mrcr-v2 ;; esac
+        "$root/scripts/data" --check "$taskset"
+    done
+fi
+# Upstream subprocess runtime has a HOME-relative cache. Never use the user's
+# home for runtime installers, scripts, platform login, or result state.
+export HOME="$root/.cache/home"
+export HF_HOME="$root/.cache/huggingface"
+export HF_HUB_CACHE="$HF_HOME/hub"
+export HF_HUB_OFFLINE=1 HF_DATASETS_OFFLINE=1 HF_HUB_DISABLE_TELEMETRY=1
+export MRCR_V2_CACHE_DIR="$root/.cache/mrcr_v2"
+export UV_PYTHON="$root/.venv/bin/python" UV_PYTHON_DOWNLOADS=never
+unset UV_FROZEN
+mkdir -p -- "$HOME" "$root/runs"
+group=$(mktemp -d "$root/runs/$profile.XXXXXXXX")
+# Fresh derived Arrow cache: only authenticated raw dataset assets are reused.
+export HF_DATASETS_CACHE="$group/.dataset-cache"
+printf 'Native outputs and provenance: %s\n' "$group"
+mkdir -- "$group/provenance"
+cp -- "$root/prime-envs.lock" "$root/datasets.lock" "$root/uv.lock" "$root/configs/local.toml" "$group/provenance/"
+cp -R -- "$root/runtime" "$group/provenance/runtime"
+cp -- "$root/pyproject.toml" "$repo/flake.lock" "$group/provenance/"
+sha256sum -- "$root/scripts/"* >"$group/provenance/scripts.sha256"
+git -C "$repo" rev-parse HEAD >"$group/provenance/recipe-checkout.txt"
+git -C "$repo" status --porcelain=v1 >"$group/provenance/worktree-status.txt"
+git -C "$repo" diff --binary HEAD | sha256sum >"$group/provenance/worktree-diff.sha256"
+printf '%s\n' "${QWEN_RECIPE_ID:-UNVERIFIED: identify the actually serving deployment before publishing}" >"$group/provenance/serving-recipe.txt"
+cp -- "$repo/prepare/manifest.json" "$group/provenance/model-artifact-manifest.json"
+cp -- "$repo/patches/source.env" "$group/provenance/sglang-source.env"
+uv --version >"$group/provenance/uv-version.txt"
+"$root/.venv/bin/python" --version >"$group/provenance/python-version.txt"
+cd -- "$root/.sources/prime-envs"
+for config in "${configs[@]}"; do
+    cd -- "$root/.sources/prime-envs"
+    taskset=$(basename -- "$config" .toml)
+    launch="$group/provenance/$taskset.toml"
+    cp -- "$config" "$launch"
+    if grep -q '^type = "docker"$' "$config" && [[ "$dry" == false ]]; then
+        "$root/scripts/sandbox" --check
+        [[ -f "$root/.cache/sandbox-image" ]] || { printf 'Run eval/scripts/sandbox first\n' >&2; exit 1; }
+        image=$(cat -- "$root/.cache/sandbox-image")
+        [[ "$image" =~ ^sha256:[a-f0-9]{64}$ ]] || { printf 'Invalid sandbox image identity\n' >&2; exit 1; }
+        [[ $(docker image inspect --format '{{.Id}}' "$image") == "$image" ]]
+        sed "s|^image = .*|image = \"$image\"|" "$config" >"$launch"
+    fi
+    flags=(--no-rich --no-push)
+    case "$taskset" in
+        aime24|aime25|aime26|i3-logic)
+            dataset_repo=$(jq -r --arg key "$taskset" '.huggingface[$key].repo' "$root/datasets.lock")
+            revision=$(jq -r --arg key "$taskset" '.huggingface[$key].revision' "$root/datasets.lock")
+            snapshot="$HF_HUB_CACHE/datasets--${dataset_repo//\//--}/snapshots/$revision"
+            # Native dataset-name config accepts the unchanged local snapshot.
+            # This avoids online Hub metadata lookup with a fresh Arrow cache.
+            if [[ "$taskset" == i3-logic ]]; then
+                flags+=(--env.taskset.dataset.name "$snapshot/logic" --env.taskset.dataset.subset default)
+            else
+                flags+=(--env.taskset.dataset-name "$snapshot")
+            fi
+            ;;
+    esac
+    if [[ "$taskset" == graphwalks ]]; then
+        dataset_repo=$(jq -r '.huggingface.graphwalks.repo' "$root/datasets.lock")
+        revision=$(jq -r '.huggingface.graphwalks.revision' "$root/datasets.lock")
+        snapshot="$HF_HUB_CACHE/datasets--${dataset_repo//\//--}/snapshots/$revision"
+        # GraphWalks has no dataset-name option. datasets.load_dataset natively
+        # resolves this relative local directory before trying the Hub.
+        mkdir -p -- "$group/local-datasets/openai"
+        ln -s -- "$snapshot" "$group/local-datasets/openai/graphwalks"
+        cd -- "$group/local-datasets"
+    fi
+    pwd -P >"$group/provenance/$taskset-working-directory.txt"
+    if [[ "$profile" == smoke ]]; then flags+=(-v); fi
+    if [[ "$dry" == true ]]; then flags+=(--dry-run); fi
+    uv run --project "$root" --no-sync eval @ "$root/configs/local.toml" @ "$launch" -o "$group/$taskset" "${flags[@]}"
+    if [[ "$dry" == false ]]; then
+        traces=("$group/$taskset/"*/traces.jsonl)
+        [[ ${#traces[@]} -eq 1 && -s "${traces[0]}" ]] || { printf 'No unique upstream traces file\n' >&2; exit 1; }
+        # Operational failures are not a score. Preserve the native records and
+        # stop rather than let a successful CLI exit hide failed episodes.
+        if jq -se 'length > 0 and all(.ok == true)' "${traces[0]}" >/dev/null; then
+            printf 'Native episodes completed: %s\n' "${traces[0]}"
+        else
+            printf 'Upstream episode failures; inspect %s\n' "${traces[0]}" >&2
+            jq -r 'select(.ok == false) | .errors[]? | .message' "${traces[0]}" >&2
+            exit 1
+        fi
+    fi
+done

@@ -12,3 +12,9 @@ __pycache__/
 
 .venv/
 benchmark-runs/
+
+# Upstream evaluation source, environments, data and native traces stay local.
+/eval/.sources/
+/eval/.cache/
+/eval/runs/
+/eval/outputs/

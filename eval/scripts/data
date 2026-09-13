@@ -1,0 +1,153 @@
+#!/usr/bin/env bash
+# Native dataset-source acquisition only. No task construction or scoring.
+set -euo pipefail
+umask 077
+EVAL_ROOT=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)
+LOCK="$EVAL_ROOT/datasets.lock"
+CACHE="$EVAL_ROOT/.cache"
+HUB="$CACHE/huggingface/hub"
+MRCR="$CACHE/mrcr_v2"
+check=false
+if [[ ${1:-} == --check ]]; then check=true; shift; fi
+selection=${1:-all}
+if (( $# > 1 )); then printf 'Usage: %s [--check] [taskset|all]\n' "$0" >&2; exit 2; fi
+case "$selection" in
+    all|aime24|aime25|aime26|i3-logic|livecodebench|graphwalks|mrcr-v2) ;;
+    *) printf 'Unsupported dataset selection: %s\n' "$selection" >&2; exit 2 ;;
+esac
+for executable in jq git sha256sum flock; do command -v "$executable" >/dev/null; done
+# Validate all paths and digests before using the checked-in lock as shell input.
+jq -e '
+ .schema == 1 and
+ (.huggingface | type == "object") and
+ ([.huggingface[] |
+   (.repo | test("^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")) and
+   (.revision | test("^[a-f0-9]{40}$")) and
+   (.files | length > 0) and
+   ([.files[] |
+     (.path | test("^[A-Za-z0-9_-][A-Za-z0-9_./-]*$")) and
+     (.path | split("/") | all(. != ".." and . != ".")) and
+     (.size | type == "number") and .size > 0 and
+     ((.algorithm == "sha256" and (.hash | test("^[a-f0-9]{64}$"))) or
+      (.algorithm == "git-sha1" and (.hash | test("^[a-f0-9]{40}$"))))
+   ] | all)
+ ] | all) and
+ ([."mrcr-v2"[] |
+   (.filename | test("^mrcr_v2p1_8needle_in_\\([0-9]+,[0-9]+\\)_dynamic_fewshot_text_style_fast.csv$")) and
+   (.generation | test("^[0-9]+$")) and
+   (.sha256 | test("^[a-f0-9]{64}$")) and
+   .size > 0 and
+   .url == ("https://storage.googleapis.com/download/storage/v1/b/mrcr_v2/o/" + .filename + "?generation=" + .generation + "&alt=media")
+ ] | all)
+' "$LOCK" >/dev/null
+for directory in "$CACHE" "$CACHE/huggingface" "$HUB" "$MRCR"; do
+    if [[ -L "$directory" ]]; then printf 'Refusing symlink cache: %s\n' "$directory" >&2; exit 1; fi
+done
+mkdir -p -- "$CACHE"
+if [[ -L "$CACHE/datasets.lock" ]]; then printf 'Refusing symlink data lock\n' >&2; exit 1; fi
+exec 9>>"$CACHE/datasets.lock"
+flock -n 9 || { printf 'Another dataset operation is running\n' >&2; exit 1; }
+marker="$CACHE/.dataset-source-owner"
+if [[ -L "$marker" ]]; then printf 'Refusing symlink owner marker\n' >&2; exit 1; fi
+if [[ -f "$marker" ]]; then
+    [[ $(cat -- "$marker") == inference-eval-dataset-sources-v1 ]]
+elif [[ "$check" == true ]]; then
+    printf 'Run eval/scripts/data %s first\n' "$selection" >&2; exit 1
+else
+    # Only adopt absent/empty dedicated stores, never a user or shared HF cache.
+    for directory in "$HUB" "$MRCR"; do
+        if [[ -d "$directory" ]]; then
+            shopt -s nullglob dotglob
+            entries=("$directory"/*)
+            shopt -u nullglob dotglob
+            if (( ${#entries[@]} > 0 )); then printf 'Refusing unowned cache: %s\n' "$directory" >&2; exit 1; fi
+        fi
+    done
+    (set -o noclobber; printf 'inference-eval-dataset-sources-v1\n' >"$marker")
+fi
+mkdir -p -- "$HUB" "$MRCR"
+if [[ "$check" == false ]]; then
+    command -v curl >/dev/null
+    [[ -x "$EVAL_ROOT/.venv/bin/hf" ]] || { printf 'Run eval/scripts/setup first\n' >&2; exit 1; }
+fi
+while IFS= read -r taskset; do
+    if [[ "$selection" != all && "$selection" != "$taskset" ]]; then continue; fi
+    repo=$(jq -r --arg key "$taskset" '.huggingface[$key].repo' "$LOCK")
+    revision=$(jq -r --arg key "$taskset" '.huggingface[$key].revision' "$LOCK")
+    mapfile -t files < <(jq -r --arg key "$taskset" '.huggingface[$key].files[].path' "$LOCK")
+    includes=()
+    for filename in "${files[@]}"; do includes+=(--include "$filename"); done
+    repository="$HUB/datasets--${repo//\//--}"
+    snapshot="$repository/snapshots/$revision"
+    for directory in "$repository" "$repository/snapshots" "$snapshot"; do
+        if [[ -L "$directory" ]]; then printf 'Refusing symlink repository: %s\n' "$directory" >&2; exit 1; fi
+    done
+    if [[ "$check" == false ]]; then
+        HF_HUB_OFFLINE=0 HF_DATASETS_OFFLINE=0 HF_HOME="$CACHE/huggingface" HF_HUB_CACHE="$HUB" \
+            "$EVAL_ROOT/.venv/bin/hf" download "$repo" --repo-type dataset --revision "$revision" \
+            --cache-dir "$HUB" "${includes[@]}"
+    fi
+    # Dataset auto-discovery must never see an extra, unpinned parquet/JSON file.
+    shopt -s globstar nullglob dotglob
+    cached_entries=("$snapshot"/**/*)
+    shopt -u globstar nullglob dotglob
+    for entry in "${cached_entries[@]}"; do
+        if [[ -d "$entry" && ! -L "$entry" ]]; then continue; fi
+        relative=${entry#"$snapshot/"}
+        matched=false
+        for filename in "${files[@]}"; do
+            if [[ "$relative" == "$filename" ]]; then matched=true; break; fi
+        done
+        [[ "$matched" == true ]] || { printf 'Unpinned snapshot file: %s\n' "$entry" >&2; exit 1; }
+    done
+    while IFS=$'\t' read -r filename algorithm expected size; do
+        path="$snapshot/$filename"
+        [[ -f "$path" ]] || { printf 'Missing pinned data: %s\n' "$path" >&2; exit 1; }
+        [[ $(wc -c <"$path") -eq "$size" ]]
+        if [[ "$algorithm" == sha256 ]]; then
+            actual=$(sha256sum -- "$path"); actual=${actual%% *}
+        else
+            actual=$(git hash-object --no-filters -- "$path")
+        fi
+        [[ "$actual" == "$expected" ]] || { printf 'Source hash mismatch: %s\n' "$path" >&2; exit 1; }
+    done < <(jq -r --arg key "$taskset" '.huggingface[$key].files[] | [.path,.algorithm,.hash,.size] | @tsv' "$LOCK")
+    # Upstream I3/LCB/GraphWalks do not expose revision arguments. Pin the
+    # conventional HF main ref ONLY in this owned, isolated, offline run cache.
+    ref="$repository/refs/main"
+    if [[ -L "$repository/refs" || -L "$ref" ]]; then printf 'Refusing symlink ref\n' >&2; exit 1; fi
+    if [[ -f "$ref" ]]; then
+        [[ $(cat -- "$ref") == "$revision" ]] || { printf 'Unexpected cache revision: %s\n' "$ref" >&2; exit 1; }
+    elif [[ "$check" == true ]]; then
+        printf 'Missing pinned main ref: %s\n' "$ref" >&2; exit 1
+    else
+        mkdir -p -- "$repository/refs"
+        (set -o noclobber; printf '%s' "$revision" >"$ref")
+    fi
+    printf 'Verified %s @ %s\n' "$taskset" "$revision"
+done < <(jq -r '.huggingface | keys[]' "$LOCK")
+if [[ "$selection" == all || "$selection" == mrcr-v2 ]]; then
+    while IFS=$'\t' read -r filename url expected size; do
+        destination="$MRCR/$filename"
+        if [[ -L "$destination" ]]; then printf 'Refusing symlink MRCR file\n' >&2; exit 1; fi
+        if [[ -e "$destination" ]]; then
+            [[ -f "$destination" ]]
+        elif [[ "$check" == true ]]; then
+            printf 'Missing pinned data: %s\n' "$destination" >&2; exit 1
+        else
+            temporary=$(mktemp "$MRCR/.download.XXXXXXXX")
+            trap 'rm -f -- "$temporary"' EXIT
+            curl --fail --location --proto '=https' --proto-redir '=https' --retry 3 --output "$temporary" "$url"
+            [[ $(wc -c <"$temporary") -eq "$size" ]]
+            actual=$(sha256sum -- "$temporary"); actual=${actual%% *}
+            [[ "$actual" == "$expected" ]] || { printf 'MRCR source hash mismatch\n' >&2; exit 1; }
+            # No replacement: a concurrent external writer is a hard failure.
+            ln -- "$temporary" "$destination"
+            rm -- "$temporary"
+            trap - EXIT
+        fi
+        [[ $(wc -c <"$destination") -eq "$size" ]]
+        actual=$(sha256sum -- "$destination"); actual=${actual%% *}
+        [[ "$actual" == "$expected" ]] || { printf 'MRCR cache hash mismatch\n' >&2; exit 1; }
+        printf 'Verified %s\n' "$filename"
+    done < <(jq -r '."mrcr-v2"[] | [.filename,.url,.sha256,.size] | @tsv' "$LOCK")
+fi

@@ -1,10 +1,11 @@
-# One guarded profile. See docs/docker.md. No model download or conversion.
+# Canonical deployment. Qualification controls are internal, not supported profiles.
 services:
   inference:
-    image: qwen-inference:local
+    image: ${QWEN_IMAGE:-qwen-inference:local}
     build: .
     # Rootless default maps container root to the operator; rootful must set host UID:GID.
     user: "${QWEN_CONTAINER_USER:-0:0}"
+    init: true
     restart: unless-stopped
     stop_grace_period: 60s
     read_only: true
@@ -15,15 +16,20 @@ services:
       - /run:rw,noexec,nosuid,size=64m
       - /tmp:rw,noexec,nosuid,size=2g
     ports:
-      - "127.0.0.1:18020:18020"
+      - "127.0.0.1:${QWEN_PORT:-18020}:18020"
     environment:
-      HOME: /cache
-      MODELS_DIR: /models
-      API_KEY_FILE: /app/api_key.txt
-      PORT: "18020"
-      SERVED_MODEL_NAME: qwen3.8-27b
-      PREPARE: "0"
-      SGLANG_HEALTH_CHECK_TIMEOUT: "300"
+      QWEN_MODEL_REPRESENTATION: ${QWEN_MODEL_REPRESENTATION:-dense}
+      QWEN_QUALIFICATION: ${QWEN_QUALIFICATION:-speculative}
+      QWEN_QUALIFICATION_EXECUTION: ${QWEN_QUALIFICATION_EXECUTION:-default}
+      QWEN_QUALIFICATION_KV: ${QWEN_QUALIFICATION_KV:-fp8}
+      QWEN_QUALIFICATION_CONTEXT: ${QWEN_QUALIFICATION_CONTEXT:-262144}
+      QWEN_ALLOW_UNQUALIFIED: ${QWEN_ALLOW_UNQUALIFIED:-0}
+    healthcheck:
+      test: [CMD, python3, /opt/qwen/serve/healthcheck.py]
+      interval: 30s
+      timeout: 315s
+      start_period: 20m
+      retries: 3
     volumes:
       - type: bind
         source: ${QWEN_STATE_ROOT:?Set QWEN_STATE_ROOT to the existing model state directory}/qwen-inference-launch.lock

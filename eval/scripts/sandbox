@@ -1,0 +1,153 @@
+#!/usr/bin/env bash
+# Build the evaluator sandbox only; never stop containers or alter serving.
+set -euo pipefail
+umask 077
+root=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)
+mode=${1:-build}
+if [[ $# -gt 1 || "$mode" != build && "$mode" != --check ]]; then
+    printf 'Usage: %s [--check]\n' "$0" >&2
+    exit 2
+fi
+"$root/scripts/setup" --check
+if [[ -L "$root/.cache" || -L "$root/.cache/sandbox.lock" || -L "$root/.cache/runtime" ]]; then
+    printf 'Refusing symlinked sandbox state.\n' >&2
+    exit 2
+fi
+if [[ ! -d "$root/.cache/runtime" ]]; then
+    printf 'Missing runtime exports; run eval/scripts/setup first.\n' >&2
+    exit 2
+fi
+# One cooperating builder/checker per checkout. Keep this inode permanently.
+if [[ "$mode" == --check ]]; then
+    if [[ ! -f "$root/.cache/sandbox.lock" ]]; then
+        printf 'Missing sandbox build lock; run eval/scripts/sandbox.\n' >&2
+        exit 2
+    fi
+    exec 9<"$root/.cache/sandbox.lock"
+else
+    exec 9>>"$root/.cache/sandbox.lock"
+fi
+flock --exclusive --nonblock 9
+for record in sandbox-image sandbox-recipe.sha256; do
+    if [[ -L "$root/.cache/$record" || -e "$root/.cache/$record" && ! -f "$root/.cache/$record" ]]; then
+        printf 'Invalid sandbox record: %s\n' "$record" >&2
+        exit 2
+    fi
+done
+cd -- "$root"
+# shellcheck source=eval/prime-envs.lock
+source prime-envs.lock
+shopt -s nullglob dotglob
+exports=(.cache/runtime/*)
+if [[ ${#exports[@]} -ne 4 ]]; then
+    printf 'Expected exactly two runtime programs and their native locks.\n' >&2
+    exit 2
+fi
+for artifact in "${exports[@]}"; do
+    case "$artifact" in
+        ".cache/runtime/$CHAT_PROGRAM_SHA256.py"|".cache/runtime/$CHAT_PROGRAM_SHA256.py.lock"|".cache/runtime/$LIVECODEBENCH_PROGRAM_SHA256.py"|".cache/runtime/$LIVECODEBENCH_PROGRAM_SHA256.py.lock") ;;
+        *) printf 'Unexpected runtime export: %s\n' "$artifact" >&2; exit 2 ;;
+    esac
+done
+inputs=(prime-envs.lock pyproject.toml uv.lock scripts/sandbox runtime/Dockerfile runtime/Dockerfile.dockerignore runtime/images.lock "${exports[@]}")
+for input in "${inputs[@]}"; do
+    if [[ -L "$input" || ! -f "$input" ]]; then
+        printf 'Missing or symlinked sandbox input: %s\n' "$input" >&2
+        exit 2
+    fi
+done
+recipe=$(sha256sum -- "${inputs[@]}" | sha256sum)
+recipe=${recipe%% *}
+# Docker classic stores report the config ID; containerd stores report the
+# manifest ID. Both exact content hashes are locked, not arbitrary alternatives.
+# Listing errors fail the operation; a missing tag is distinct from daemon failure.
+images=$(docker image ls --no-trunc --format '{{.Repository}}:{{.Tag}} {{.ID}}')
+declare -A seen_helpers=()
+while read -r tag digest expected extra; do
+    if [[ -z "$tag" || "$tag" == \#* ]]; then
+        continue
+    fi
+    if [[ "$tag" != python:3.11-alpine && "$tag" != alpine:3.22 || ! "$digest" =~ ^sha256:[0-9a-f]{64}$ || ! "$expected" =~ ^sha256:[0-9a-f]{64}$ || -n "$extra" ]]; then
+        printf 'Invalid helper image lock record.\n' >&2
+        exit 2
+    fi
+    if [[ -n "${seen_helpers[$tag]:-}" ]]; then
+        printf 'Duplicate helper image lock record.\n' >&2
+        exit 2
+    fi
+    seen_helpers[$tag]=present
+    current=$(awk -v tag="$tag" '$1 == tag {print $2}' <<<"$images")
+    if [[ -n "$current" && "$current" != "$expected" && "$current" != "$digest" ]]; then
+        printf 'Helper tag %s already names a different image; refusing to overwrite it.\n' "$tag" >&2
+        exit 2
+    fi
+    if [[ -z "$current" ]]; then
+        if [[ "$mode" == --check ]]; then
+            printf 'Missing helper image %s; run eval/scripts/sandbox.\n' "$tag" >&2
+            exit 2
+        fi
+        repository=${tag%%:*}
+        docker pull --platform linux/amd64 "$repository@$digest"
+        pulled=$(docker image inspect --format '{{.Id}}' "$repository@$digest")
+        if [[ "$pulled" != "$expected" && "$pulled" != "$digest" ]]; then
+            printf 'Pulled helper image identity mismatch.\n' >&2
+            exit 2
+        fi
+        # Repeat absence check immediately before publishing the required tag.
+        images=$(docker image ls --no-trunc --format '{{.Repository}}:{{.Tag}} {{.ID}}')
+        current=$(awk -v tag="$tag" '$1 == tag {print $2}' <<<"$images")
+        if [[ -n "$current" && "$current" != "$expected" && "$current" != "$digest" ]]; then
+            printf 'Helper tag changed during setup; refusing to overwrite it.\n' >&2
+            exit 2
+        fi
+        if [[ -z "$current" ]]; then
+            docker image tag "$pulled" "$tag"
+        fi
+    fi
+    actual=$(docker image inspect --format '{{.Id}} {{.Os}}/{{.Architecture}}' "$tag")
+    if [[ "$actual" != "$expected linux/amd64" && "$actual" != "$digest linux/amd64" ]]; then
+        printf 'Helper image identity/platform mismatch: %s\n' "$tag" >&2
+        exit 2
+    fi
+done < runtime/images.lock
+if [[ ${#seen_helpers[@]} -ne 2 ]]; then
+    printf 'Both required helper image locks must be present.\n' >&2
+    exit 2
+fi
+if [[ "$mode" == --check ]]; then
+    if [[ ! -f .cache/sandbox-image || ! -f .cache/sandbox-recipe.sha256 ]]; then
+        printf 'Missing sandbox build records; run eval/scripts/sandbox.\n' >&2
+        exit 2
+    fi
+    image=$(cat .cache/sandbox-image)
+    recorded=$(cat .cache/sandbox-recipe.sha256)
+    if [[ ! "$image" =~ ^sha256:[0-9a-f]{64}$ || "$recorded" != "$recipe" ]]; then
+        printf 'Sandbox build inputs changed; run eval/scripts/sandbox.\n' >&2
+        exit 2
+    fi
+    actual=$(docker image inspect --format '{{.Id}} {{.Os}}/{{.Architecture}}' "$image")
+    if [[ "$actual" != "$image linux/amd64" ]]; then
+        printf 'Sandbox image identity/platform mismatch.\n' >&2
+        exit 2
+    fi
+    printf 'Sandbox source, recipe and image identities verified.\n'
+    exit 0
+fi
+attempt=$(mktemp -d "$root/.cache/sandbox-build.XXXXXXXX")
+# This directory is exclusively created by this invocation; preserve failed builds.
+docker build --platform linux/amd64 --file runtime/Dockerfile --iidfile "$attempt/image" .
+image=$(cat "$attempt/image")
+if [[ ! "$image" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+    printf 'Invalid built image identity; build records retained in %s.\n' "$attempt" >&2
+    exit 2
+fi
+actual=$(docker image inspect --format '{{.Id}} {{.Os}}/{{.Architecture}}' "$image")
+if [[ "$actual" != "$image linux/amd64" ]]; then
+    printf 'Built sandbox identity/platform mismatch.\n' >&2
+    exit 2
+fi
+printf '%s\n' "$recipe" >"$attempt/recipe"
+mv -- "$attempt/image" .cache/sandbox-image
+mv -- "$attempt/recipe" .cache/sandbox-recipe.sha256
+rmdir -- "$attempt"
+printf 'Sandbox image built and recorded: %s\n' "$image"

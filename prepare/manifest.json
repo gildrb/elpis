@@ -1,7 +1,6 @@
 {
   "schema_version": 1,
   "status": "numerical_embedding_artifact_qualified_not_deployed",
-  "end_to_end_quality": "scoped_final_profile_checks_recorded_not_activated",
   "native_image": "lmsysorg/sglang@sha256:d6e7288627be8b02be88e4bba38e73f6d50e2826869f753c13a4c4385ab3eda9",
   "native_compressed_tensors_version": "0.18.0",
   "conversion_script": "convert-embedding.py",
@@ -13,7 +12,6 @@
     "fast": "124c14e7e8c7d2f5402933b9af368e772a9fcf0c",
     "draft": "4d30ec736ffc6b8688dc2ae2b502d9b48bdec279"
   },
-  "qualified_host_artifact": "/mnt/ssd/storage/ai/qwen3.8-27b/models/compact-target-rholsc8k/artifact",
   "qualified_reference": "All 248320 embedding rows match native decompression versus independent byte extraction minus128, FP32 scales, BF16 cast bit-for-bit.",
   "source_inventory": "source.sha256",
   "output_inventory": "artifact.sha256",
@@ -24,9 +22,8 @@
     "Standalone generic Linear-only quantization_config.json preserved unchanged.",
     "Original conversion script is copied byte-for-byte, not reformatted or generalized.",
     "The script checks source stability but callers must authenticate pinned source hashes before invoking.",
-    "Draft inventory pins the retained original W4 config.json and model.safetensors bytes; source_revisions.draft records ancestry, not a fresh download. Runtime qualification covers the current C1/extra_buffer/logprob-chunk256 profile. See ../bench/results/native.json and ../docs/qualification.md for current measurements, exact workload scope, and activation state; the embedding proof authenticates the current compact artifact, not global runtime quality."
+    "Draft inventory pins the retained original W4 config.json and model.safetensors bytes. Public checkpoint syvai/Qwen3.8-27B-DFlash2-W4A16 at source_revisions.draft matches the config bytes and weight LFS SHA256/size metadata; see public-options.json. Full upstream weight download and upstream W4 quantization reproduction were not performed. Runtime qualification covers the current C1/extra_buffer/logprob-chunk256 profile. See ../bench/results/native.json and ../docs/qualification.md for current measurements, exact workload scope, and activation state; the embedding proof authenticates the current compact artifact, not global runtime quality."
   ],
   "draft_inventory": "draft.sha256",
-  "draft_inventory_sha256": "4d16c8841de796f0d1d637689b21bf1bf8464ab5db1793672b61bdbd1417cfc1",
-  "qualified_host_draft": "/mnt/ssd/storage/ai/qwen3.8-27b/models/Qwen3.8-27B-DFlash2-W4A16"
+  "draft_inventory_sha256": "4d16c8841de796f0d1d637689b21bf1bf8464ab5db1793672b61bdbd1417cfc1"
 }

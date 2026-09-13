@@ -1,0 +1,165 @@
+{
+  "schema": 1,
+  "huggingface": {
+    "aime24": {
+      "repo": "HuggingFaceH4/aime_2024",
+      "revision": "2fe88a2f1091d5048c0f36abc874fb997b3dd99a",
+      "files": [
+        {
+          "path": "README.md",
+          "size": 932,
+          "algorithm": "git-sha1",
+          "hash": "59939ff94847bc2b19093c526e61702a21df70ef"
+        },
+        {
+          "path": "data/train-00000-of-00001.parquet",
+          "size": 81670,
+          "algorithm": "sha256",
+          "hash": "26139847601a5037c237d5928b195e7260ca8074cf4f264b794af42847f79ccf"
+        }
+      ]
+    },
+    "aime25": {
+      "repo": "opencompass/AIME2025",
+      "revision": "a6ad95f611d72cf628a80b58bd0432ef6638f958",
+      "files": [
+        {
+          "path": "README.md",
+          "size": 448,
+          "algorithm": "git-sha1",
+          "hash": "01e9f122e1daf9c103c4a7b981995cdaccb454b8"
+        },
+        {
+          "path": "aime2025-I.jsonl",
+          "size": 5764,
+          "algorithm": "git-sha1",
+          "hash": "553da6267ab95e09d7c590d4dc3383ccceed8cc2"
+        },
+        {
+          "path": "aime2025-II.jsonl",
+          "size": 6285,
+          "algorithm": "git-sha1",
+          "hash": "25ffdd6f619c4292b59817ad5afdbc7553723a3b"
+        }
+      ]
+    },
+    "aime26": {
+      "repo": "MathArena/aime_2026",
+      "revision": "10b4e45b7a503075d4da8a0d57916a4f06ce6bd2",
+      "files": [
+        {
+          "path": "README.md",
+          "size": 1692,
+          "algorithm": "git-sha1",
+          "hash": "3690d8310c681da89b8647eb32356b0e69bfc867"
+        },
+        {
+          "path": "data/train-00000-of-00001.parquet",
+          "size": 10065,
+          "algorithm": "sha256",
+          "hash": "d91db799651b4cc1f0734f52792a695c9cc60dac342524b3d8e5b2ff31c3e957"
+        }
+      ]
+    },
+    "i3-logic": {
+      "repo": "PrimeIntellect/INTELLECT-3-RL",
+      "revision": "a9eb9183224cec63fe9a71e7a3a80cff14868624",
+      "files": [
+        {
+          "path": "README.md",
+          "size": 1620,
+          "algorithm": "git-sha1",
+          "hash": "8ef1ac7962eea6a55742a0dcfa770c0cfbb1b8af"
+        },
+        {
+          "path": "logic/train-00000-of-00001.parquet",
+          "size": 16506139,
+          "algorithm": "sha256",
+          "hash": "91be0da16cec15ef67c6ec7e4de1371811344507df15d8a412077ce95dc39f41"
+        }
+      ]
+    },
+    "livecodebench": {
+      "repo": "livecodebench/code_generation_lite",
+      "revision": "0fe84c3912ea0c4d4a78037083943e8f0c4dd505",
+      "files": [
+        {
+          "path": "test.jsonl",
+          "size": 1252609773,
+          "algorithm": "sha256",
+          "hash": "2bd02b38beb48e8c46b5b9987095d999ff38cd8efc255ea5d58974317c48f63f"
+        },
+        {
+          "path": "test2.jsonl",
+          "size": 713377060,
+          "algorithm": "sha256",
+          "hash": "095df7c5daf15f882c51a9deb84085cff1e073495a5dbcf95015a564d485f3a3"
+        },
+        {
+          "path": "test3.jsonl",
+          "size": 623360766,
+          "algorithm": "sha256",
+          "hash": "28ed26cc83363ce3f1fe2d5fad9f8393077beb1907b167a31bd3b32f80801b79"
+        },
+        {
+          "path": "test4.jsonl",
+          "size": 1204644685,
+          "algorithm": "sha256",
+          "hash": "d711138ddaebfcf5f8ec6a4283ee677298c0f5c5d374a235af92aaf0584510da"
+        },
+        {
+          "path": "test5.jsonl",
+          "size": 557699297,
+          "algorithm": "sha256",
+          "hash": "7f77571c2a6df0c2a72a3277650309f67e01e0008e18117e624633df53f81214"
+        },
+        {
+          "path": "test6.jsonl",
+          "size": 134303240,
+          "algorithm": "sha256",
+          "hash": "bb4c364f71921c4495a6ad15abe1a927350b720009f4933e2e71f8af0f6fd1f5"
+        }
+      ]
+    },
+    "graphwalks": {
+      "repo": "openai/graphwalks",
+      "revision": "f338bb265735a56a79f4b0f5def722c9c3268ead",
+      "files": [
+        {
+          "path": "README.md",
+          "size": 3184,
+          "algorithm": "git-sha1",
+          "hash": "47f35ee3923dddcba83a47c4802f764bf71be58a"
+        },
+        {
+          "path": "graphwalks_128k_and_shorter.parquet",
+          "size": 22128284,
+          "algorithm": "sha256",
+          "hash": "54036036c91d8e04bb2a5fcd9e36f8e2a852cacece5dfc2b1ee40e3a6182b516"
+        },
+        {
+          "path": "graphwalks_256k_to_1mil.parquet",
+          "size": 296903814,
+          "algorithm": "sha256",
+          "hash": "537879431c72a42e3b500f80efc3047e7facb90390b6063d33679b4320985911"
+        }
+      ]
+    }
+  },
+  "mrcr-v2": {
+    "32k-64k": {
+      "filename": "mrcr_v2p1_8needle_in_(32768,65536)_dynamic_fewshot_text_style_fast.csv",
+      "generation": "1752099150466835",
+      "url": "https://storage.googleapis.com/download/storage/v1/b/mrcr_v2/o/mrcr_v2p1_8needle_in_(32768,65536)_dynamic_fewshot_text_style_fast.csv?generation=1752099150466835&alt=media",
+      "size": 25872061,
+      "sha256": "c6be39bcebdf1a9a474951fa73fa8d7b67fa734ded295567ac9341f095b5ef49"
+    },
+    "128k-256k": {
+      "filename": "mrcr_v2p1_8needle_in_(131072,262144)_dynamic_fewshot_text_style_fast.csv",
+      "generation": "1752098306692796",
+      "url": "https://storage.googleapis.com/download/storage/v1/b/mrcr_v2/o/mrcr_v2p1_8needle_in_(131072,262144)_dynamic_fewshot_text_style_fast.csv?generation=1752098306692796&alt=media",
+      "size": 173734608,
+      "sha256": "fe3b726c213844ff64575c0c7414ac7543c4fca0e3d3a9eacd9de97f9148c2fa"
+    }
+  }
+}

@@ -1,142 +1,81 @@
-# Qwen3.8-27B on one RTX 3090
+# Qwen3.8-27B + DFlash2 on one RTX 3090
 
-Self-contained SGLang serving recipe for a 24 GB RTX 3090. This repository
-contains the local patches, offline model preparation, Docker deployment,
-Nix integration and fresh reasoning benchmarks. See the [documentation map](docs/README.md)
-and [architecture contracts](docs/architecture.md). Any OpenAI-compatible client
-can use the authenticated API; no agent application is required.
+**A reproducible SGLang optimization recipe targeting 262144 tokens—not yet a
+qualified native-context deployment.** Optimize C1 agent latency, reusable long
+prefixes and useful code/reasoning output on one 24 GiB SM86 GPU.
 
-**Install the model files separately.** Nothing here downloads models or falls
-back to different weights. Follow [offline preparation](prepare/REPRODUCE.md)
-to reproduce and verify the exact supplied artifacts.
-
-## Measured baseline speed
-
-Actual RTX 3090 runs from [bench/results/native.json](bench/results/native.json):
-
-| Run | End-to-end output | Decode (`1000 / mean TPOT`) | Mean TTFT |
-|---|---:|---:|---:|
-| native-a | **132.78 tokens/s** | **137.69 tokens/s** | **162.47 ms** |
-| native-b | **130.99 tokens/s** | **135.90 tokens/s** | **168.37 ms** |
-
-Each run used eight short prompts, concurrency 1, cold cache, and up to 1,024
-output tokens per request. These are **64K baseline timing measurements**, not
-hard-reasoning scores or results for the unqualified 245,760-token candidate.
-
-## Single-profile target
-
-The final deployment targets **245,760 total tokens with DFlash2**, using this
-repository's SGLang patches. There will be no profile selector. The 64K runtime
-below remains the temporary live baseline and rollback target until the 240K
-candidate passes GPU memory, numerical, cache, quality and lifecycle checks.
-Native and CUDA-graph runs are internal qualification stages, not user profiles.
-
-The [first candidate GPU attempt](bench/results/240k-native-attempt-01.json)
-passed packed-embedding arithmetic for all 248,320 rows, then failed with a KVarN
-CUDA illegal memory access before model startup. Baseline restoration and native
-compatibility passed in 95.0 seconds. There is no candidate tok/s, TTFT or quality
-result from that attempt.
-
-A [memory-check diagnostic](bench/results/240k-packing-memcheck-01.json) localized
-the fault to compiler-generated shared-memory addressing in key packing. A reviewed
-split-packing repair preserves the quantization math and reuses existing scratch;
-the [repaired image passed](bench/results/240k-packing-repair-01.json) all 90
-attention cases and both status cases with zero memory-check errors. Baseline
-restoration passed in 95.1 seconds. Full-model 240K qualification remains pending.
-
-## Current live baseline — not the final target
-
-| Component | Fixed configuration |
+| Question | Current answer |
 |---|---|
-| Runtime | SGLang v0.5.19; digest-pinned stock image |
-| Target | Qwen3.8-27B W4A16, packed head, BF16-dequantized embeddings |
-| Draft | W4A16 DFlash2, block 8, window 2048 |
-| Capacity | Context 65,536; output budget 8,192; C1; pool cap 66,560 |
-| Memory | FP8 KV, BF16 Mamba state, `extra_buffer`, K8, static fraction 0.94 |
-| Execution | Prefill chunk 1024, logprob chunk 256, sleep-on-idle, `NCCL_MAX_CTAS=1` |
-| API | `http://127.0.0.1:18020/v1`, model `qwen3.8-27b`, key required |
+| Model / quantization | Qwen3.8-27B, W4A16 compressed-tensors and packed head; BF16 embeddings reconstructed from W8 |
+| Engine | Public SGLang v0.5.19 at `0bcd822377da7b5718e674eaf9c870d349424dd1` + explicit Git patches |
+| Runtime | `lmsysorg/sglang:v0.5.19@sha256:d6e7288627be8b02be88e4bba38e73f6d50e2826869f753c13a4c4385ab3eda9` |
+| Draft | `syvai/Qwen3.8-27B-DFlash2-W4A16` at `4d30ec736ffc6b8688dc2ae2b502d9b48bdec279`; exact repository/inventory in [preparation](prepare/REPRODUCE.md) |
+| Hardware | 1× NVIDIA RTX 3090, 24 GiB, SM86, TP=1; observed host driver 595.71.05 |
+| Context objective | **262144 total tokens**, with six qualification rungs from 131072 |
+| C1 speed / deep-context speed | Not measured for the refactored recipe |
+| VRAM / quality delta | FP8 startup peak sampled 22978 MiB; no steady-serving measurement or Prime Envs A/B result |
+| Cache strategy | FP8 control; KVarN retained as an explicit experiment, not rejected or promoted without measurements |
 
-The measured runtime's image and source hashes are recorded in
-[its report](bench/results/native.json). Source builds and runtime activation
-are separate: the 245,760-token candidate has not yet produced an inference
-benchmark result.
-Drivers, GPU selection, storage, fan policy and the measured setup's 280 W
-power cap belong to the host. A working NVIDIA driver/container runtime is
-required; installing Nix alone does not install a kernel driver.
+[The first bounded GPU trial](bench/results/refactor-fp8-startup.json) requested
+262144 context but allocated only **68004 pool tokens** with FP8. It did not reach
+API readiness before the controlled stop. Native context remains unproven.
 
-## Start with Docker
+The pin is the latest release found during the [current upstream/reference
+audit](docs/reference-audit.md). Newer main is a qualification candidate, not a
+proven 3090 improvement. This is **pinned upstream + a visible patch layer**,
+not a private fork. No whole upstream files or source-reconstruction framework
+are retained.
 
-Prepare this private directory first:
+## Reproduce
 
-```text
-STATE_ROOT/
-  api-key
-  qwen-inference-launch.lock
-  cache/
-  models/compact-target-rholsc8k/artifact/
-  models/Qwen3.8-27B-DFlash2-W4A16/
-```
-
-Create the lock file only if absent, as described in the Docker guide; never
-replace an existing lock. Use your own absolute path. Keep `api-key` private and do not place credentials
-in commands, Git, or the image. Only one deployment may own the GPU and port.
+1. Supply the exact public inputs and follow [model preparation](prepare/REPRODUCE.md).
+   Serving does not download, transform or silently replace weights. That guide
+   records complete offline reproduction: exact target/draft inventories and a
+   byte-identical all-row embedding proof. Historical producer records stay intact.
+2. Install Docker Compose and NVIDIA Container Toolkit. Prepare a private
+   `QWEN_STATE_ROOT` with `models/`, `cache/`, `api-key` and the shared ownership
+   lock as described in [Docker setup](docs/docker.md). Do not start beside an
+   existing inference service.
+3. Build and explicitly opt into the unqualified candidate:
 
 ```sh
 export QWEN_STATE_ROOT=/absolute/path/to/state
-docker compose up --build -d
+docker compose build
+export QWEN_ALLOW_UNQUALIFIED=1
+docker compose up -d
 ```
 
-Read [Docker setup](docs/docker.md) for prerequisites, key preparation, guards,
-readiness and recovery. Build verifies stock sources, local patches and exact
-patched bytes. Runtime verifies sources and model inventories before serving.
-The reorganized packaging is not yet live-qualified; see
-[qualification](docs/qualification.md).
+The requested native context can fail allocation. Opt-in acknowledges that risk;
+it does not certify capacity. There is no automatic lower-context fallback.
+Experimental patches require separate explicit selection. See [patch ordering
+and evidence](patches/README.md) and [qualification gates](docs/qualification.md).
+The authenticated OpenAI-compatible API is at `http://127.0.0.1:18020/v1`,
+model `qwen3.8-27b`. Keep credentials out of commands and Git.
 
-## Start with Nix
+Docker owns runtime/restarts. Nix pins development tools and provides a thin
+Compose adapter; it is not a second launch recipe. See [Nix](nix/STANDALONE.md).
+The host owns driver, storage, fan policy and optional power limiting. No new
+power default is recommended until the exact recipe's 200–350 W sweep completes.
 
-The flake pins the package set and exposes the same guarded serving setup:
+## Measure before promoting
 
-```sh
-nix flake check path:. --no-write-lock-file
-nix run path:.#serve -- --state-root /absolute/path/to/state
-```
+[The benchmark protocol](docs/benchmarks.md) specifies an isolated optimization
+ladder, context-capacity and context-depth tables, prefix cold/warm/extension,
+C1/C2/C4 crossover and power efficiency. Use official SGLang utilities for normal
+throughput, TTFT and TPOT. Keep custom diagnostics only for questions they do
+not answer, such as recurrence/cache consistency or kernel correctness.
 
-For always-on NixOS use, import `nix/qwen-inference.nix` or the exported NixOS
-module. The existing consumer import path is preserved. The host still owns
-its account, drivers and storage. See [Nix integration](nix/STANDALONE.md).
-Do not run Docker and Nix deployments simultaneously.
+[Prime Envs + Verifiers](eval/README.md) own capability tasks, scoring, rewards
+and traces, with fixed smoke/quick/full A/B configurations. This repository
+does not define its own quality tasks, scorers or combined intelligence score. File-search environments
+must not be reported as direct-context capacity evidence.
 
-## Measure reasoning, not easy arithmetic
+The methodology follows [syv-ai/qwen38-27b-rtx3090](https://github.com/syv-ai/qwen38-27b-rtx3090):
+measure quantization, memory, speculation, graphs, cache and power separately.
+Translate ideas to SGLang; do not port vLLM internals or copy its performance
+numbers. [Reference findings](docs/reference-audit.md) include Roycorp source
+availability, Ampere tradeoffs and upstream patch-removal candidates.
 
-[The benchmark guide](docs/benchmarks.md) runs pinned Reasoning Gym generators
-with fresh private seeds, exact verified answers, frozen task banks and replay.
-The suite covers logic deduction, constrained pathfinding, Sokoban planning
-and RE-ARC grid induction. It separates correct answers, parser failures,
-truncations and API failures.
-Fresh instances reduce exact-answer memorization; public task families may
-still be familiar to a model. No benchmark guarantees contamination-free rules.
-
-The held-out hard suite scored **78/180 (43.3%)** with 8,192 output tokens:
-**96 truncations**, **6 incorrect completed answers**, and zero API/parser/scorer
-failures. This is budget-bound quality evidence, not a passing qualification.
-See the [verified evaluation](bench/results/reasoning-evaluation.json) and
-[measurement limits](docs/qualification.md#held-out-reasoning-evaluation).
-
-The old numeric and passcode quality gates are removed. The retained eight
-short prompts are only a throughput timing control. Their measured decode
-rate was **135.9–137.7 tokens/s**; a cold 65K-input probe measured **114.9 tokens/s**.
-These are scoped measurements, not promised performance or broad quality proof.
-See [results and limits](docs/qualification.md).
-
-## Repository
-
-Development uses pinned `uv`, Ruff and `ty` with strict checks. See the
-[development policy](docs/development.md) for commands, scope and known blockers.
-
-- `patches/`: original-file provenance, local patches and strict verification.
-- `serve/`, `docker/`, `Dockerfile`, `docker-compose.yml`: one serving recipe and lifecycle.
-- `nix/`, `flake.nix`, `flake.lock`: pinned tools, deployment generation and NixOS integration.
-- `prepare/`: offline artifact assembly, conversion and mandatory inventories.
-- `bench/`, `docs/`: reasoning/cache diagnostics, measured results and operating instructions.
-
-Never commit weights, keys, caches or private benchmark prompts/answers.
+Historical runtime results remain [separately indexed](bench/results/README.md).
+They do not qualify this refactor. See the [documentation map](docs/README.md)
+and [strict development checks](docs/development.md).

@@ -1,0 +1,46 @@
+model = "qwen3.8-27b"
+api_base_url = "http://127.0.0.1:18020/v1"
+api_key_var = "QWEN_API_KEY"
+api_client_type = "openai_chat_completions"
+max_concurrent = 1
+independent_scoring = true
+num_workers = 1
+disable_env_server = true
+disable_tui = true
+save_results = true
+save_to_hf_hub = false
+output_dir = "results"
+max_retries = 0
+
+num_examples = -1
+rollouts_per_example = 8
+
+[sampling]
+max_tokens = 8192
+temperature = 0.6
+top_p = 0.95
+frequency_penalty = 0.0
+presence_penalty = 0.0
+
+[sampling.extra_body]
+top_k = 20
+min_p = 0.0
+repetition_penalty = 1.0
+
+[sampling.extra_body.chat_template_kwargs]
+enable_thinking = true
+
+[[eval]]
+id = "mrcr-v2"
+name = "direct-mrcr-32k-64k"
+
+[eval.args.config.taskset]
+data_dir = "mrcr_v2"
+needle_counts = [8]
+context_ranges = ["32k-64k"]
+auto_download = false
+shuffle = false
+seed = 0
+
+[eval.args.config.harness]
+max_turns = 1

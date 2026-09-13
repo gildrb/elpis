@@ -1,0 +1,106 @@
+#!/usr/bin/env bash
+# Install the locked upstream evaluator; never call a model endpoint.
+set -euo pipefail
+unset PYTHONPATH PYTHONHOME
+
+root=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)
+# shellcheck source=eval/prime-envs.lock
+source "$root/prime-envs.lock"
+mode=${1:-sync}
+if [[ $# -gt 1 || "$mode" != sync && "$mode" != --sources-only && "$mode" != --check-sources && "$mode" != --check ]]; then
+    printf 'Usage: %s [--sources-only|--check-sources|--check]\n' "$0" >&2
+    exit 2
+fi
+if [[ ! "$PRIME_ENVS_REVISION" =~ ^[0-9a-f]{40}$ || ! "$VERIFIERS_REVISION" =~ ^[0-9a-f]{40}$ || ! "$VERIFIERS_TAG_REVISION" =~ ^[0-9a-f]{40}$ ]]; then
+    printf 'Invalid source lock identities.\n' >&2
+    exit 2
+fi
+if [[ -L "$root/.sources" ]]; then
+    printf 'Refusing symlinked source directory.\n' >&2
+    exit 2
+fi
+if [[ "$mode" != --check-sources && "$mode" != --check ]]; then
+    mkdir -p -- "$root/.sources"
+fi
+
+checkout() {
+    local name=$1 repository=$2 revision=$3 tag=$4 tag_revision=$5
+    local destination="$root/.sources/$name"
+    if [[ ! -e "$destination" && ! -L "$destination" && "$mode" != --check-sources && "$mode" != --check ]]; then
+        # Exclusive ownership: a failed fetch leaves a visible partial checkout.
+        mkdir -- "$destination"
+        git -C "$destination" init --quiet
+        git -C "$destination" remote add origin "$repository"
+        if [[ -n "$tag" ]]; then
+            git -C "$destination" fetch origin "$revision" "refs/tags/$tag:refs/tags/$tag"
+        else
+            git -C "$destination" fetch --depth=1 origin "$revision"
+        fi
+        GIT_LFS_SKIP_SMUDGE=1 git -C "$destination" checkout --quiet --detach "$revision"
+    fi
+    if [[ -L "$destination" || ! -d "$destination/.git" ]]; then
+        printf 'Missing or invalid source checkout: %s\n' "$destination" >&2
+        exit 2
+    fi
+    if [[ "$(git -C "$destination" remote get-url origin)" != "$repository" || "$(git -C "$destination" rev-parse HEAD)" != "$revision" || -n "$(git -C "$destination" status --porcelain --untracked-files=all)" ]]; then
+        printf 'Refusing wrong-revision, wrong-origin, or dirty source: %s\n' "$destination" >&2
+        exit 2
+    fi
+    if [[ -n "$tag" && "$(git -C "$destination" rev-parse "refs/tags/$tag^{commit}")" != "$tag_revision" ]]; then
+        printf 'Release tag does not match locked revision: %s\n' "$destination" >&2
+        exit 2
+    fi
+}
+
+checkout prime-envs "$PRIME_ENVS_REPOSITORY" "$PRIME_ENVS_REVISION" "" ""
+checkout verifiers "$VERIFIERS_REPOSITORY" "$VERIFIERS_REVISION" "$VERIFIERS_TAG" "$VERIFIERS_TAG_REVISION"
+if [[ "$mode" == --sources-only || "$mode" == --check-sources ]]; then
+    exit 0
+fi
+cd -- "$root"
+if [[ "$mode" == --check ]]; then
+    uv sync --locked --offline --check --python python3.12 --no-managed-python
+else
+    uv sync --locked --python python3.12 --no-managed-python
+fi
+uv run --locked --no-sync --python python3.12 --no-managed-python python -c 'import hashlib
+import sys
+from importlib.metadata import version
+from pathlib import Path
+
+from verifiers.v1.harnesses.utils.launch import CHAT_PROGRAM_SOURCE
+
+root = Path.cwd()
+if version("verifiers") != sys.argv[1]:
+    raise SystemExit("Installed Verifiers version differs from the source lock")
+programs = (
+    ("null", CHAT_PROGRAM_SOURCE.encode(), sys.argv[2]),
+    (
+        "livecodebench",
+        (root / ".sources/prime-envs/environments/code/livecodebench/livecodebench/verify.py").read_bytes(),
+        sys.argv[3],
+    ),
+)
+destination = root / ".cache/runtime"
+if destination.is_symlink() or destination.parent.is_symlink():
+    raise SystemExit("Refusing symlinked runtime cache")
+if sys.argv[4] != "--check":
+    destination.mkdir(parents=True, exist_ok=True)
+for name, source, expected in programs:
+    digest = hashlib.sha256(source).hexdigest()
+    if digest != expected:
+        raise SystemExit("Upstream runtime source differs from the source lock")
+    lock = (root / "runtime" / (name + ".py.lock")).read_bytes()
+    artifacts = ((destination / (digest + ".py"), source), (destination / (digest + ".py.lock"), lock))
+    for path, data in artifacts:
+        if path.is_symlink():
+            raise SystemExit("Refusing symlinked runtime artifact")
+        if path.exists():
+            if path.read_bytes() != data:
+                raise SystemExit("Existing runtime artifact differs from the lock")
+        else:
+            if sys.argv[4] == "--check":
+                raise SystemExit("Missing exported runtime artifact; run setup")
+            with path.open("xb") as stream:
+                stream.write(data)
+' "$VERIFIERS_VERSION" "$CHAT_PROGRAM_SHA256" "$LIVECODEBENCH_PROGRAM_SHA256" "$mode"

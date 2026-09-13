@@ -1,0 +1,70 @@
+#!/usr/bin/env bash
+# Only native vf-eval and native environment loaders; no task or scoring code.
+set -euo pipefail
+set +x
+unset PYTHONPATH PYTHONHOME
+export LC_ALL=C
+umask 077
+root=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)
+eval_root=$(cd -- "$root/.." && pwd -P)
+profile=${1:?Usage: eval/direct/run smoke|quick|full [mrcr|graphwalks] [--dry-run]}
+shift
+case "$profile" in smoke|quick|full) ;; *) echo "Unknown direct profile." >&2; exit 2 ;; esac
+selection=all
+dry=false
+for argument in "$@"; do
+  case "$argument" in
+    mrcr|graphwalks) [[ "$selection" == all ]] || exit 2; selection="$argument" ;;
+    --dry-run) dry=true ;;
+    *) echo "Unknown direct evaluation argument." >&2; exit 2 ;;
+  esac
+done
+"$root/setup" --check
+if [[ "$selection" == all || "$selection" == mrcr ]]; then "$eval_root/scripts/data" --check mrcr-v2; fi
+if [[ "$selection" == all || "$selection" == graphwalks ]]; then "$eval_root/scripts/data" --check graphwalks; fi
+if [[ "$dry" == false ]]; then
+  [[ "${QWEN_EVAL_ALLOW_REQUESTS:-0}" == 1 ]] || { echo "Endpoint approval required: set QWEN_EVAL_ALLOW_REQUESTS=1 explicitly." >&2; exit 1; }
+  : "${QWEN_API_KEY_FILE:?Set the absolute private serving key path}"
+  [[ "$QWEN_API_KEY_FILE" == /* && -f "$QWEN_API_KEY_FILE" && ! -L "$QWEN_API_KEY_FILE" && -r "$QWEN_API_KEY_FILE" ]]
+  [[ "$(stat --format='%u' "$QWEN_API_KEY_FILE")" -eq "$(id -u)" ]]
+  case "$(stat --format='%a' "$QWEN_API_KEY_FILE")" in 400|600) ;; *) echo "Key must have mode0400 or0600." >&2; exit 1 ;; esac
+  key_bytes=$(wc -c < "$QWEN_API_KEY_FILE")
+  (( key_bytes > 0 && key_bytes <= 4097 ))
+  key="$(cat -- "$QWEN_API_KEY_FILE"; printf '.')"
+  key="${key%.}"
+  (( ${#key} == key_bytes ))
+  key="${key%$'\n'}"
+  [[ "$key" =~ ^[!-~]+$ && ${#key} -le 4096 ]] || { echo "Invalid key bytes." >&2; exit 1; }
+  export QWEN_API_KEY="$key"
+  unset key
+fi
+[[ ! -L "$root/.runs" ]] || { echo "Refusing symlink run root." >&2; exit 1; }
+mkdir -p -- "$root/.runs"
+run=$(mktemp -d "$root/.runs/$profile.XXXXXXXX")
+mkdir -p -- "$run/work/openai" "$run/cache/datasets" "$run/home" "$run/provenance"
+ln -s -- "$eval_root/.cache/mrcr_v2" "$run/work/mrcr_v2"
+graph_revision=$(jq -er '.huggingface.graphwalks.revision | select(test("^[a-f0-9]{40}$"))' "$eval_root/datasets.lock")
+ln -s -- "$eval_root/.cache/huggingface/hub/datasets--openai--graphwalks/snapshots/$graph_revision" "$run/work/openai/graphwalks"
+cp -- "$root/sources.lock" "$eval_root/datasets.lock" "$root/mrcr/uv.lock" "$run/provenance/"
+cp -- "$root/graphwalks/uv.lock" "$run/provenance/graphwalks.uv.lock"
+cp -r -- "$root/configs/$profile" "$run/provenance/configs"
+printf '%s\n' "${QWEN_RECIPE_ID:-unverified-running-deployment}" > "$run/provenance/deployment-identity.txt"
+printf '%s\n' "$run" > "$run/provenance/run-path.txt"
+export HOME="$run/home" HF_HOME="$eval_root/.cache/huggingface"
+export HF_HUB_CACHE="$HF_HOME/hub" HF_DATASETS_CACHE="$run/cache/datasets"
+export HF_HUB_OFFLINE=1 HF_DATASETS_OFFLINE=1 HF_HUB_DISABLE_TELEMETRY=1
+export DO_NOT_TRACK=1 TOKENIZERS_PARALLELISM=false
+cd -- "$run/work"
+for config in "$root/configs/$profile/"*.toml; do
+  case "$(basename -- "$config")" in
+    mrcr-*) project=mrcr ;;
+    graphwalks-*) project=graphwalks ;;
+    *) echo "Unexpected frozen profile entry." >&2; exit 1 ;;
+  esac
+  if [[ "$selection" != all && "$selection" != "$project" ]]; then continue; fi
+  uv run --project "$root/$project" --locked --no-sync python "$root/inspect_dataset.py" "$config"
+  if [[ "$dry" == false ]]; then
+    uv run --project "$root/$project" --locked --no-sync vf-eval "$config" --disable-tui --abbreviated-summary
+  fi
+done
+printf 'Direct upstream evaluation artifacts: %s\n' "$run"

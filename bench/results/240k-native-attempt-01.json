@@ -43,8 +43,7 @@
   "model_benchmark": {
     "executed": false,
     "throughput_tokens_per_second": null,
-    "ttft_seconds": null,
-    "quality_score": null
+    "ttft_seconds": null
   },
   "scope": "Actual GPU arithmetic attempt only. No 245760-token inference, capacity, cache, quality or throughput qualification. No candidate activation."
 }

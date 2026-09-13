@@ -1,0 +1,26 @@
+diff --git a/python/sglang/srt/models/qwen3_5.py b/python/sglang/srt/models/qwen3_5.py
+--- a/python/sglang/srt/models/qwen3_5.py
++++ b/python/sglang/srt/models/qwen3_5.py
+@@ -1611,7 +1611,21 @@
+                 raise ValueError("Unsupported packed embedding scheme")
+             if quant_config.quant_format != "pack-quantized":
+                 raise ValueError("Loader quantization format mismatch")
+-            if quant_config.config != quant:
++            loader_quant = quant_config.config
++            if not isinstance(loader_quant, dict):
++                raise ValueError("Loader quantization config must be a dictionary")
++            # The loader deep-copies checkpoint metadata and adds these two
++            # runtime bindings. Validate them before comparing checkpoint data.
++            if loader_quant.get("hf_config") is not packed_embedding_config:
++                raise ValueError("Loader quantization config targets a different HF config")
++            if (loader_quant.get("packed_modules_mapping") != self.packed_modules_mapping
++                or quant_config.packed_modules_mapping != self.packed_modules_mapping):
++                raise ValueError("Loader packed-module mapping differs from target class")
++            checkpoint_quant = {
++                key: value for key, value in loader_quant.items()
++                if key not in ("hf_config", "packed_modules_mapping")
++            }
++            if checkpoint_quant != quant:
+                 raise ValueError("Loader quantization config differs from target config")
+             if self.pp_group.world_size != 1 or get_tensor_model_parallel_world_size() != 1:
+                 raise ValueError("Packed embedding supports TP1/PP1 only")

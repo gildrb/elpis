@@ -1,3 +1,4 @@
+diff --git a/python/sglang/srt/speculative/dflash_worker_v2.py b/python/sglang/srt/speculative/dflash_worker_v2.py
 --- a/python/sglang/srt/speculative/dflash_worker_v2.py
 +++ b/python/sglang/srt/speculative/dflash_worker_v2.py
 @@ -1548,13 +1548,16 @@

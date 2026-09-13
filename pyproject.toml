@@ -2,22 +2,10 @@
 name = "local-inference-benchmarks"
 version = "0.1.0"
 requires-python = ">=3.12,<3.14"
-dependencies = ["reasoning-gym", "httpx==0.28.1", "pydantic==2.12.5"]
+dependencies = []
 
 [tool.uv]
 package = false
-build-constraint-dependencies = [
-  "setuptools==84.0.0",
-  "wheel==0.48.0",
-  "hatchling==1.32.0",
-  "packaging==26.3",
-  "pathspec==1.1.1",
-  "pluggy==1.6.0",
-  "trove-classifiers==2026.6.1.19",
-]
-
-[tool.uv.sources]
-reasoning-gym = { git = "https://github.com/open-thought/reasoning-gym", rev = "49b07130b3fcd12f2d064bba7c43869543a0e7e7" }
 
 [dependency-groups]
 dev = [

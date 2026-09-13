@@ -2,17 +2,22 @@
 
 Use the pinned Nix dev shell and its Python 3.13. uv owns the project
 virtual environment and lock. Do not install tools in an agent/global Python.
+Use the Git-backed `.` flake reference for development. `path:.` includes ignored
+evaluation datasets and caches in its source snapshot, which can be many GB.
+New files referenced by the flake must be tracked before Git-backed evaluation;
+do not stage unrelated user changes. Evaluation scripts run from the checkout
+and are not embedded in the development shell.
 
 ```console
-nix develop path:. --no-write-lock-file -c uv sync --locked --python python3.13 --no-managed-python
-nix develop path:. --no-write-lock-file -c uv run --locked --python python3.13 --no-managed-python ruff check .
-nix develop path:. --no-write-lock-file -c uv run --locked --python python3.13 --no-managed-python ruff format --check .
-nix develop path:. --no-write-lock-file -c uv run --locked --python python3.13 --no-managed-python ty check .
+nix develop . --no-write-lock-file -c uv sync --locked --python python3.13 --no-managed-python
+nix develop . --no-write-lock-file -c uv run --locked --python python3.13 --no-managed-python ruff check .
+nix develop . --no-write-lock-file -c uv run --locked --python python3.13 --no-managed-python ruff format --check .
+nix develop . --no-write-lock-file -c uv run --locked --python python3.13 --no-managed-python ty check .
 ```
 
 Add `--offline` after `uv run` once the locked environment is available.
-Ruff 0.16.7 and ty 0.0.80 are exact development pins. Existing runtime,
-Reasoning Gym Git revision and build-tool pins remain unchanged.
+Ruff 0.16.7 and ty 0.0.80 are exact development pins. Serving runtime pins are separate from the upstream evaluation environment
+pins described in [eval/README.md](../eval/README.md).
 
 ## Policy
 
@@ -36,17 +41,15 @@ suppression directives are added.
 
 ## Scope and honest failures
 
-Run checks read-only before editing. Default checks include authored Python
-and vendored `patches/base` source. The latter is hash-authenticated upstream
-input, not a cleanup target. Report its diagnostics separately; never format
-or modify those bytes to obtain a green check. The CPU benchmark environment
-also does not install the serving image's torch, safetensors,
-compressed-tensors or SGLang dependencies. Missing imports in conversion and
-vendored runtime files remain explicit environment blockers, not ignored
-rules. Validate those modules in their separately pinned runtime before
+Run checks read-only before editing. Default checks cover authored Python. Upstream source is fetched at its
+pinned commit during the engine build, not copied into this repository. The
+CPU development environment does not install the serving image's torch,
+safetensors, compressed-tensors or SGLang dependencies. Missing imports in
+conversion/runtime code remain explicit environment blockers, not ignored rules. Validate those modules in their separately pinned runtime before
 claiming complete type coverage.
 
-Private benchmark banks, source snapshots, commitments and producer locks
-remain frozen. A changed project lock cannot replace their recorded identity.
+Historical runtime reports retain their recorded producer identities. A changed
+project lock cannot replace those identities. Upstream evaluation environments
+use their separate setup and locked dependencies under `eval/`.
 Keep full check logs private and group authored findings by file when assigning
 cleanup. Do not claim passing quality gates while diagnostics remain.

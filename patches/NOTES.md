@@ -1,55 +1,139 @@
-# Mandatory reviewed runtime sources
+# Patch provenance and evidence limits
 
-Keep exact bytes and original license/source notices. Do not run a broad formatter over the retained reference modules.
+## Source and order
 
-`manifest.json` pins the stock SGLang image, immutable fork revision and NAR hash, plus original/replacement hashes for compressed-head selection, quant-aware draft FC loading and DFlash Mamba checkpoint tracking. Nix verifies the three stock-image source files in `base/`, verifies and applies the local patch diffs with zero fuzz, then verifies exact replacement hashes. It does not fetch a fork, build CUDA, or replace the runtime package. The source revision and NAR hash record historical provenance, not a build dependency.
+`source.env` pins the official SGLang repository at the exact stock-image commit
+`0bcd822377da7b5718e674eaf9c870d349424dd1`, also resolved by `v0.5.19`.
+The annotated tag object is `59f20bffdde59a35cc628372d85d20a979f6271b`;
+it is not the source commit. Builds select the commit directly. The historical baseline
+fork revision `3958762c198b7e9e0167e6aedda1b8c3f9a8afb1` already includes the
+three baseline patches; do not use it as the patch input.
 
-Source is `gildrb/sglang` revision `3958762c198b7e9e0167e6aedda1b8c3f9a8afb1`, used with `lmsysorg/sglang:v0.5.19@sha256:d6e7288627be8b02be88e4bba38e73f6d50e2826869f753c13a4c4385ab3eda9`. Source review does not establish runtime quality or activated deployment.
+`baseline.series` lists three ordered SHA256-bound Git unified patches.
+`experimental.series` lists eight more, applied after the baseline. All patch
+paths are relative to the upstream repository root. `apply.sh` requires an exact,
+clean upstream Git checkout and uses `git apply --check --index` followed by
+`git apply --index` for each patch. Git records the changes in the build index;
+a second invocation fails because the checkout is no longer clean. A failed
+attempt may leave a partial build tree: discard that exclusively owned build
+attempt, never continue on a live or shared checkout. Ignored stock build outputs
+are not removed or replaced. The image remains digest-pinned by its Dockerfile.
+There is no original-file archive, custom diff parser, source overlay, runtime
+source verifier or source reconstruction dependency.
 
-## Guard and loader requirements
+## Classification
 
-The service runs `prepare` first in the exact pinned image without replacement mounts. It checks original source before model preparation. Inference mounts the three replacements read-only and verifies their hashes before launch. A replacement hides its original; replacement checks alone do not establish applicability. Preserve both phases. Direct `docker compose up inference` bypasses original-source verification.
+| Build set | Ordered patches | Evidence scope |
+|---|---|---|
+| Baseline | packed-head-predicate, quant-aware-fc, mamba-cache-prefix | Historical measured 64K runtime; packaging changes do not qualify a new deployment |
+| Experimental extension | qwen3_5, packed_w8_embedding, mm_utils, kvarn-candidate, sampler-checkpoint2, kvarn-pack-layout, quant-loader-guard, kvarn-native-rungs | Source-preserved candidate, not full-model qualified |
 
-The head and FC replacements support one full initial `DefaultModelLoader` load only. Do not use hot reload or partial weight loading. The head helper assumes successful Marlin processing; metadata alone does not prove numerical layout. The FC check requires checkpoint parameters before derived Marlin buffers exist. The Mamba correction tracks committed post-verify sequence lengths.
+KVarN remains experimental. The first 240K full-model attempt failed before
+startup with a CUDA illegal memory access; it produced no candidate throughput,
+TTFT or quality result. The split-packing repair passed 90 attention cases and
+two status cases with zero compute-sanitizer errors. This is small-fixture kernel
+evidence, not model capacity, numerical parity to FP8, cache lifecycle, quality
+or CUDA-graph qualification. See `../bench/results/240k-native-attempt-01.json`,
+`../bench/results/240k-packing-memcheck-01.json` and
+`../bench/results/240k-packing-repair-01.json`.
 
-Do not relax hashes, apply fuzz, alias packed weights to dense `.weight`, or accept arbitrary quantization methods. Image/source changes require a reviewed rebase. Preserve the three patch diffs and manifest.
+The sampler checkpoint has CPU interpreter evidence, not CUDA compiler/native
+GPU parity. The last quant-loader guard preserves the loader's validated HF
+config identity and packed-module mappings before comparing checkpoint metadata;
+its presence is not evidence of successful full-model startup. No experimental
+patch is automatically selected by baseline serving.
 
-## Current 64K service
+## Migration proof
 
-`workstation.qwenInference.enable = true` selects the retained compact target, original W4 draft and all three replacements. There is no profile selector or guard opt-out. Configure `stateRoot` and `requiredMountPoint`; port defaults to 18020 and the served model is fixed. Both phases verify complete model inventories and hashes. Missing or mismatched artifacts fail closed. Startup does not download, convert or silently fall back. See [../prepare/REPRODUCE.md](../prepare/REPRODUCE.md) for separate reproduction without overwriting originals.
+The old current working-tree ten-stage chain was reconstructed before removal,
+including the uncommitted quant-loader guard and its updated qualification
+manifest. All 21 original files matched the official commit and all 17 additions
+were absent. Applying the standard Git series produced exactly the same 38 final
+files. The independent three-patch baseline also matched all three prior final
+hashes. `migration-evidence.json` records aggregate identities; it is evidence,
+not a runtime input or source inventory. Apache-2.0 notices remain in patch
+context and `LICENSE.sglang`.
 
-The entrypoint selects context **65,536**, `--max-total-tokens 66560`, C1, static fraction **0.94**, Mamba cache **K8**, `extra_buffer`, BF16 Mamba state, FP8 KV, prefill chunk **1024**, DFlash block **8**, draft window **2048** and FlashInfer target/draft attention. Native input-logprob chunking is enabled at **256**. Prefill CUDA graphs are disabled; decode graph maximum batch size is 8, which does not change the C1 running-request limit. `NCCL_MAX_CTAS=1` bounds NCCL CTAs; no NCCL minimum-channel setting is selected. Native `--sleep-on-idle` is enabled; its polling timeout is not a fixed one-second request delay or evidence of GPU power saving.
+## Loader restrictions
 
-The token-pool setting is an upper bound, not a minimum allocation or per-request context. Native actual maximum input length is **65,530**. Combined input/output accounting reserves two tokens, and near-boundary output may be clamped. These limits do not guarantee all requests are OOM-free.
+The head and FC changes support one full initial `DefaultModelLoader` load only.
+Do not use hot reload or partial weight loading. The head helper assumes
+successful Marlin processing; metadata alone does not prove numerical layout.
+The FC check requires checkpoint parameters before derived Marlin buffers exist.
+The Mamba correction tracks committed post-verify sequence lengths. Never alias
+packed weights to dense `.weight` or accept arbitrary quantization methods.
 
-## Qualification and deployment boundary
+The following measurements describe their recorded source and deployment, not
+this new packaging or any 262144-token qualification target.
 
-Current entrypoint SHA256: `c994f0a56914b8dddba2d347cbac5ee963af04a2d11818321979e4a622a108dd`. Runtime metadata reported context 65,536, actual token pool 66,560 and maximum input 65,530; health returned HTTP 200. Current measurements are bound to `NCCL_MAX_CTAS=1`.
+## Historical evidence, not launch configuration
 
-Two native short suites passed **8/8 each**, with **1,130 input / 7,829 output tokens** and **zero cached prompt tokens** per run. Decode was **137.686002 / 135.900830 tok/s**; aggregate output was **132.778447 / 130.989520 tok/s**. Decode is reciprocal arithmetic mean request TPOT, not end-to-end throughput.
+The three default patches have scoped evidence in
+[the native report](../bench/results/native.json): two 8-request C1 runs,
+65K cold generation and a generated-prefix emitted-token consistency check.
+Their original producer hashes, metric definitions and capacity limits stay
+in that report. They do not qualify the new 262144-token recipe, arbitrary
+sampling, cancellation/reclamation or C2/C4. The older 280 W cap is not a
+new power-efficiency recommendation. See [current gates](../docs/qualification.md).
 
-A cold **65,000-input / 128-output** request passed with zero cached tokens/retractions, **74.668278 s client TTFT** and **114.944470 client decode tok/s**. This full-context result is slower than the short-suite result. A separate cold full-input-logprob probe returned **65,000 rows and 128 outputs** with zero cached tokens/retractions in **77.594354 s**. These are bounded probes, not universal speed or no-OOM guarantees.
+## Semantic review inventory
 
-The current numeric gate passed **191/200 (95.5%)** in **334.177168 s**, with nine failures and mean **379.95 output tokens**. This is a capped numeric fixture, not broad quality or speculative/non-speculative equivalence.
+Every row uses the exact `source.env` base plus all earlier ordered patches.
+Baseline/experimental above describe build selection, not semantic class.
+Except for the equivalent Mamba correction below, upstream PR status is **not
+recorded**. Source equivalence is validated for all rows but is not GPU proof.
 
-A generated-checkpoint probe reused **65,024 cached tokens**, beyond the first 65,000-token prompt, and passed its predeclared emitted-token approximate-KL cutoff: **1.485160174869604e-05 < 0.001** over 128 aligned output IDs. This is not full-vocabulary KL or proof for every checkpoint boundary. A **65,000-input / 25-output** retrieval spot check returned both planted facts at offsets **6,503 / 32,525**, with zero cached tokens; it is not broad long-context comprehension.
+| Order / patch | Semantic class | Subsystem / purpose and benefit | Main risk | Existing validation |
+|---|---|---|---|---|
+| 1 packed-head-predicate | compatibility | Logits: recognize processed compressed head for DFlash | Incorrect packed-layout admission | Historical baseline native runtime |
+| 2 quant-aware-fc | compatibility | Draft model: load quantized FC through ReplicatedLinear | Partial/hot loading unsupported | Historical baseline native runtime |
+| 3 mamba-cache-prefix | correctness | DFlash cache: checkpoint committed sequence boundary | Other cache lifecycle paths remain unqualified | Generated-prefix cache probe only |
+| 4 qwen3_5 | memory | Model loader: admit packed embeddings | Loader metadata/layout mismatch | Packed arithmetic; full model unqualified |
+| 5 packed_w8_embedding | memory | Embedding layer: retain packed weights | Quantized numerical or kernel mismatch | All-row packed arithmetic, not model quality |
+| 6 mm_utils | compatibility | Multimodal handling: support packed embedding access | Multimodal parity unqualified | Source equivalence only |
+| 7 kvarn-candidate | experimental | Attention/cache: reduce KV storage | Memory safety, numerical drift, lifecycle | First full-model attempt failed before startup |
+| 8 sampler-checkpoint2 | correctness | Sampling: transformed proposal/target and residual/status semantics | Native CUDA parity and propagation | CPU interpreter only |
+| 9 kvarn-pack-layout | correctness | KVarN store: split packing to repair shared addressing | Full-model interactions remain unqualified | 90 attention + 2 status; zero sanitizer errors |
+| 10 quant-loader-guard | correctness | Loader: validate runtime bindings before checkpoint comparison | Metadata checks do not prove startup | Source equivalence only |
 
-Capacity probes passed **57,342 input + 8,192 output** and **65,406 input + 128 output**, both **65,534 combined tokens**, with zero cached tokens/retractions. Input 65,529 plus six requested outputs was clamped to five; input 65,536 returned HTTP 400. The 8,192-output probe is capacity-only evidence: cumulative SSE client parsing caused backlog, so it is not a comparable GPU decode measurement.
+### Mamba upstream equivalent and removal gate
 
-The separate FlashInfer window finding remains draft-only; no target-greedy accepted-output divergence is established here. The checkpoint diagnostic does not qualify `extra_buffer_lazy`, cancellation/reclamation or arbitrary concurrency.
+Upstream PR #37818, commit `b805cc501444a6b98e26e3088851ba5e980704d7`,
+tracks DFlash Mamba checkpoints from post-verify lengths. It is present in
+reviewed public main `7078e5ffbc71f9f31d07018aff2f32530dac781a`, but absent
+from our selected release base. The local stage 3 computes the same committed
+boundary inside its helper. Retain it at the current pin. Remove it only after
+a separately reviewed base update contains the equivalent fix and rejection,
+cache and graph qualification passes. See `../docs/reference-audit.md`.
 
-See [../docs/qualification.md](../docs/qualification.md) for reproduction and evidence. The 280 W cap is consumer-owned policy, not measured draw or energy. Idle and queue performance were not measured here; no batching is qualified.
+## Stage 11: native context rungs (new semantic experiment)
 
-NixOS activation has not been performed. Before activation, the consumer must pin and validate the exact inference and host configuration revisions, then satisfy its staging, backup and transaction gates. Runtime health and benchmarks do not establish consumer closure validation or system activation.
+- **Base:** exact `source.env` plus stages 1–10, without changes to those patches.
+- **Class/subsystem:** experimental capacity admission in KVarN argument, pool
+  and memory-plan code. Benefit: request six explicit native DFlash contexts
+  through 262144 without assuming a fixed 1929-page allocation.
+- **Contract:** context in {131072, 163840, 196608, 229376, 245760, 262144};
+  pool exactly context + 1024; physical pages = pool / 128 + 1, including null
+  page. Actual allocated pool must equal the request, never silently downsize.
+  Target/draft geometry, tile math, eight tails, query/write bounds, workspace,
+  SM86/BF16, status and dummy-page ownership guards are unchanged. Graph mode
+  remains restricted to context245760/pool246784.
+- **Risk/validation:** larger native specializations have no GPU evidence.
+  Existing kernels take page counts from tensor shapes; they do not allocate
+  context-length attention scratch. CPU checks cover all six argument admissions,
+  rejected capacities and modes, conservative target+draft byte accounting,
+  scalar pool rejection and no-undersized-builder behavior. They do not prove
+  GPU storage shape admission, compiler behavior, 24GB fit, model startup or
+  quality. See `kvarn-native-rungs-cpu.json`; upstream PR status not recorded.
 
-Before activation, retain an independently verified previous Nix generation, service configuration and required artifacts. Restore the guarded generation if handover fails; never bypass failed compact verification.
+### Target-only blocker
 
-## Vendored base provenance
-
-`base/` contains only the three original Python files extracted from the exact
-manifest-pinned stock SGLang image in a CPU-only, network-disabled, read-only
-container. Every file matches its `original_sha256`. Original source/license
-notices remain intact. The local `.patch` files are authenticated separately;
-Nix verifies their output against every `replacement_sha256`. Runtime prepare
-still verifies the actual image originals independently before replacement
-mounts hide them. No fork download or full runtime source copy is required.
+The allocator loops can manage one pool, but native KVarN sticky-error checks at
+request transaction boundaries exist only in `srt/speculative/dflash_worker_v2.py`.
+The ordinary `srt/managers/tp_worker.py` forward-to-sampling path does not check
+those errors before publication. Removing the DFlash or five-layer budget guards
+would therefore admit an unsafe native no-draft path. Graph capture also requires
+an eight-token `TARGET_VERIFY` batch. Stage 11 deliberately preserves both guards.
+A separate no-draft implementation needs explicit matching budget/accounting and
+host-side status propagation before sampling/cache publication, plus lifecycle
+qualification. This is a source blocker, not a measured target-only GPU failure.

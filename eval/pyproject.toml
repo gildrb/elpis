@@ -1,0 +1,29 @@
+[project]
+name = "local-inference-upstream-eval"
+version = "0.1.0"
+requires-python = ">=3.12,<3.13"
+dependencies = [
+    "verifiers==0.3.2.dev86",
+    "datasets==5.0.1",
+    "aime24==0.1.0",
+    "aime25==0.1.0",
+    "aime26==0.1.0",
+    "i3-logic==0.2.1",
+    "livecodebench==0.1.0",
+    "mrcr-v2==0.1.0",
+    "graphwalks==0.1.0",
+]
+
+[tool.uv]
+package = false
+build-constraint-dependencies = ["hatchling==1.32.0", "hatch-vcs==0.5.0", "setuptools-scm==9.2.2"]
+
+[tool.uv.sources]
+verifiers = { path = ".sources/verifiers", editable = true }
+aime24 = { path = ".sources/prime-envs/environments/math/aime24", editable = true }
+aime25 = { path = ".sources/prime-envs/environments/math/aime25", editable = true }
+aime26 = { path = ".sources/prime-envs/environments/math/aime26", editable = true }
+i3-logic = { path = ".sources/prime-envs/environments/reasoning/i3_logic", editable = true }
+livecodebench = { path = ".sources/prime-envs/environments/code/livecodebench", editable = true }
+mrcr-v2 = { path = ".sources/prime-envs/environments/long_context/mrcr_v2", editable = true }
+graphwalks = { path = ".sources/prime-envs/environments/long_context/graphwalks", editable = true }

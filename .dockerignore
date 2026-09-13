@@ -1,20 +1,18 @@
-# Allowlist: models, credentials, caches and local state never enter the context.
+# Allowlist: never send models, credentials, caches or unrelated local state.
 **
 !Dockerfile
 !docker/
-!docker/**
+!docker/build-patches.sh
+!docker/entrypoint.sh
 !serve/
 !serve/entrypoint.sh
-!serve/supervisor.py
+!serve/healthcheck.py
 !patches/
-!patches/verify.py
-!patches/packed-head-predicate.patch
-!patches/quant-aware-fc.patch
-!patches/mamba-cache-prefix.patch
-!patches/manifest.json
+!patches/**
 !prepare/
 !prepare/verify-models.py
 !prepare/manifest.json
 !prepare/artifact.sha256
+!prepare/source.sha256
 !prepare/draft.sha256
 !prepare/embedding-validation.json

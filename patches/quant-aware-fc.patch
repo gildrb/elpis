@@ -1,3 +1,4 @@
+diff --git a/python/sglang/srt/models/dflash.py b/python/sglang/srt/models/dflash.py
 --- a/python/sglang/srt/models/dflash.py
 +++ b/python/sglang/srt/models/dflash.py
 @@ -621,7 +621,10 @@

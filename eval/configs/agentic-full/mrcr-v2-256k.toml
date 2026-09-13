@@ -1,0 +1,36 @@
+# Native taskset settings; shared endpoint/sampling in ../local.toml.
+num_rollouts = 8
+max_concurrent = 1
+shuffle = false
+push = false
+
+[env.taskset]
+id = "mrcr-v2"
+needle_count = 8
+context_range = "128k-256k"
+
+[env.agent]
+max_turns = 16
+max_output_tokens = 32768
+
+[env.agent.timeout]
+setup = 600.0
+rollout = 1800.0
+scoring = 600.0
+
+[env.agent.harness]
+id = "bash"
+search = false
+
+[env.agent.harness.env]
+UV_LOCKED = "true"
+UV_PYTHON = "3.12"
+UV_PYTHON_DOWNLOADS = "never"
+
+[env.agent.runtime]
+type = "docker"
+image = "qwen-prime-eval:locked"
+workdir = "/workspace"
+cpu = 2.0
+memory = 4.0
+allow = []

@@ -4,6 +4,7 @@
 Run inside the manifest-pinned image. Inputs are read-only; output must be absent.
 The adjacent upstream recipe is provenance only and is never executed.
 """
+
 from __future__ import annotations
 
 import argparse
@@ -25,6 +26,7 @@ NORM = "model.language_model.norm.weight"
 
 
 def quantize(work: Path, shard_only: bool = False) -> None:
+    """Reproduce and authenticate the pinned embedding shard offline."""
     guard.directory(work)
     source = work / "source"
     if shard_only is False:
@@ -32,17 +34,27 @@ def quantize(work: Path, shard_only: bool = False) -> None:
     guard.directory(work / "input")
     provenance = guard.document(guard.read_bytes(ROOT / "source-provenance.json"))
     recipe = guard.obj(provenance["embedding_recipe"])
-    guard.require(guard.digest(ROOT / guard.filename(recipe["file"])) ==
-                  guard.sha256(recipe["sha256"]), "Upstream recipe hash mismatch")
+    guard.require(
+        guard.digest(ROOT / guard.filename(recipe["file"]))
+        == guard.sha256(recipe["sha256"]),
+        "Upstream recipe hash mismatch",
+    )
     raw = guard.obj(provenance["embedding_input"])
     incoming = work / "input" / NAME
-    guard.require(guard.digest(incoming) == guard.sha256(raw["sha256"]),
-                  "Raw embedding input hash mismatch")
-    expected = guard.inventory(guard.read_bytes(ROOT / "source.sha256"), guard.TARGET_NAMES)
+    guard.require(
+        guard.digest(incoming) == guard.sha256(raw["sha256"]),
+        "Raw embedding input hash mismatch",
+    )
+    expected = guard.inventory(
+        guard.read_bytes(ROOT / "source.sha256"), guard.TARGET_NAMES
+    )
     if shard_only is False:
         guard.layout(source, guard.TARGET_NAMES - {NAME})
         for name in sorted(guard.TARGET_NAMES - {NAME}):
-            guard.require(guard.digest(source / name) == expected[name], f"Source mismatch: {name}")
+            guard.require(
+                guard.digest(source / name) == expected[name],
+                f"Source mismatch: {name}",
+            )
     # A private exclusive directory owns the intermediate, including on failure.
     temporary = work / "embedding-quantization"
     temporary.mkdir(mode=0o700)
@@ -53,12 +65,18 @@ def quantize(work: Path, shard_only: bool = False) -> None:
         guard.require(set(handle.keys()) == {KEY, NORM}, "Unexpected raw shard tensors")
         weight = handle.get_tensor(KEY)
         norm = handle.get_tensor(NORM)
-        guard.require(list(weight.shape) == [248320, 5120] and weight.dtype == torch.bfloat16,
-                      "Wrong embedding shape/dtype")
-        guard.require(list(norm.shape) == [5120] and norm.dtype == torch.bfloat16,
-                      "Wrong norm shape/dtype")
+        guard.require(
+            list(weight.shape) == [248320, 5120] and weight.dtype == torch.bfloat16,
+            "Wrong embedding shape/dtype",
+        )
+        guard.require(
+            list(norm.shape) == [5120] and norm.dtype == torch.bfloat16,
+            "Wrong norm shape/dtype",
+        )
         metadata = handle.metadata()
-        guard.require(metadata is None or metadata == {"format": "pt"}, "Unexpected metadata")
+        guard.require(
+            metadata is None or metadata == {"format": "pt"}, "Unexpected metadata"
+        )
         tensors[NORM] = norm.clone()
         packed = torch.empty((248320, 1280), dtype=torch.int32)
         scales = torch.empty((248320, 40), dtype=torch.bfloat16)
@@ -69,22 +87,33 @@ def quantize(work: Path, shard_only: bool = False) -> None:
             stop = min(start + 1024, 248320)
             dense = weight[start:stop].to(torch.float32)
             grouped = dense.reshape(stop - start, 40, 128)
-            scale = torch.clamp(grouped.abs().amax(dim=-1, keepdim=True) / 127, min=1e-10)
-            quantized = torch.clamp(torch.round(grouped / scale), -128, 127).to(torch.int8)
+            scale = torch.clamp(
+                grouped.abs().amax(dim=-1, keepdim=True) / 127, min=1e-10
+            )
+            quantized = torch.clamp(torch.round(grouped / scale), -128, 127).to(
+                torch.int8
+            )
             dequantized = quantized.to(torch.float32) * scale
             error_squared += (dequantized - grouped).double().square().sum().item()
             weight_squared += grouped.double().square().sum().item()
-            packed[start:stop] = pack_to_int32(quantized.reshape(stop - start, 5120),
-                                              8, packed_dim=1).contiguous()
+            packed[start:stop] = pack_to_int32(
+                quantized.reshape(stop - start, 5120), 8, packed_dim=1
+            ).contiguous()
             scales[start:stop] = scale.squeeze(-1).to(torch.bfloat16)
-        guard.require(weight_squared > 0 and error_squared / weight_squared < 0.0001,
-                      "Quantization error exceeds upstream 1 percent limit")
+        guard.require(
+            weight_squared > 0 and error_squared / weight_squared < 0.0001,
+            "Quantization error exceeds upstream 1 percent limit",
+        )
         tensors[KEY.replace(".weight", ".weight_packed")] = packed
         tensors[KEY.replace(".weight", ".weight_scale")] = scales
-        tensors[KEY.replace(".weight", ".weight_shape")] = torch.tensor([248320, 5120], dtype=torch.int64)
+        tensors[KEY.replace(".weight", ".weight_shape")] = torch.tensor(
+            [248320, 5120], dtype=torch.int64
+        )
         save_file(tensors, output, metadata={"format": "pt"})
-    guard.require(guard.digest(output) == expected[NAME],
-                  "Quantized shard differs from pinned bytes; intermediate retained, source unpublished")
+    guard.require(
+        guard.digest(output) == expected[NAME],
+        "Quantized shard differs from pinned bytes; intermediate retained, source unpublished",
+    )
     if shard_only is True:
         output.chmod(0o444)
         print(f"Isolated shard reproduction verified: {expected[NAME]}", flush=True)
@@ -108,10 +137,14 @@ def quantize(work: Path, shard_only: bool = False) -> None:
 
 
 def main() -> int:
+    """Run the command and report validation failures."""
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--work", type=Path, required=True)
-    parser.add_argument("--shard-only", action="store_true",
-                        help="Verify only the derived shard; do not assemble or publish source")
+    parser.add_argument(
+        "--shard-only",
+        action="store_true",
+        help="Verify only the derived shard; do not assemble or publish source",
+    )
     args = parser.parse_args()
     try:
         quantize(args.work, args.shard_only)
