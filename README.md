@@ -37,6 +37,13 @@ CUDA illegal memory access before model startup. Baseline restoration and native
 compatibility passed in 95.0 seconds. There is no candidate tok/s, TTFT or quality
 result from that attempt.
 
+A [memory-check diagnostic](bench/results/240k-packing-memcheck-01.json) localized
+the fault to compiler-generated shared-memory addressing in key packing. A reviewed
+split-packing repair preserves the quantization math and reuses existing scratch;
+the [repaired image passed](bench/results/240k-packing-repair-01.json) all 90
+attention cases and both status cases with zero memory-check errors. Baseline
+restoration passed in 95.1 seconds. Full-model 240K qualification remains pending.
+
 ## Current live baseline — not the final target
 
 | Component | Fixed configuration |

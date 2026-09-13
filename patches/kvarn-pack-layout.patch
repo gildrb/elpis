@@ -1,0 +1,99 @@
+--- a/kernels/ops/kvarn/store.py
++++ b/kernels/ops/kvarn/store.py
+@@ -302,11 +302,11 @@
+ 
+ 
+ @triton.jit
+-def _fused_rotate_balance_pack(
++def _fused_rotate_balance_quantize(
+     Raw, RotatedK, Packed, Selected, Preview, Status,
+     D: tl.constexpr, H: tl.constexpr, TILE_BYTES: tl.constexpr,
+     IS_KEY: tl.constexpr, K_SCALE: tl.constexpr, K_ZERO: tl.constexpr,
+-    K_TOKEN: tl.constexpr, V_PACKED: tl.constexpr, V_CHANNEL: tl.constexpr,
++    K_TOKEN: tl.constexpr, V_CHANNEL: tl.constexpr,
+     V_SCALE: tl.constexpr, V_ZERO: tl.constexpr,
+ ):
+     slot = tl.program_id(0)
+@@ -370,30 +370,52 @@
+         scale = tl.maximum((hi - lo) / ((1 << BITS) - 1), 1e-10)
+         quantized = libdevice.nearbyint((balanced - lo[:, None]) / scale[:, None])
+         quantized = tl.minimum(tl.maximum(quantized, 0.0), (1 << BITS) - 1).to(tl.int32)
+-        PACK: tl.constexpr = 8 // BITS
+-        byte_col = tl.arange(0, C // PACK)
+-        packed = tl.full((R, C // PACK), 0, tl.int32)
+-        for j in tl.static_range(PACK):
+-            index = tl.broadcast_to((byte_col * PACK + j)[None, :], (R, C // PACK))
+-            packed = packed | (tl.gather(quantized, index, axis=1) << (j * BITS))
++        # Reuse the consumed rotated-key slab for exact integer codes. Keeping
++        # this full-size matrix avoids the gathered-byte layout conversion whose
++        # SM86 PTX-to-SASS lowering can address beyond dynamic shared memory.
+         absorbed_scale = best_row * scale
+         absorbed_zero = best_row * lo
+         valid = (tl.sum((tl.abs(absorbed_scale) <= 65504.0).to(tl.int32), 0) == R)
+         valid = valid & (tl.sum((tl.abs(absorbed_zero) <= 65504.0).to(tl.int32), 0) == R)
+         valid = valid & (tl.sum((tl.abs(best_col) <= 65504.0).to(tl.int32), 0) == C)
+         tl.atomic_or(Status, tl.where(valid, 0, 2))
++        code_offset = (slot.to(tl.int64) * H + head) * D * 128 + r[:, None] * C + c[None, :]
++        tl.store(RotatedK + code_offset, quantized.to(tl.float32), mask=valid)
+         base = (page.to(tl.int64) * H + head) * TILE_BYTES
+         halves = (Packed + base).to(tl.pointer_type(tl.float16))
+         if IS_KEY:
+-            tl.store(Packed + base + r[:, None] * (C // PACK) + byte_col[None, :], packed.to(tl.uint8), mask=valid)
+             tl.store(halves + K_SCALE // 2 + r, absorbed_scale, mask=valid)
+             tl.store(halves + K_ZERO // 2 + r, absorbed_zero, mask=valid)
+             tl.store(halves + K_TOKEN // 2 + c, best_col, mask=valid)
+         else:
+-            tl.store(Packed + base + V_PACKED + r[:, None] * (C // PACK) + byte_col[None, :], packed.to(tl.uint8), mask=valid)
+             tl.store(halves + V_SCALE // 2 + r, absorbed_scale, mask=valid)
+             tl.store(halves + V_ZERO // 2 + r, absorbed_zero, mask=valid)
+             tl.store(halves + V_CHANNEL // 2 + c, best_col, mask=valid)
++
++
++@triton.jit
++def _pack_quantized_codes(Codes, Packed, Selected, Preview, Status,
++                          D: tl.constexpr, H: tl.constexpr,
++                          TILE_BYTES: tl.constexpr, IS_KEY: tl.constexpr,
++                          V_PACKED: tl.constexpr, BLOCK: tl.constexpr):
++    slot = tl.program_id(0)
++    head = tl.program_id(1)
++    page = tl.load(Selected + slot)
++    ready = tl.load(Preview + page, mask=page > 0, other=0)
++    if (page > 0) & ~ready & (tl.load(Status) == 0):
++        BITS: tl.constexpr = 4 if IS_KEY else 2
++        PACK: tl.constexpr = 8 // BITS
++        byte = tl.program_id(2) * BLOCK + tl.arange(0, BLOCK)
++        live = byte < D * 128 // PACK
++        code_base = (slot.to(tl.int64) * H + head) * D * 128
++        packed = tl.full((BLOCK,), 0, tl.int32)
++        for j in tl.static_range(PACK):
++            code = tl.load(Codes + code_base + byte * PACK + j, mask=live, other=0).to(tl.int32)
++            packed = packed | (code << (j * BITS))
++        byte_base = (page.to(tl.int64) * H + head) * TILE_BYTES
++        if not IS_KEY:
++            byte_base += V_PACKED
++        tl.store(Packed + byte_base + byte, packed.to(tl.uint8), mask=live)
+ 
+ 
+ @triton.jit
+@@ -454,12 +476,19 @@
+         view.raw_keys, workspace.native_rotated_keys, selected, view.preview_ready,
+         status, H=view.layout.kv_heads, D=view.layout.head_dim, num_warps=4, num_stages=1)
+     for raw, is_key in ((view.raw_keys, True), (view.raw_values, False)):
+-        _fused_rotate_balance_pack[(slots, view.layout.kv_heads)](
++        _fused_rotate_balance_quantize[(slots, view.layout.kv_heads)](
+             raw, workspace.native_rotated_keys, view.packed, selected, view.preview_ready, status,
+             D=view.layout.head_dim, H=view.layout.kv_heads, TILE_BYTES=view.layout.tile_bytes,
+             IS_KEY=is_key, K_SCALE=o.k_scale, K_ZERO=o.k_zero, K_TOKEN=o.k_token,
+-            V_PACKED=o.v_packed, V_CHANNEL=o.v_channel, V_SCALE=o.v_scale,
++            V_CHANNEL=o.v_channel, V_SCALE=o.v_scale,
+             V_ZERO=o.v_zero, num_warps=16, num_stages=1)
++        # The producer and this consumer are ordered on the same CUDA stream.
++        pack = 2 if is_key else 4
++        _pack_quantized_codes[(slots, view.layout.kv_heads,
++                               triton.cdiv(view.layout.head_dim * 128 // pack, 256))](
++            workspace.native_rotated_keys, view.packed, selected, view.preview_ready, status,
++            D=view.layout.head_dim, H=view.layout.kv_heads, TILE_BYTES=view.layout.tile_bytes,
++            IS_KEY=is_key, V_PACKED=o.v_packed, BLOCK=256, num_warps=4, num_stages=1)
+     _publish_complete_tiles[(slots,)](view.tail_to_page, view.page_to_tail_slot,
+         view.preview_ready, selected, status, SEAL=seal, num_warps=4, num_stages=1)
+ 

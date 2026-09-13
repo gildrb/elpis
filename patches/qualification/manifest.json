@@ -267,6 +267,19 @@
           "after_sha256": "3508004e6155c8aa1d28caf5df2b2ac71a4e73930bf5a8860c97569936dcf6f5"
         }
       ]
+    },
+    {
+      "name": "kvarn-pack-layout",
+      "patch": "kvarn-pack-layout.patch",
+      "patch_sha256": "74a925f94fd7b239762415e0470785d2b27fcbe33ed2227839baf024001a4f86",
+      "strip_components": 1,
+      "files": [
+        {
+          "path": "kernels/ops/kvarn/store.py",
+          "before_sha256": "e8bad12468e1487d66ad2dff8273d305bc235b1c618afc2257232ec6bcd3a929",
+          "after_sha256": "f12927833f64ec3e6713e1414c193ed6272bb20f482dec63cd68e8c7bcfdd513"
+        }
+      ]
     }
   ],
   "files": [
@@ -297,7 +310,7 @@
     {
       "path": "kernels/ops/kvarn/store.py",
       "original_sha256": null,
-      "final_sha256": "e8bad12468e1487d66ad2dff8273d305bc235b1c618afc2257232ec6bcd3a929",
+      "final_sha256": "f12927833f64ec3e6713e1414c193ed6272bb20f482dec63cd68e8c7bcfdd513",
       "original_file": null
     },
     {

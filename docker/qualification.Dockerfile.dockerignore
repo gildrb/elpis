@@ -12,6 +12,7 @@
 !patches/packed_w8_embedding.patch
 !patches/mm_utils.patch
 !patches/kvarn-candidate.patch
+!patches/kvarn-pack-layout.patch
 !patches/sampler-checkpoint2.patch
 !patches/base/
 !patches/base/**

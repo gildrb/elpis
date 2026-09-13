@@ -4,22 +4,22 @@ COPY patches/ /opt/qwen-qualification/patches/
 # Authenticate the actual stock source before an overlay can hide it.
 RUN /opt/sglang/bin/python3 /opt/qwen-qualification/patches/chain.py \
       --bundle /opt/qwen-qualification/patches \
-      --manifest-sha256 3b1ff39059886a6394cef2e89bbf4067467a87745949482f0b6f6c6c3d7adcf2 \
+      --manifest-sha256 77c49a0677a02eb4b840b5fc2798c83a441add228f379385f42c4eef146f4c50 \
       --image lmsysorg/sglang@sha256:d6e7288627be8b02be88e4bba38e73f6d50e2826869f753c13a4c4385ab3eda9 \
       --mode original --root /sgl-workspace/sglang/python/sglang
 # The verifier creates a new owned output tree; it never patches user roots.
 RUN /opt/sglang/bin/python3 /opt/qwen-qualification/patches/chain.py \
       --bundle /opt/qwen-qualification/patches \
-      --manifest-sha256 3b1ff39059886a6394cef2e89bbf4067467a87745949482f0b6f6c6c3d7adcf2 \
+      --manifest-sha256 77c49a0677a02eb4b840b5fc2798c83a441add228f379385f42c4eef146f4c50 \
       --image lmsysorg/sglang@sha256:d6e7288627be8b02be88e4bba38e73f6d50e2826869f753c13a4c4385ab3eda9 \
       --exclusive-build-tree --mode overlay --root /opt/qwen-qualification/source
 # Installation is restricted to this exclusively owned disposable image layer.
 RUN cp -r /opt/qwen-qualification/source/. /sgl-workspace/sglang/python/sglang/ && \
     /opt/sglang/bin/python3 /opt/qwen-qualification/patches/chain.py \
       --bundle /opt/qwen-qualification/patches \
-      --manifest-sha256 3b1ff39059886a6394cef2e89bbf4067467a87745949482f0b6f6c6c3d7adcf2 \
+      --manifest-sha256 77c49a0677a02eb4b840b5fc2798c83a441add228f379385f42c4eef146f4c50 \
       --image lmsysorg/sglang@sha256:d6e7288627be8b02be88e4bba38e73f6d50e2826869f753c13a4c4385ab3eda9 \
       --mode final --root /sgl-workspace/sglang/python/sglang
 # This image cannot launch serving through its default command.
-ENTRYPOINT ["/opt/sglang/bin/python3", "/opt/qwen-qualification/patches/chain.py", "--bundle", "/opt/qwen-qualification/patches", "--manifest-sha256", "3b1ff39059886a6394cef2e89bbf4067467a87745949482f0b6f6c6c3d7adcf2", "--image", "lmsysorg/sglang@sha256:d6e7288627be8b02be88e4bba38e73f6d50e2826869f753c13a4c4385ab3eda9", "--mode", "final", "--root", "/sgl-workspace/sglang/python/sglang"]
+ENTRYPOINT ["/opt/sglang/bin/python3", "/opt/qwen-qualification/patches/chain.py", "--bundle", "/opt/qwen-qualification/patches", "--manifest-sha256", "77c49a0677a02eb4b840b5fc2798c83a441add228f379385f42c4eef146f4c50", "--image", "lmsysorg/sglang@sha256:d6e7288627be8b02be88e4bba38e73f6d50e2826869f753c13a4c4385ab3eda9", "--mode", "final", "--root", "/sgl-workspace/sglang/python/sglang"]
 CMD []

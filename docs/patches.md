@@ -23,7 +23,7 @@ already combines its semantic and residual/status changes. Its two component
 patches must not be applied again.
 
 The bundle reuses the three baseline patches and original files without changes.
-It adds exactly five patch files directly in `patches/` and eighteen previously
+It adds six additional patch files directly in `patches/` and eighteen previously
 missing original files under `patches/qualification/base/`.
 The seventeen additions are represented by null original hashes and required
 absence, not placeholder source files. `manifest.json` records all intermediate
@@ -85,8 +85,8 @@ Do not format the vendored originals to satisfy development lint rules. See
 ## Build-only delivery inputs
 
 `docker/qualification.Dockerfile` starts from the exact stock image and checks
-all actual originals and required absences. It reconstructs all eight ordered
-patches (baseline3, packed3, KVarN1, sampler1) into a newly owned source overlay.
+all actual originals and required absences. It reconstructs all nine ordered
+patches (baseline3, packed3, KVarN1, sampler1, packing-fix1) into a newly owned source overlay.
 A separate explicit copy installs that overlay only in the disposable Docker
 build layer, followed by verification of every installed final file. Its Dockerfile-
 specific `.dockerignore` allows only the source bundle and its build recipe.
@@ -189,3 +189,13 @@ absent. Full original, intermediate and final hashes are in the manifest.
 | `srt/speculative/dspark_components/dspark_planner.py` | sampler | existing |
 | `srt/speculative/dspark_components/dspark_verify.py` | sampler | existing |
 | `srt/speculative/dspark_components/dspark_worker_v2.py` | sampler | existing |
+
+## GPU packing correction
+
+The ninth stage, `kvarn-pack-layout.patch`, repairs the key-packing shared-memory
+address failure observed by compute-sanitizer on the RTX 3090. It separates byte
+packing from balancing, reusing the existing float32 scratch slab. Quantization
+math, byte format, memory capacity and publication ordering remain unchanged.
+The repair passed 90 attention and two status cases at unchanged tolerances,
+with zero compute-sanitizer errors. This is small-fixture kernel evidence only;
+model-level capacity, cache, quality and performance remain unqualified.

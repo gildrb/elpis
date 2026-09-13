@@ -1,0 +1,43 @@
+{
+  "schema_version": 1,
+  "status": "small_fixture_gpu_numerical_and_memcheck_passed_baseline_restored",
+  "candidate_image": "sha256:9f6230cd93e0205dbbac81d9ad7b3a085deab8d10ee0fe6c5b3fc76ffb80d6f3",
+  "source_manifest_sha256": "77c49a0677a02eb4b840b5fc2798c83a441add228f379385f42c4eef146f4c50",
+  "store_source_sha256": "f12927833f64ec3e6713e1414c193ed6272bb20f482dec63cd68e8c7bcfdd513",
+  "model_server_started": false,
+  "numerical": {
+    "status": "finite-fixture-kernel-qualification-passed",
+    "attention_cases": 90,
+    "status_cases": [
+      {
+        "D": 256,
+        "sticky_status": 1,
+        "ownership_unchanged": true
+      },
+      {
+        "D": 128,
+        "sticky_status": 1,
+        "ownership_unchanged": true
+      }
+    ],
+    "tolerances": {
+      "atol": 0.0009765625,
+      "rtol": 0.0078125,
+      "rmse": 0.00048828125
+    },
+    "elapsed_seconds": 110.89705036600208,
+    "report_sha256": "8f211e89cf4f50538d88ff518f81826476d901a7cd406da4e9b89e3da0aabafb",
+    "peak_allocated_bytes": 2224474624,
+    "peak_reserved_bytes": 2260729856
+  },
+  "memcheck": {
+    "errors": 0,
+    "log_sha256": "a9d061cee538182f762e132abeea7bac7bddb844338f25751bbbb043f242c425"
+  },
+  "restoration": {
+    "status": "identity-health-and-native-compatibility-restored",
+    "rollback_elapsed_seconds": 95.07744192099926,
+    "short_output_probe_qualified": true
+  },
+  "scope": "Direct small-capacity kernels only. No full-pool fit, model quality, capacity, cache, graph, speed or deployment qualification."
+}

@@ -6,6 +6,8 @@ The reports retain producer hashes and measurement limits; current code changes 
 
 | Run | Report | Interpretation |
 |---|---|---|
+| KVarN packing repair | [240k-packing-repair-01.json](240k-packing-repair-01.json) | 90 attention + 2 status cases passed, zero memory-check errors; not model qualification |
+| KVarN memory-check diagnostic | [240k-packing-memcheck-01.json](240k-packing-memcheck-01.json) | Key-packing shared-address failure localized; baseline restored; repair validation was pending at this attempt |
 | Hard held-out reasoning, 180 tasks, 8,192 output tokens | [reasoning-evaluation.json](reasoning-evaluation.json) | **78 correct, 96 truncated, 6 completed incorrect**; 43.3% correct |
 | Reasoning discovery pilot, 18 tasks | [reasoning-pilot.json](reasoning-pilot.json) | 9/18 correct; not held out |
 | Same pilot bank, larger 32K output budget | [reasoning-budget32k.json](reasoning-budget32k.json) | 13/18 correct; post-hoc comparison, not held out or final profile |
