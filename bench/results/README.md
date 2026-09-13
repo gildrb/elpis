@@ -10,7 +10,7 @@ The reports retain producer hashes and measurement limits; current code changes 
 | Reasoning discovery pilot, 18 tasks | [reasoning-pilot.json](reasoning-pilot.json) | 9/18 correct; not held out |
 | Same pilot bank, larger 32K output budget | [reasoning-budget32k.json](reasoning-budget32k.json) | 13/18 correct; post-hoc comparison, not held out or final profile |
 | Conversation/cache diagnostic | [conversation-pilot.json](conversation-pilot.json) | Scoped diagnostic, not causal proof of the reported conversation failure |
-| Baseline native throughput and compatibility | [native.json](native.json) | Historical scoped measurements, not candidate qualification |
+| Baseline native throughput and compatibility | [native.json](native.json) | **130.99–132.78 tokens/s end-to-end; 135.90–137.69 tokens/s decode**. Short-suite 64K baseline, not candidate qualification |
 | Cache consistency | [cache-45k.json](cache-45k.json), [cache-45900.json](cache-45900.json) | Workload-specific cache evidence |
 | Baseline vision compatibility | [multimodal-baseline.json](multimodal-baseline.json) | Baseline only |
 | Packed-embedding trial | [packed64-trial.json](packed64-trial.json) | GPU row arithmetic passed; candidate startup failed; baseline restored |
