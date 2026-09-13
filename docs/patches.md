@@ -1,8 +1,9 @@
 # Complete source packaging, without activation
 
 The current Docker/Nix service still uses the three baseline patches in
-`patches/manifest.json`. The separate `patches/qualification/` bundle contains
-all remaining staged runtime changes. It is **source-only and unqualified**.
+`patches/manifest.json`. All eight patch files are directly in `patches/`.
+The separate `patches/qualification/` directory contains the complete ordered
+manifest, additional original sources and evidence identities. It is **source-only and unqualified**.
 There is no runtime profile selector, default candidate launch, or fallback.
 The intended later single serving target remains 245,760 total tokens.
 
@@ -22,7 +23,8 @@ already combines its semantic and residual/status changes. Its two component
 patches must not be applied again.
 
 The bundle reuses the three baseline patches and original files without changes.
-It adds exactly five patch files and eighteen previously missing original files.
+It adds exactly five patch files directly in `patches/` and eighteen previously
+missing original files under `patches/qualification/base/`.
 The seventeen additions are represented by null original hashes and required
 absence, not placeholder source files. `manifest.json` records all intermediate
 and final hashes, patch hashes and paths. `manifest.sha256` records its identity.
@@ -87,8 +89,11 @@ all actual originals and required absences. It reconstructs all eight ordered
 patches (baseline3, packed3, KVarN1, sampler1) into a newly owned source overlay.
 A separate explicit copy installs that overlay only in the disposable Docker
 build layer, followed by verification of every installed final file. Its Dockerfile-
-specific `.dockerignore` allows only the source bundle and its build recipe; it
-is needed because the default serving build deliberately excludes these files.
+specific `.dockerignore` allows only the source bundle and its build recipe.
+The default serving context explicitly allows only the three baseline patches
+and their verifier/manifest. It excludes the five qualification patches and
+additional originals. The qualification allowlist includes all eight patches
+and the complete source bundle; no candidate source enters the baseline image.
 The build has no model mount or GPU command. Its default entrypoint only verifies
 all 38 final source hashes and exits. It does not launch SGLang. Neither default
 `Dockerfile` nor `docker-compose.yml` selects this recipe.

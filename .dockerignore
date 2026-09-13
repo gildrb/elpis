@@ -7,8 +7,10 @@
 !serve/entrypoint.sh
 !serve/supervisor.py
 !patches/
-!patches/*.py
-!patches/*.patch
+!patches/verify.py
+!patches/packed-head-predicate.patch
+!patches/quant-aware-fc.patch
+!patches/mamba-cache-prefix.patch
 !patches/manifest.json
 !prepare/
 !prepare/verify-models.py

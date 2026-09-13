@@ -8,6 +8,11 @@
 !patches/packed-head-predicate.patch
 !patches/quant-aware-fc.patch
 !patches/mamba-cache-prefix.patch
+!patches/qwen3_5.patch
+!patches/packed_w8_embedding.patch
+!patches/mm_utils.patch
+!patches/kvarn-candidate.patch
+!patches/sampler-checkpoint2.patch
 !patches/base/
 !patches/base/**
 !patches/qualification/

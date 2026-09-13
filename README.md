@@ -10,37 +10,18 @@ can use the authenticated API; no agent application is required.
 back to different weights. Follow [offline preparation](prepare/REPRODUCE.md)
 to reproduce and verify the exact supplied artifacts.
 
-## Uploaded patches and recorded runs
-
-- [Complete patch chain](patches/README.md): eight patch files covering 38 upstream files.
-- [Benchmark run reports](bench/results/README.md): reasoning, cache, vision and trial results.
-
 ## Measured baseline speed
 
 Actual RTX 3090 runs from [bench/results/native.json](bench/results/native.json):
 
-| Run | End-to-end output | Decode (`1000 / mean TPOT`) |
-|---|---:|---:|
-| native-a | **132.78 tokens/s** | **137.69 tokens/s** |
-| native-b | **130.99 tokens/s** | **135.90 tokens/s** |
+| Run | End-to-end output | Decode (`1000 / mean TPOT`) | Mean TTFT |
+|---|---:|---:|---:|
+| native-a | **132.78 tokens/s** | **137.69 tokens/s** | **162.47 ms** |
+| native-b | **130.99 tokens/s** | **135.90 tokens/s** | **168.37 ms** |
 
 Each run used eight short prompts, concurrency 1, cold cache, and up to 1,024
 output tokens per request. These are **64K baseline timing measurements**, not
 hard-reasoning scores or results for the unqualified 245,760-token candidate.
-
-### Where the additional patches are
-
-`patches/base/` holds original upstream source, **not patch files**.
-The three baseline patches are directly under `patches/`. The five additional
-patches are uploaded under [`patches/qualification/`](patches/qualification/):
-
-- [`qwen3_5.patch`](patches/qualification/qwen3_5.patch)
-- [`packed_w8_embedding.patch`](patches/qualification/packed_w8_embedding.patch)
-- [`mm_utils.patch`](patches/qualification/mm_utils.patch)
-- [`kvarn-candidate.patch`](patches/qualification/kvarn-candidate.patch)
-- [`sampler-checkpoint2.patch`](patches/qualification/sampler-checkpoint2.patch)
-
-Those candidate patches are packaged but **not enabled in default serving**.
 
 ## Single-profile target
 
@@ -62,13 +43,10 @@ Native and CUDA-graph runs are internal qualification stages, not user profiles.
 | Execution | Prefill chunk 1024, logprob chunk 256, sleep-on-idle, `NCCL_MAX_CTAS=1` |
 | API | `http://127.0.0.1:18020/v1`, model `qwen3.8-27b`, key required |
 
-The exact image and source hashes are in [patches/manifest.json](patches/manifest.json).
-Three local patches reproduce the temporary baseline runtime files. The complete
-[qualification source bundle](docs/patches.md) contains eight ordered patch
-stages covering 38 upstream files, including packed embeddings, KVarN and sampler
-repairs. Its Docker/Nix inputs are build-only; they do not activate the candidate.
-There is no fork checkout, remote patch fetch, runtime profile selector, or
-source-guard opt-out.
+The measured runtime's image and source hashes are recorded in
+[its report](bench/results/native.json). Source builds and runtime activation
+are separate: the 245,760-token candidate has not yet produced an inference
+benchmark result.
 Drivers, GPU selection, storage, fan policy and the measured setup's 280 W
 power cap belong to the host. A working NVIDIA driver/container runtime is
 required; installing Nix alone does not install a kernel driver.
