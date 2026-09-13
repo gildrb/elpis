@@ -1,0 +1,50 @@
+{
+  "schema_version": 1,
+  "status": "gpu_numerical_failed_baseline_restored",
+  "candidate": {
+    "image_id": "sha256:926eaaa083056b582328e36eac6550875a0337ee5b8d0df551ac40646a35813b",
+    "source_manifest_sha256": "3b1ff39059886a6394cef2e89bbf4067467a87745949482f0b6f6c6c3d7adcf2",
+    "context_target": 245760,
+    "pool_target": 246784,
+    "engine": "SGLang",
+    "draft": "DFlash2",
+    "model_server_started": false
+  },
+  "packed_embedding": {
+    "status": "all-row-GPU-bit-exact",
+    "rows_checked": 248320,
+    "elapsed_seconds": 45.36297362600453
+  },
+  "kvarn_numerical": {
+    "status": "failed",
+    "error_category": "CUDA illegal memory access",
+    "completed_cases": 0,
+    "planned_attention_cases": 90,
+    "planned_status_cases": 2,
+    "first_fixture": {
+      "D": 256,
+      "H": 4,
+      "HQ": 24
+    },
+    "elapsed_seconds": 40.4724961949978,
+    "script_sha256": "49166c6497023ffb3e9f613c392db428b7428adf55159240146515251bd16a83",
+    "report_sha256": "bbd2e16669c51389362ebf0dfa62d57525c82dac8df82ce7d68104580f424299",
+    "tolerances_unchanged": {
+      "atol": 0.0009765625,
+      "rtol": 0.0078125,
+      "rmse": 0.00048828125
+    }
+  },
+  "restoration": {
+    "status": "identity-health-and-native-compatibility-restored",
+    "rollback_elapsed_seconds": 95.02728772999399,
+    "short_output_probe_qualified": true
+  },
+  "model_benchmark": {
+    "executed": false,
+    "throughput_tokens_per_second": null,
+    "ttft_seconds": null,
+    "quality_score": null
+  },
+  "scope": "Actual GPU arithmetic attempt only. No 245760-token inference, capacity, cache, quality or throughput qualification. No candidate activation."
+}

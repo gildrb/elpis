@@ -31,6 +31,12 @@ below remains the temporary live baseline and rollback target until the 240K
 candidate passes GPU memory, numerical, cache, quality and lifecycle checks.
 Native and CUDA-graph runs are internal qualification stages, not user profiles.
 
+The [first candidate GPU attempt](bench/results/240k-native-attempt-01.json)
+passed packed-embedding arithmetic for all 248,320 rows, then failed with a KVarN
+CUDA illegal memory access before model startup. Baseline restoration and native
+compatibility passed in 95.0 seconds. There is no candidate tok/s, TTFT or quality
+result from that attempt.
+
 ## Current live baseline — not the final target
 
 | Component | Fixed configuration |
