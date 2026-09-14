@@ -220,7 +220,7 @@ diff --git a/python/sglang/srt/layers/attention/kvarn_backend.py b/python/sglang
  from sglang.srt.mem_cache.kvarn.pool import KVarNTokenToKVPool
  from sglang.srt.mem_cache.kvarn_allocator import KVarNPageAllocator
  from sglang.srt.mem_cache.memory_pool import HybridLinearKVPool
-@@ -182,20 +182,37 @@
+@@ -182,20 +182,40 @@
          provisional = forward_batch.forward_mode.is_target_verify()
          if provisional and queries.shape[0] != 8:
              raise ValueError("KVarN target verify requires an eight-token linear block")
@@ -233,7 +233,10 @@ diff --git a/python/sglang/srt/layers/attention/kvarn_backend.py b/python/sglang
 -                local_layer, forward_batch.out_cache_loc[start:stop],
 -                keys[start:stop], values[start:stop], provisional=provisional,
 +        view = self.pool.layer_view(local_layer)
-+        use_flash = self.pool.native_enabled
++        # Prefill chunks (large query counts) amortize the FA materialize;
++        # verify/decode steps (<=8 queries) must use the fused split kernel —
++        # materializing the full KV per layer per step is ~9x slower.
++        use_flash = self.pool.native_enabled and queries.shape[0] > 8
 +        if use_flash:
 +            write_chunk = self.pool.capacity.max_write_tokens
 +            for start in range(0, queries.shape[0], write_chunk):
