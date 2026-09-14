@@ -1,7 +1,72 @@
 diff --git a/python/sglang/kernels/ops/kvarn/decode.py b/python/sglang/kernels/ops/kvarn/decode.py
 --- a/python/sglang/kernels/ops/kvarn/decode.py
 +++ b/python/sglang/kernels/ops/kvarn/decode.py
-@@ -392,3 +392,206 @@
+@@ -326,6 +326,64 @@
+     return min(splits, (pages + per_split - 1) // per_split)
+ 
+ 
++def packed_attention_out_nosync(Q, view, request_page_table, query_request_ids,
++                                lower_bounds, upper_bounds, scale, fixedworkspace):
++    """Sync-free verify/decode launch: fixed SPLITS-way grid, no host reads.
++
++    Every .item() in the launch path stalls the pipeline once per layer per
++    step (32 device->host syncs per verify step across 16 full-attention
++    layers). The reducer already collapses empty splits (their LSE is -inf,
++    weight zero), so launching all splits unconditionally is bit-compatible
++    with the counted launch and removes the syncs entirely. Grid shape is
++    static per deployment, which also makes this path CUDA-graph ready.
++    """
++    if Q.ndim != 3 or Q.shape[2] != view.layout.head_dim:
++        raise ValueError("native query shape mismatch")
++    queries, heads, d = Q.shape
++    if heads % view.layout.kv_heads != 0:
++        raise ValueError("native attention requires grouped heads")
++    if Q.dtype != fixedworkspace.output.dtype:
++        raise ValueError("invalid native query dtype")
++    table = request_page_table.to(torch.int32).contiguous()
++    request_ids = query_request_ids.to(torch.int32).contiguous()
++    lower = lower_bounds.to(torch.int32).contiguous()
++    upper = upper_bounds.to(torch.int32).contiguous()
++    output = fixedworkspace.output[:queries, :heads]
++    partial, lse = fixedworkspace.native_partial_output, fixedworkspace.native_partial_lse
++    kv_heads = view.layout.kv_heads
++    group = heads // kv_heads
++    rows = triton.next_power_of_2(queries)
++    splits = partial.shape[2]
++    o = KVarNOffsets.from_layout(view.layout)
++    empty = upper <= lower
++    if bool(empty.all().item()):
++        output.zero_()
++        return output
++    _packed_attention_split[(kv_heads, splits)](
++        Q, table, request_ids, lower, upper,
++        view.packed, view.raw_keys, view.raw_values, view.page_to_tail_slot,
++        view.committed_mask, view.provisional_mask, view.preview_ready, view.sink_pages,
++        partial, lse, fixedworkspace.native_status, scale, queries,
++        Q_STRIDE=Q.stride(0), Q_HEAD_STRIDE=Q.stride(1),
++        TABLE_STRIDE=table.stride(0), TABLE_WIDTH=table.shape[1], REQUESTS=table.shape[0],
++        PARTIAL_Q_STRIDE=partial.stride(0), PARTIAL_H_STRIDE=partial.stride(1),
++        LSE_Q_STRIDE=lse.stride(0), LSE_H_STRIDE=lse.stride(1),
++        D=d, H=kv_heads, HQ=heads, PAGES=view.packed.shape[0],
++        SLOTS=view.raw_keys.shape[0], TILE_BYTES=view.layout.tile_bytes,
++        SPLITS=splits, ROWS=rows, BLOCK=32,
++        K_SCALE=o.k_scale, K_ZERO=o.k_zero, K_TOKEN=o.k_token,
++        V_PACKED=o.v_packed, V_CHANNEL=o.v_channel, V_SCALE=o.v_scale, V_ZERO=o.v_zero,
++        num_warps=4, num_stages=1)
++    _packed_attention_reduce[(queries, heads)](
++        partial, lse, output,
++        PARTIAL_Q_STRIDE=partial.stride(0), PARTIAL_H_STRIDE=partial.stride(1),
++        LSE_Q_STRIDE=lse.stride(0), LSE_H_STRIDE=lse.stride(1),
++        OUTPUT_Q_STRIDE=output.stride(0), OUTPUT_H_STRIDE=output.stride(1),
++        D=d, SPLITS=splits, N_SPLITS=splits, num_warps=4, num_stages=1)
++    output[empty] = 0
++    return output
++
++
+ def packed_attention_out(Q: torch.Tensor, view: KVarNLayerView,
+                          request_page_table: torch.Tensor, query_request_ids: torch.Tensor,
+                          lower_bounds: torch.Tensor, upper_bounds: torch.Tensor,
+@@ -392,3 +450,206 @@
          OUTPUT_Q_STRIDE=output.stride(0), OUTPUT_H_STRIDE=output.stride(1),
          D=d, SPLITS=splits, N_SPLITS=n_splits, num_warps=4, num_stages=1)
      return output
@@ -216,11 +281,11 @@ diff --git a/python/sglang/srt/layers/attention/kvarn_backend.py b/python/sglang
  from sglang.srt.layers.radix_attention import AttentionType, RadixAttention
  from sglang.srt.mem_cache.kvarn.kernels import packed_attention
 -from sglang.kernels.ops.kvarn.decode import packed_attention_out
-+from sglang.kernels.ops.kvarn.decode import packed_attention_flash, packed_attention_out
++from sglang.kernels.ops.kvarn.decode import packed_attention_flash, packed_attention_out, packed_attention_out_nosync
  from sglang.srt.mem_cache.kvarn.pool import KVarNTokenToKVPool
  from sglang.srt.mem_cache.kvarn_allocator import KVarNPageAllocator
  from sglang.srt.mem_cache.memory_pool import HybridLinearKVPool
-@@ -182,20 +182,40 @@
+@@ -182,20 +182,54 @@
          provisional = forward_batch.forward_mode.is_target_verify()
          if provisional and queries.shape[0] != 8:
              raise ValueError("KVarN target verify requires an eight-token linear block")
@@ -260,6 +325,20 @@ diff --git a/python/sglang/srt/layers/attention/kvarn_backend.py b/python/sglang
 -            self.pool.finish_attention(local_layer)
 +        else:
 +            attention = packed_attention_out if self.pool.native_enabled else packed_attention
++            if self.pool.native_enabled and provisional:
++                for start in range(0, queries.shape[0], self.pool.capacity.max_write_tokens):
++                    stop = min(start + self.pool.capacity.max_write_tokens, queries.shape[0])
++                    self.pool.begin_write(
++                        local_layer, forward_batch.out_cache_loc[start:stop],
++                        keys[start:stop], values[start:stop], provisional=True,
++                    )
++                result = packed_attention_out_nosync(
++                    queries, view, metadata.request_page_table, metadata.query_request_ids,
++                    metadata.lower_bounds, metadata.upper_bounds, layer.scaling,
++                    self.pool.workspace,
++                )
++                self.pool.finish_attention(local_layer)
++                return result.reshape(-1, layer.tp_q_head_num * layer.v_head_dim)
 +            result = torch.empty_like(queries)
 +            chunk_size = self.pool.workspace.output.shape[0]
 +            for start in range(0, queries.shape[0], chunk_size):
