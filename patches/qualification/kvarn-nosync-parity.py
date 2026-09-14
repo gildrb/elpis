@@ -70,6 +70,7 @@ def run_case(view, workspace, pages, raw_tail, generator, queries=8):
     upper = (pages * 128 - 8) + torch.arange(queries, device=device, dtype=torch.int32)
     reference = packed_attention(q, view, table, request_ids, lower, upper, SCALE, workspace).clone()
     cases = []
+    buffers = {}
     for name, fn in (
         ("counted", packed_attention_out),
         ("nosync", packed_attention_out_nosync),
@@ -79,12 +80,23 @@ def run_case(view, workspace, pages, raw_tail, generator, queries=8):
         torch.cuda.synchronize()
         status = int(workspace.native_status.item())
         diff = (out.float() - reference.float()).abs()
+        buffers[name] = (
+            workspace.native_partial_lse.float().clone(),
+            workspace.native_partial_output.float().clone(),
+        )
         cases.append({
             "launch": name, "status": status,
             "max_abs": float(diff.max()), "rmse": float(diff.pow(2).mean().sqrt()),
             "within": bool((diff <= ATOL + RTOL * reference.float().abs()).all()),
             "finite": bool(torch.isfinite(out.float()).all()),
         })
+    lse_c, part_c = buffers["counted"]
+    lse_n, part_n = buffers["nosync"]
+    finite_c = torch.isfinite(lse_c) & torch.isfinite(lse_n)
+    cases[-1]["lse_max_delta"] = float((lse_c[finite_c] - lse_n[finite_c]).abs().max()) if finite_c.any() else 0.0
+    cases[-1]["lse_inf_mismatch"] = int((torch.isinf(lse_c) != torch.isinf(lse_n)).sum())
+    both = torch.isfinite(part_c) & torch.isfinite(part_n)
+    cases[-1]["partial_max_delta"] = float((part_c[both] - part_n[both]).abs().max()) if both.any() else 0.0
     return cases
 
 

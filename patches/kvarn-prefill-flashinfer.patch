@@ -1,7 +1,7 @@
 diff --git a/python/sglang/kernels/ops/kvarn/decode.py b/python/sglang/kernels/ops/kvarn/decode.py
 --- a/python/sglang/kernels/ops/kvarn/decode.py
 +++ b/python/sglang/kernels/ops/kvarn/decode.py
-@@ -326,6 +326,64 @@
+@@ -326,6 +326,70 @@
      return min(splits, (pages + per_split - 1) // per_split)
  
  
@@ -38,6 +38,12 @@ diff --git a/python/sglang/kernels/ops/kvarn/decode.py b/python/sglang/kernels/o
 +    if bool(empty.all().item()):
 +        output.zero_()
 +        return output
++    # Splits whose page range is empty for this request may leave their
++    # partial/LSE slots unwritten; the workspace is allocated with empty()
++    # so stale values would leak through the reducer. Initialize every slot
++    # to the neutral element (zero partial, -inf LSE) first.
++    fixedworkspace.native_partial_output.zero_()
++    fixedworkspace.native_partial_lse.fill_(float("-inf"))
 +    _packed_attention_split[(kv_heads, splits)](
 +        Q, table, request_ids, lower, upper,
 +        view.packed, view.raw_keys, view.raw_values, view.page_to_tail_slot,
@@ -66,7 +72,7 @@ diff --git a/python/sglang/kernels/ops/kvarn/decode.py b/python/sglang/kernels/o
  def packed_attention_out(Q: torch.Tensor, view: KVarNLayerView,
                           request_page_table: torch.Tensor, query_request_ids: torch.Tensor,
                           lower_bounds: torch.Tensor, upper_bounds: torch.Tensor,
-@@ -392,3 +450,206 @@
+@@ -392,3 +456,206 @@
          OUTPUT_Q_STRIDE=output.stride(0), OUTPUT_H_STRIDE=output.stride(1),
          D=d, SPLITS=splits, N_SPLITS=n_splits, num_warps=4, num_stages=1)
      return output
