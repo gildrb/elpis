@@ -43,13 +43,15 @@ the baseline only when `experimental` is explicitly passed instead of `baseline`
 on a **fresh** checkout. Each line is `SHA256  patch-filename`; line order is
 application order. These are build sets, not runtime profiles.
 
-The experimental set covers 40 files (23 modifications and 17 additions).
-KVarN remains experimental: its first full-model 240K attempt failed before
-startup. The packing repair passed 90 attention and two status small-fixture
-cases with zero memory-check errors. This does **not** qualify full-model
-capacity, quality, performance, cache lifecycle or CUDA graphs. Sampler CPU
-interpreter checks do not establish native GPU parity.
-
+The experimental set covers 38 files (21 modifications and 17 additions).
+KVarN is the serving path of the deployed native-262144 candidate (image
+`qwen-inference:refactor-stage18b`); its first full-model 240K attempt failed
+before startup and the current recipe is qualified by the walls, C1/GSP
+harnesses and parity fixtures recorded under `bench/results/` — full Prime
+Envs quality scoring is still pending. The packing repair passed 90 attention
+and two status small-fixture cases with zero memory-check errors. This does
+**not** by itself qualify full-model capacity, quality, performance, cache
+lifecycle or CUDA graphs beyond what is explicitly recorded in those results.
 [`NOTES.md`](NOTES.md) records source provenance, loader restrictions and
 historical GPU evidence limits. [`migration-evidence.json`](migration-evidence.json)
 records exact byte equivalence to the prior working-tree patch chain, including

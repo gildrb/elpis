@@ -1,8 +1,9 @@
 # Qwen3.8-27B + DFlash2 on one RTX 3090
 
-**A reproducible SGLang optimization recipe targeting 262144 tokens—not yet a
-qualified native-context deployment.** Optimize C1 agent latency, reusable long
-prefixes and useful code/reasoning output on one 24 GiB SM86 GPU.
+**A reproducible SGLang optimization recipe serving 262144 native tokens on
+one 24 GiB SM86 GPU — deployed as the live endpoint; quality qualification
+in progress.** Optimize C1 agent latency, reusable long prefixes and useful
+code/reasoning output.
 
 | Question | Current answer |
 |---|---|
@@ -11,14 +12,17 @@ prefixes and useful code/reasoning output on one 24 GiB SM86 GPU.
 | Runtime | `lmsysorg/sglang:v0.5.19@sha256:d6e7288627be8b02be88e4bba38e73f6d50e2826869f753c13a4c4385ab3eda9` |
 | Draft | `syvai/Qwen3.8-27B-DFlash2-W4A16` at `4d30ec736ffc6b8688dc2ae2b502d9b48bdec279`; exact repository/inventory in [preparation](prepare/REPRODUCE.md) |
 | Hardware | 1× NVIDIA RTX 3090, 24 GiB, SM86, TP=1; observed host driver 595.71.05 |
-| Context objective | **262144 total tokens**, with six qualification rungs from 131072 |
-| C1 speed / deep-context speed | Not measured for the refactored recipe |
-| VRAM / quality delta | FP8 startup peak sampled 22978 MiB; no steady-serving measurement or Prime Envs A/B result |
-| Cache strategy | FP8 control; KVarN retained as an explicit experiment, not rejected or promoted without measurements |
+| Context | **262144 native served** (KVarN pool 263168 tokens, image `qwen-inference:refactor-stage18b`) |
+| Deep-context speed | 32768-in/128-out wall 45.7 s (717 tok/s, 2.31× the stage16 kernel); 8192 16.9 s; FlashInfer prefill, oracle rmse 7e-5 |
+| C1 official harness | 8/8 at 1024/8192/32768 in; 32768 TTFT 40.7 s, accept 5.37 (first deep native completion) |
+| Power | p90 275 W, max 277 W, 0 samples over the 280 W cap |
+| Quality | Prime Envs full suite pending under the corrected harness (greedy, 32768 budget); earlier 8192-cap numbers truncated 70% of episodes and are retired |
+| Cache strategy | KVarN k4v2 packed KV is the serving path; FP8 64k remains the control |
 
-[The first bounded GPU trial](bench/results/refactor-fp8-startup.json) requested
-262144 context but allocated only **68004 pool tokens** with FP8. It did not reach
-API readiness before the controlled stop. Native context remains unproven.
+The GEMM ceiling is measured: Marlin W4A16 runs at 61-63 TFLOPs (fp16
+dense peak ≈71); every accessible int8 path on this stack is slower
+(`torch._int_mm` 44-50 TOPS, Triton W4A8 37-41). Remaining prefill upside
+requires a vLLM marlin-int8 transplant. See [patch evidence](patches/NOTES.md).
 
 The pin is the latest release found during the [current upstream/reference
 audit](docs/reference-audit.md). Newer main is a qualification candidate, not a
