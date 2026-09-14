@@ -117,3 +117,18 @@ Reference code is not automatically suitable for this repository's strict contra
 ## Open evidence gaps
 
 Roycorp source remains inaccessible. No local GPU execution, model-quality evaluation, direct 262,144-token capacity run, sampled-distribution proof, energy measurement or new lifecycle qualification was performed here. The public DFlash2 H200 measurements and syv RTX3090/vLLM measurements are external evidence only. Main-source support and a successful import/build are not deployment authorization.
+
+
+## Deep-context evaluator boundary (measured)
+
+The frozen direct profiles were tokenized with the exact reproduced tokenizer and
+unchanged template. Every MRCR 128k–256k quick row needs 266695 input tokens
+(274889 with its 8192-output budget), so it cannot run inside 262144; it stays
+recorded as oversized rather than trimmed. The smaller MRCR rows are 66824 input
+tokens (75018 total). The deeper GraphWalks bucket above 262144 source characters
+needs about 357000–358000 input tokens (365329–366156 budget) in all sampled
+32 rows, so it also exceeds every rung. The deepest currently-measured fitting GraphWalks
+bucket (16 of 100 rows, source characters 131073–262144) is about 178672–179103
+input tokens (186866–187297 budget), fitting the 196608 rung and above; 84 rows
+remain untokenized. These are CPU budget facts only; see
+`eval/direct/TOKEN-BUDGET.md`. No profile was changed and no quality score exists.

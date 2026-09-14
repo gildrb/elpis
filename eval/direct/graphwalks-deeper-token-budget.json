@@ -1,0 +1,1377 @@
+{
+  "schema": 1,
+  "recorded_at_utc": "2026-09-13T12:19:15.879524+00:00",
+  "status": "sampled_next_native_character_bucket_over_budget_no_token_fit_profile_qualified",
+  "candidate_native_args": {
+    "environment": "graphwalks",
+    "split": "train",
+    "scoring": "exact",
+    "problem_types": [
+      "bfs",
+      "parents"
+    ],
+    "prompt_chars_filter": "262145-524288",
+    "shuffle": false,
+    "seed": 0,
+    "environment_num_examples": -1,
+    "get_eval_dataset_n_per_type": 16
+  },
+  "source_counts_before_tokenization": {
+    "source_buckets": [
+      {
+        "problem_type": "bfs",
+        "buckets": [
+          {
+            "lower": 0,
+            "upper": 65536,
+            "rows": 250,
+            "min": 2650,
+            "max": 55626
+          },
+          {
+            "lower": 65537,
+            "upper": 131072,
+            "rows": 50,
+            "min": 110150,
+            "max": 110251
+          },
+          {
+            "lower": 131073,
+            "upper": 262144,
+            "rows": 50,
+            "min": 219425,
+            "max": 219451
+          },
+          {
+            "lower": 262145,
+            "upper": 524288,
+            "rows": 100,
+            "min": 437425,
+            "max": 437501
+          },
+          {
+            "lower": 524289,
+            "upper": 1048576,
+            "rows": 0,
+            "min": null,
+            "max": null
+          },
+          {
+            "lower": 1048577,
+            "upper": 2097152,
+            "rows": 100,
+            "min": 1748150,
+            "max": 1748226
+          },
+          {
+            "lower": 2097153,
+            "upper": 4194304,
+            "rows": 0,
+            "min": null,
+            "max": null
+          },
+          {
+            "lower": 4194305,
+            "upper": 100000000,
+            "rows": 0,
+            "min": null,
+            "max": null
+          }
+        ]
+      },
+      {
+        "problem_type": "parents",
+        "buckets": [
+          {
+            "lower": 0,
+            "upper": 65536,
+            "rows": 300,
+            "min": 2638,
+            "max": 55588
+          },
+          {
+            "lower": 65537,
+            "upper": 131072,
+            "rows": 50,
+            "min": 110163,
+            "max": 110238
+          },
+          {
+            "lower": 131073,
+            "upper": 262144,
+            "rows": 50,
+            "min": 219413,
+            "max": 219438
+          },
+          {
+            "lower": 262145,
+            "upper": 524288,
+            "rows": 100,
+            "min": 437413,
+            "max": 437488
+          },
+          {
+            "lower": 524289,
+            "upper": 1048576,
+            "rows": 0,
+            "min": null,
+            "max": null
+          },
+          {
+            "lower": 1048577,
+            "upper": 2097152,
+            "rows": 100,
+            "min": 1748138,
+            "max": 1748213
+          },
+          {
+            "lower": 2097153,
+            "upper": 4194304,
+            "rows": 0,
+            "min": null,
+            "max": null
+          },
+          {
+            "lower": 4194305,
+            "upper": 100000000,
+            "rows": 0,
+            "min": null,
+            "max": null
+          }
+        ]
+      }
+    ],
+    "native_next_bucket": [
+      {
+        "problem_type": "bfs",
+        "filter": "262145-524288",
+        "rows": 100,
+        "actual_prompt_characters_min": 437563,
+        "actual_prompt_characters_max": 437639
+      },
+      {
+        "problem_type": "parents",
+        "filter": "262145-524288",
+        "rows": 100,
+        "actual_prompt_characters_min": 437484,
+        "actual_prompt_characters_max": 437559
+      }
+    ],
+    "tokenization_performed": false,
+    "model_requests_sent": 0
+  },
+  "summary": [
+    {
+      "problem_type": "bfs",
+      "sample_rows": 16,
+      "native_candidate_rows": 100,
+      "untokenized_rows": 84,
+      "selected_native_indices": [
+        0,
+        1,
+        2,
+        3,
+        4,
+        5,
+        6,
+        7,
+        8,
+        9,
+        10,
+        11,
+        12,
+        13,
+        14,
+        15
+      ],
+      "templated_input_min": 357135,
+      "templated_input_max": 357905,
+      "budget_total_min": 365329,
+      "budget_total_max": 366099
+    },
+    {
+      "problem_type": "parents",
+      "sample_rows": 16,
+      "native_candidate_rows": 100,
+      "untokenized_rows": 84,
+      "selected_native_indices": [
+        0,
+        1,
+        2,
+        3,
+        4,
+        5,
+        6,
+        7,
+        8,
+        9,
+        10,
+        11,
+        12,
+        13,
+        14,
+        15
+      ],
+      "templated_input_min": 357248,
+      "templated_input_max": 357962,
+      "budget_total_min": 365442,
+      "budget_total_max": 366156
+    }
+  ],
+  "sample_token_measurement": {
+    "records": [
+      {
+        "candidate_name": "graphwalks-next-native-char-bucket",
+        "problem_type": "bfs",
+        "native_args": {
+          "split": "train",
+          "scoring": "exact",
+          "problem_type": "bfs",
+          "prompt_chars_filter": "262145-524288",
+          "shuffle": false,
+          "seed": 0,
+          "num_examples": -1
+        },
+        "selected_index": 0,
+        "example_id": 0,
+        "messages_sha256": "ac451af00b409fbcecc7211211d8a3a5332f768c9e8c375d08720cb36f07b067",
+        "raw_user_characters": 437588,
+        "raw_user_tokens": 357835,
+        "templated_input_tokens": 357885,
+        "template_token_delta": 50,
+        "output_budget_tokens": 8192,
+        "engine_reserve_tokens": 2,
+        "budget_total_tokens": 366079,
+        "rendered_prompt_sha256": "97d293992ca3b6c038e9a82cb3a37e2c9e44f79074220274e5fa8d9c91d02a33",
+        "token_ids_sha256": "4ec3e66bba0ea28a9a111bf71a1b108f89c78c6c98ff341b215572f470301d50",
+        "native_template_and_server_callable_ids_identical": true,
+        "fits_caps": {
+          "131072": false,
+          "163840": false,
+          "196608": false,
+          "229376": false,
+          "245760": false,
+          "262144": false
+        }
+      },
+      {
+        "candidate_name": "graphwalks-next-native-char-bucket",
+        "problem_type": "bfs",
+        "native_args": {
+          "split": "train",
+          "scoring": "exact",
+          "problem_type": "bfs",
+          "prompt_chars_filter": "262145-524288",
+          "shuffle": false,
+          "seed": 0,
+          "num_examples": -1
+        },
+        "selected_index": 1,
+        "example_id": 1,
+        "messages_sha256": "fc34398ba6b2c5dc7f6458d46a15e95930c54860996e4dcda83896dfba4edcb6",
+        "raw_user_characters": 437563,
+        "raw_user_tokens": 357147,
+        "templated_input_tokens": 357197,
+        "template_token_delta": 50,
+        "output_budget_tokens": 8192,
+        "engine_reserve_tokens": 2,
+        "budget_total_tokens": 365391,
+        "rendered_prompt_sha256": "c24711c7e640e6fcb61bfed9ef94b487c1f0b816b9f2413132d3d868ca18174e",
+        "token_ids_sha256": "f2b71c5d82d16ea18c804c9fcdb80a5e803c3a2ab97a7f8427d8faa709293842",
+        "native_template_and_server_callable_ids_identical": true,
+        "fits_caps": {
+          "131072": false,
+          "163840": false,
+          "196608": false,
+          "229376": false,
+          "245760": false,
+          "262144": false
+        }
+      },
+      {
+        "candidate_name": "graphwalks-next-native-char-bucket",
+        "problem_type": "bfs",
+        "native_args": {
+          "split": "train",
+          "scoring": "exact",
+          "problem_type": "bfs",
+          "prompt_chars_filter": "262145-524288",
+          "shuffle": false,
+          "seed": 0,
+          "num_examples": -1
+        },
+        "selected_index": 2,
+        "example_id": 2,
+        "messages_sha256": "a404fa952ceee0eb8c17b3b9fd2bed9daaac7b7c527a409da41a99ae325f90b0",
+        "raw_user_characters": 437563,
+        "raw_user_tokens": 357085,
+        "templated_input_tokens": 357135,
+        "template_token_delta": 50,
+        "output_budget_tokens": 8192,
+        "engine_reserve_tokens": 2,
+        "budget_total_tokens": 365329,
+        "rendered_prompt_sha256": "62f3dc11e9352b69d2c76a600394597f6b2db0f57ce527fc3b1aa6e58fe2b28d",
+        "token_ids_sha256": "2d76599f6d5ab749e842e7fcc7a37acdfc2911407ce3451b09ba34707a9bc108",
+        "native_template_and_server_callable_ids_identical": true,
+        "fits_caps": {
+          "131072": false,
+          "163840": false,
+          "196608": false,
+          "229376": false,
+          "245760": false,
+          "262144": false
+        }
+      },
+      {
+        "candidate_name": "graphwalks-next-native-char-bucket",
+        "problem_type": "bfs",
+        "native_args": {
+          "split": "train",
+          "scoring": "exact",
+          "problem_type": "bfs",
+          "prompt_chars_filter": "262145-524288",
+          "shuffle": false,
+          "seed": 0,
+          "num_examples": -1
+        },
+        "selected_index": 3,
+        "example_id": 3,
+        "messages_sha256": "6bb306576b90241db55922b8e41d8939a2ddc89b1b133281001db3b0f4fb36c5",
+        "raw_user_characters": 437588,
+        "raw_user_tokens": 357735,
+        "templated_input_tokens": 357785,
+        "template_token_delta": 50,
+        "output_budget_tokens": 8192,
+        "engine_reserve_tokens": 2,
+        "budget_total_tokens": 365979,
+        "rendered_prompt_sha256": "85edbaed27902e8e506c96f3a1b86d04f231bf3475b11e54136d950c3d808f0c",
+        "token_ids_sha256": "87a914605927de6bec2bf191d9fb6ad2eb43f9198950b384c623a7a2dbf1d76c",
+        "native_template_and_server_callable_ids_identical": true,
+        "fits_caps": {
+          "131072": false,
+          "163840": false,
+          "196608": false,
+          "229376": false,
+          "245760": false,
+          "262144": false
+        }
+      },
+      {
+        "candidate_name": "graphwalks-next-native-char-bucket",
+        "problem_type": "bfs",
+        "native_args": {
+          "split": "train",
+          "scoring": "exact",
+          "problem_type": "bfs",
+          "prompt_chars_filter": "262145-524288",
+          "shuffle": false,
+          "seed": 0,
+          "num_examples": -1
+        },
+        "selected_index": 4,
+        "example_id": 4,
+        "messages_sha256": "298a1f3b5359c5be474d3f67733e8d388bc89e2f80f1d947291185be095c059a",
+        "raw_user_characters": 437588,
+        "raw_user_tokens": 357596,
+        "templated_input_tokens": 357646,
+        "template_token_delta": 50,
+        "output_budget_tokens": 8192,
+        "engine_reserve_tokens": 2,
+        "budget_total_tokens": 365840,
+        "rendered_prompt_sha256": "d21f05adcfe39917e4847dde11a87b27f29be576509dab5aba26a59353a0bba5",
+        "token_ids_sha256": "cc8f53c631a87548a1cb1e69d3dc3a0dd650191063cfd95908f6c72a780eb164",
+        "native_template_and_server_callable_ids_identical": true,
+        "fits_caps": {
+          "131072": false,
+          "163840": false,
+          "196608": false,
+          "229376": false,
+          "245760": false,
+          "262144": false
+        }
+      },
+      {
+        "candidate_name": "graphwalks-next-native-char-bucket",
+        "problem_type": "bfs",
+        "native_args": {
+          "split": "train",
+          "scoring": "exact",
+          "problem_type": "bfs",
+          "prompt_chars_filter": "262145-524288",
+          "shuffle": false,
+          "seed": 0,
+          "num_examples": -1
+        },
+        "selected_index": 5,
+        "example_id": 5,
+        "messages_sha256": "9a7d31cf9431bd995a685886efc1cbef2f9cac32f0c1e202683029096aeb9665",
+        "raw_user_characters": 437588,
+        "raw_user_tokens": 357528,
+        "templated_input_tokens": 357578,
+        "template_token_delta": 50,
+        "output_budget_tokens": 8192,
+        "engine_reserve_tokens": 2,
+        "budget_total_tokens": 365772,
+        "rendered_prompt_sha256": "415a3608ea68395ddbeef4b9adf64d9881f36a9ca113d513a68fb8117ae13c17",
+        "token_ids_sha256": "677a2b6132a9e7e468503b40472989b6ee7f4d8d73ab0d0c3e14c9771a17e973",
+        "native_template_and_server_callable_ids_identical": true,
+        "fits_caps": {
+          "131072": false,
+          "163840": false,
+          "196608": false,
+          "229376": false,
+          "245760": false,
+          "262144": false
+        }
+      },
+      {
+        "candidate_name": "graphwalks-next-native-char-bucket",
+        "problem_type": "bfs",
+        "native_args": {
+          "split": "train",
+          "scoring": "exact",
+          "problem_type": "bfs",
+          "prompt_chars_filter": "262145-524288",
+          "shuffle": false,
+          "seed": 0,
+          "num_examples": -1
+        },
+        "selected_index": 6,
+        "example_id": 6,
+        "messages_sha256": "fa8edbf981281619a9f7fc343b0244dfe18b934b2aff340d9ad7bd777bb1f579",
+        "raw_user_characters": 437638,
+        "raw_user_tokens": 357688,
+        "templated_input_tokens": 357738,
+        "template_token_delta": 50,
+        "output_budget_tokens": 8192,
+        "engine_reserve_tokens": 2,
+        "budget_total_tokens": 365932,
+        "rendered_prompt_sha256": "7abff38308ef35f5c6264bc297bb0625aed63ccbf37cd017fdfa1d6afc70ba9e",
+        "token_ids_sha256": "9d4c6eb4cb438d84a7bc05b7c03ba4d910352a31b2a85c050e227b371f5f1363",
+        "native_template_and_server_callable_ids_identical": true,
+        "fits_caps": {
+          "131072": false,
+          "163840": false,
+          "196608": false,
+          "229376": false,
+          "245760": false,
+          "262144": false
+        }
+      },
+      {
+        "candidate_name": "graphwalks-next-native-char-bucket",
+        "problem_type": "bfs",
+        "native_args": {
+          "split": "train",
+          "scoring": "exact",
+          "problem_type": "bfs",
+          "prompt_chars_filter": "262145-524288",
+          "shuffle": false,
+          "seed": 0,
+          "num_examples": -1
+        },
+        "selected_index": 7,
+        "example_id": 7,
+        "messages_sha256": "511a19045c00fb7a548666fec9f60b3f60b775e78dfce6e1742c0550087cbaa0",
+        "raw_user_characters": 437638,
+        "raw_user_tokens": 357722,
+        "templated_input_tokens": 357772,
+        "template_token_delta": 50,
+        "output_budget_tokens": 8192,
+        "engine_reserve_tokens": 2,
+        "budget_total_tokens": 365966,
+        "rendered_prompt_sha256": "48d5f82859f0b7c261ce35f25e204c368bce59fac09c86eda0d6b43c754a7242",
+        "token_ids_sha256": "2a40d2ded7b1e87e3b4f96cdb4ce01effff3c7ea522abc37b0f741144c5383db",
+        "native_template_and_server_callable_ids_identical": true,
+        "fits_caps": {
+          "131072": false,
+          "163840": false,
+          "196608": false,
+          "229376": false,
+          "245760": false,
+          "262144": false
+        }
+      },
+      {
+        "candidate_name": "graphwalks-next-native-char-bucket",
+        "problem_type": "bfs",
+        "native_args": {
+          "split": "train",
+          "scoring": "exact",
+          "problem_type": "bfs",
+          "prompt_chars_filter": "262145-524288",
+          "shuffle": false,
+          "seed": 0,
+          "num_examples": -1
+        },
+        "selected_index": 8,
+        "example_id": 8,
+        "messages_sha256": "7b5432def13c5860ba11c1d76f8f953a81013d3581c7fe47ea92962f1211f70c",
+        "raw_user_characters": 437588,
+        "raw_user_tokens": 357855,
+        "templated_input_tokens": 357905,
+        "template_token_delta": 50,
+        "output_budget_tokens": 8192,
+        "engine_reserve_tokens": 2,
+        "budget_total_tokens": 366099,
+        "rendered_prompt_sha256": "7856f1251b30685ba6af141307c2bfbeed2a41e8dcaf40fe8c9a3e5670c8e98d",
+        "token_ids_sha256": "f2d249200ceada7f229b845894cc198f3d9fc7cb3a3cd4d61af99b81b4d8e095",
+        "native_template_and_server_callable_ids_identical": true,
+        "fits_caps": {
+          "131072": false,
+          "163840": false,
+          "196608": false,
+          "229376": false,
+          "245760": false,
+          "262144": false
+        }
+      },
+      {
+        "candidate_name": "graphwalks-next-native-char-bucket",
+        "problem_type": "bfs",
+        "native_args": {
+          "split": "train",
+          "scoring": "exact",
+          "problem_type": "bfs",
+          "prompt_chars_filter": "262145-524288",
+          "shuffle": false,
+          "seed": 0,
+          "num_examples": -1
+        },
+        "selected_index": 9,
+        "example_id": 9,
+        "messages_sha256": "b3c77e44fe62901225c5abdbbad04ecc8449ed1c4bc20cc8d1b59306376b2465",
+        "raw_user_characters": 437638,
+        "raw_user_tokens": 357362,
+        "templated_input_tokens": 357412,
+        "template_token_delta": 50,
+        "output_budget_tokens": 8192,
+        "engine_reserve_tokens": 2,
+        "budget_total_tokens": 365606,
+        "rendered_prompt_sha256": "422a51fe6899ae2a2fb6b04109e41c820055bb22cd9b7a96a36e409fc6e4783c",
+        "token_ids_sha256": "90c67a67835a69f0a00585377bcedb8726e9ec38293e49710a134c80443fefd8",
+        "native_template_and_server_callable_ids_identical": true,
+        "fits_caps": {
+          "131072": false,
+          "163840": false,
+          "196608": false,
+          "229376": false,
+          "245760": false,
+          "262144": false
+        }
+      },
+      {
+        "candidate_name": "graphwalks-next-native-char-bucket",
+        "problem_type": "bfs",
+        "native_args": {
+          "split": "train",
+          "scoring": "exact",
+          "problem_type": "bfs",
+          "prompt_chars_filter": "262145-524288",
+          "shuffle": false,
+          "seed": 0,
+          "num_examples": -1
+        },
+        "selected_index": 10,
+        "example_id": 10,
+        "messages_sha256": "24ce7fe07ac5680207a1adb127c5b3e573023ffba516d3d8457d64890dca6fa8",
+        "raw_user_characters": 437588,
+        "raw_user_tokens": 357633,
+        "templated_input_tokens": 357683,
+        "template_token_delta": 50,
+        "output_budget_tokens": 8192,
+        "engine_reserve_tokens": 2,
+        "budget_total_tokens": 365877,
+        "rendered_prompt_sha256": "c2efece6052d759735520d6d69cf0fcef0208bb7014a5e84a454e51f99c973fd",
+        "token_ids_sha256": "a6070ebbe37a33b20bfaf416cde9acc9651e314d0a15bd69be50c3ffd7edac60",
+        "native_template_and_server_callable_ids_identical": true,
+        "fits_caps": {
+          "131072": false,
+          "163840": false,
+          "196608": false,
+          "229376": false,
+          "245760": false,
+          "262144": false
+        }
+      },
+      {
+        "candidate_name": "graphwalks-next-native-char-bucket",
+        "problem_type": "bfs",
+        "native_args": {
+          "split": "train",
+          "scoring": "exact",
+          "problem_type": "bfs",
+          "prompt_chars_filter": "262145-524288",
+          "shuffle": false,
+          "seed": 0,
+          "num_examples": -1
+        },
+        "selected_index": 11,
+        "example_id": 11,
+        "messages_sha256": "935560ac6b0e02fe60f58189f9416b46141f38383752bb67693fc17b745428b4",
+        "raw_user_characters": 437563,
+        "raw_user_tokens": 357177,
+        "templated_input_tokens": 357227,
+        "template_token_delta": 50,
+        "output_budget_tokens": 8192,
+        "engine_reserve_tokens": 2,
+        "budget_total_tokens": 365421,
+        "rendered_prompt_sha256": "e3fe1ea99e763a3688cf3e473dbe37030a9f75a8fdd65902b2cfb501afb53a2b",
+        "token_ids_sha256": "777b87a4c7ab2c09607020a8877a832fe95d702dcdaad28d152d52dfa773aaa5",
+        "native_template_and_server_callable_ids_identical": true,
+        "fits_caps": {
+          "131072": false,
+          "163840": false,
+          "196608": false,
+          "229376": false,
+          "245760": false,
+          "262144": false
+        }
+      },
+      {
+        "candidate_name": "graphwalks-next-native-char-bucket",
+        "problem_type": "bfs",
+        "native_args": {
+          "split": "train",
+          "scoring": "exact",
+          "problem_type": "bfs",
+          "prompt_chars_filter": "262145-524288",
+          "shuffle": false,
+          "seed": 0,
+          "num_examples": -1
+        },
+        "selected_index": 12,
+        "example_id": 12,
+        "messages_sha256": "e192af27ec53ecf6322a0eae708bb0024442b343ad5a0d07f9060f2f0c3b597b",
+        "raw_user_characters": 437638,
+        "raw_user_tokens": 357578,
+        "templated_input_tokens": 357628,
+        "template_token_delta": 50,
+        "output_budget_tokens": 8192,
+        "engine_reserve_tokens": 2,
+        "budget_total_tokens": 365822,
+        "rendered_prompt_sha256": "7592ecfac2110eb61743c503eb3118776e1174322df5670fc7cc806a568c44ce",
+        "token_ids_sha256": "d8be23f53efcd6b3963b923b3297ac498406edad9016ae142484cf6a2431d472",
+        "native_template_and_server_callable_ids_identical": true,
+        "fits_caps": {
+          "131072": false,
+          "163840": false,
+          "196608": false,
+          "229376": false,
+          "245760": false,
+          "262144": false
+        }
+      },
+      {
+        "candidate_name": "graphwalks-next-native-char-bucket",
+        "problem_type": "bfs",
+        "native_args": {
+          "split": "train",
+          "scoring": "exact",
+          "problem_type": "bfs",
+          "prompt_chars_filter": "262145-524288",
+          "shuffle": false,
+          "seed": 0,
+          "num_examples": -1
+        },
+        "selected_index": 13,
+        "example_id": 13,
+        "messages_sha256": "35d791095cbf8c8a21380b9dc186a36667f7b4afe63321e550d61f2d825dbd1b",
+        "raw_user_characters": 437588,
+        "raw_user_tokens": 357823,
+        "templated_input_tokens": 357873,
+        "template_token_delta": 50,
+        "output_budget_tokens": 8192,
+        "engine_reserve_tokens": 2,
+        "budget_total_tokens": 366067,
+        "rendered_prompt_sha256": "bbebc9384cd61ff134df2014f0cff966abe2a4121a3e62733023bd1c987f466a",
+        "token_ids_sha256": "5ef90174310b819524de2c2a297a688bf010a16cec6280960a6fa93bc967e352",
+        "native_template_and_server_callable_ids_identical": true,
+        "fits_caps": {
+          "131072": false,
+          "163840": false,
+          "196608": false,
+          "229376": false,
+          "245760": false,
+          "262144": false
+        }
+      },
+      {
+        "candidate_name": "graphwalks-next-native-char-bucket",
+        "problem_type": "bfs",
+        "native_args": {
+          "split": "train",
+          "scoring": "exact",
+          "problem_type": "bfs",
+          "prompt_chars_filter": "262145-524288",
+          "shuffle": false,
+          "seed": 0,
+          "num_examples": -1
+        },
+        "selected_index": 14,
+        "example_id": 14,
+        "messages_sha256": "bf444df0210a498e53c2a09cf723d4fce71af755aae5e44a56c7c5178397cfea",
+        "raw_user_characters": 437588,
+        "raw_user_tokens": 357763,
+        "templated_input_tokens": 357813,
+        "template_token_delta": 50,
+        "output_budget_tokens": 8192,
+        "engine_reserve_tokens": 2,
+        "budget_total_tokens": 366007,
+        "rendered_prompt_sha256": "921a7ce97d0a13d6ad29d907f079f0324844dd749e0dfa1a2273c8ca62d89757",
+        "token_ids_sha256": "3648394d599a5e2d7627969e424ea171c36757d98a40386f552af331ce8eb508",
+        "native_template_and_server_callable_ids_identical": true,
+        "fits_caps": {
+          "131072": false,
+          "163840": false,
+          "196608": false,
+          "229376": false,
+          "245760": false,
+          "262144": false
+        }
+      },
+      {
+        "candidate_name": "graphwalks-next-native-char-bucket",
+        "problem_type": "bfs",
+        "native_args": {
+          "split": "train",
+          "scoring": "exact",
+          "problem_type": "bfs",
+          "prompt_chars_filter": "262145-524288",
+          "shuffle": false,
+          "seed": 0,
+          "num_examples": -1
+        },
+        "selected_index": 15,
+        "example_id": 15,
+        "messages_sha256": "c13f11c0890ef59f15011b0ec5141e7f0c1ccc8177601afe42466e721f79aa33",
+        "raw_user_characters": 437588,
+        "raw_user_tokens": 357666,
+        "templated_input_tokens": 357716,
+        "template_token_delta": 50,
+        "output_budget_tokens": 8192,
+        "engine_reserve_tokens": 2,
+        "budget_total_tokens": 365910,
+        "rendered_prompt_sha256": "4d9273952632cdca6501d6d09fccf8a2d9bc6f39d2eb4f97db507339f1f895d0",
+        "token_ids_sha256": "f388a3fcaa93cfb0f0b308d401ce0ed27f928e3988ea0f129954d6f0d85998a3",
+        "native_template_and_server_callable_ids_identical": true,
+        "fits_caps": {
+          "131072": false,
+          "163840": false,
+          "196608": false,
+          "229376": false,
+          "245760": false,
+          "262144": false
+        }
+      },
+      {
+        "candidate_name": "graphwalks-next-native-char-bucket",
+        "problem_type": "parents",
+        "native_args": {
+          "split": "train",
+          "scoring": "exact",
+          "problem_type": "parents",
+          "prompt_chars_filter": "262145-524288",
+          "shuffle": false,
+          "seed": 0,
+          "num_examples": -1
+        },
+        "selected_index": 0,
+        "example_id": 0,
+        "messages_sha256": "0ffdf6f24ff7a74f8858f00208b528af38d0981ab41b76677a57084533d587be",
+        "raw_user_characters": 437559,
+        "raw_user_tokens": 357309,
+        "templated_input_tokens": 357359,
+        "template_token_delta": 50,
+        "output_budget_tokens": 8192,
+        "engine_reserve_tokens": 2,
+        "budget_total_tokens": 365553,
+        "rendered_prompt_sha256": "e74a36265ece00956c984de67f402a8ce392c5749688c186b01ad126db1a2ae7",
+        "token_ids_sha256": "f31ab09df9a0bcc65d1d0850d570b0dabb4d921e661d2b7a5fe35b1e72ec9986",
+        "native_template_and_server_callable_ids_identical": true,
+        "fits_caps": {
+          "131072": false,
+          "163840": false,
+          "196608": false,
+          "229376": false,
+          "245760": false,
+          "262144": false
+        }
+      },
+      {
+        "candidate_name": "graphwalks-next-native-char-bucket",
+        "problem_type": "parents",
+        "native_args": {
+          "split": "train",
+          "scoring": "exact",
+          "problem_type": "parents",
+          "prompt_chars_filter": "262145-524288",
+          "shuffle": false,
+          "seed": 0,
+          "num_examples": -1
+        },
+        "selected_index": 1,
+        "example_id": 1,
+        "messages_sha256": "bd3a2df977d499bfdd37f2c19b0021dc87628e37a8febdc1087675939e3aa615",
+        "raw_user_characters": 437559,
+        "raw_user_tokens": 357198,
+        "templated_input_tokens": 357248,
+        "template_token_delta": 50,
+        "output_budget_tokens": 8192,
+        "engine_reserve_tokens": 2,
+        "budget_total_tokens": 365442,
+        "rendered_prompt_sha256": "0f149abde56aeb6c5c5bac143558ccfbf50ae826e1959bf6c7071b0151b06030",
+        "token_ids_sha256": "478d6ab3cd0574996dc91355fdca1c9bdb00e62a8d149159798b062562eef298",
+        "native_template_and_server_callable_ids_identical": true,
+        "fits_caps": {
+          "131072": false,
+          "163840": false,
+          "196608": false,
+          "229376": false,
+          "245760": false,
+          "262144": false
+        }
+      },
+      {
+        "candidate_name": "graphwalks-next-native-char-bucket",
+        "problem_type": "parents",
+        "native_args": {
+          "split": "train",
+          "scoring": "exact",
+          "problem_type": "parents",
+          "prompt_chars_filter": "262145-524288",
+          "shuffle": false,
+          "seed": 0,
+          "num_examples": -1
+        },
+        "selected_index": 2,
+        "example_id": 2,
+        "messages_sha256": "7b7a2968ce777d4091a9a6ed2d48483e49f3b5f4d46b17e793c60754abd3d040",
+        "raw_user_characters": 437559,
+        "raw_user_tokens": 357658,
+        "templated_input_tokens": 357708,
+        "template_token_delta": 50,
+        "output_budget_tokens": 8192,
+        "engine_reserve_tokens": 2,
+        "budget_total_tokens": 365902,
+        "rendered_prompt_sha256": "cfb81010cb44639a90bbb139405a78d8dc7c6db4c0de6dd9fb5302319ff3c75f",
+        "token_ids_sha256": "2846f8061a29613c85c527365f336a21484bf3dd1f91c53087a983222c704445",
+        "native_template_and_server_callable_ids_identical": true,
+        "fits_caps": {
+          "131072": false,
+          "163840": false,
+          "196608": false,
+          "229376": false,
+          "245760": false,
+          "262144": false
+        }
+      },
+      {
+        "candidate_name": "graphwalks-next-native-char-bucket",
+        "problem_type": "parents",
+        "native_args": {
+          "split": "train",
+          "scoring": "exact",
+          "problem_type": "parents",
+          "prompt_chars_filter": "262145-524288",
+          "shuffle": false,
+          "seed": 0,
+          "num_examples": -1
+        },
+        "selected_index": 3,
+        "example_id": 3,
+        "messages_sha256": "9bd87a8317696d0d16b7b5d43e08c8f53ee1fd9aa93d40ac88687abb449acffe",
+        "raw_user_characters": 437509,
+        "raw_user_tokens": 357407,
+        "templated_input_tokens": 357457,
+        "template_token_delta": 50,
+        "output_budget_tokens": 8192,
+        "engine_reserve_tokens": 2,
+        "budget_total_tokens": 365651,
+        "rendered_prompt_sha256": "febffae025fb4621cc09525f63f7b102d56adddcbdd0a345f272f865568228c6",
+        "token_ids_sha256": "cfc6b7410db61cca06cf192871b95d962e716a215c9b68fc4d8a5c96c457fcf4",
+        "native_template_and_server_callable_ids_identical": true,
+        "fits_caps": {
+          "131072": false,
+          "163840": false,
+          "196608": false,
+          "229376": false,
+          "245760": false,
+          "262144": false
+        }
+      },
+      {
+        "candidate_name": "graphwalks-next-native-char-bucket",
+        "problem_type": "parents",
+        "native_args": {
+          "split": "train",
+          "scoring": "exact",
+          "problem_type": "parents",
+          "prompt_chars_filter": "262145-524288",
+          "shuffle": false,
+          "seed": 0,
+          "num_examples": -1
+        },
+        "selected_index": 4,
+        "example_id": 4,
+        "messages_sha256": "f2376b1f3bc7e1c1177a399e7ece573ae257eef0829eb3378b6a8a3da0deec33",
+        "raw_user_characters": 437509,
+        "raw_user_tokens": 357567,
+        "templated_input_tokens": 357617,
+        "template_token_delta": 50,
+        "output_budget_tokens": 8192,
+        "engine_reserve_tokens": 2,
+        "budget_total_tokens": 365811,
+        "rendered_prompt_sha256": "3ca9a10ebae1d12b1bf792dc136c8b1034364c6ff61ca4844b89d34da0dc7e16",
+        "token_ids_sha256": "3e4c5024fe22082e4072d27074adf989b22ed65d5c080bec81730cf59df09136",
+        "native_template_and_server_callable_ids_identical": true,
+        "fits_caps": {
+          "131072": false,
+          "163840": false,
+          "196608": false,
+          "229376": false,
+          "245760": false,
+          "262144": false
+        }
+      },
+      {
+        "candidate_name": "graphwalks-next-native-char-bucket",
+        "problem_type": "parents",
+        "native_args": {
+          "split": "train",
+          "scoring": "exact",
+          "problem_type": "parents",
+          "prompt_chars_filter": "262145-524288",
+          "shuffle": false,
+          "seed": 0,
+          "num_examples": -1
+        },
+        "selected_index": 5,
+        "example_id": 5,
+        "messages_sha256": "d8bfd3aa911e3906ddf7d33b2177d0b7290b79b94e0d3294490c8175271afc25",
+        "raw_user_characters": 437509,
+        "raw_user_tokens": 357546,
+        "templated_input_tokens": 357596,
+        "template_token_delta": 50,
+        "output_budget_tokens": 8192,
+        "engine_reserve_tokens": 2,
+        "budget_total_tokens": 365790,
+        "rendered_prompt_sha256": "6f46eb78a1d0fa1d487e5624d3a0889b8fa6fb6a0d0b2845552d417375650e34",
+        "token_ids_sha256": "023aff261644044ebd1c5368d3989bd7d627c006a46cf9624183610af5086fa7",
+        "native_template_and_server_callable_ids_identical": true,
+        "fits_caps": {
+          "131072": false,
+          "163840": false,
+          "196608": false,
+          "229376": false,
+          "245760": false,
+          "262144": false
+        }
+      },
+      {
+        "candidate_name": "graphwalks-next-native-char-bucket",
+        "problem_type": "parents",
+        "native_args": {
+          "split": "train",
+          "scoring": "exact",
+          "problem_type": "parents",
+          "prompt_chars_filter": "262145-524288",
+          "shuffle": false,
+          "seed": 0,
+          "num_examples": -1
+        },
+        "selected_index": 6,
+        "example_id": 6,
+        "messages_sha256": "73d3f1e2b4b23dc0d44de6aa0ad98f464ee0ee5227a7909973f8c6bb282a9305",
+        "raw_user_characters": 437509,
+        "raw_user_tokens": 357794,
+        "templated_input_tokens": 357844,
+        "template_token_delta": 50,
+        "output_budget_tokens": 8192,
+        "engine_reserve_tokens": 2,
+        "budget_total_tokens": 366038,
+        "rendered_prompt_sha256": "fd3a9880b16b64b11071e84200f73a5f55df7c0cf52daca0c5fce8e2c9ebe206",
+        "token_ids_sha256": "4cf0aeee6ac73eedfd2874098702217132dee5f214791826dad7a77cee5a312d",
+        "native_template_and_server_callable_ids_identical": true,
+        "fits_caps": {
+          "131072": false,
+          "163840": false,
+          "196608": false,
+          "229376": false,
+          "245760": false,
+          "262144": false
+        }
+      },
+      {
+        "candidate_name": "graphwalks-next-native-char-bucket",
+        "problem_type": "parents",
+        "native_args": {
+          "split": "train",
+          "scoring": "exact",
+          "problem_type": "parents",
+          "prompt_chars_filter": "262145-524288",
+          "shuffle": false,
+          "seed": 0,
+          "num_examples": -1
+        },
+        "selected_index": 7,
+        "example_id": 7,
+        "messages_sha256": "6ad23b7a531c03fb575240f38d3a9812ef79daac2ebfe0a115a6ac78727b3567",
+        "raw_user_characters": 437559,
+        "raw_user_tokens": 357772,
+        "templated_input_tokens": 357822,
+        "template_token_delta": 50,
+        "output_budget_tokens": 8192,
+        "engine_reserve_tokens": 2,
+        "budget_total_tokens": 366016,
+        "rendered_prompt_sha256": "793a7868cb3007fff611b9dfc0f93f0fd10189b28dd6bd327e80db73cea0bf1d",
+        "token_ids_sha256": "063e64466081b903ac6f9f4a4a9a5e09239ad1abafa0168e07ee7f365ddbddda",
+        "native_template_and_server_callable_ids_identical": true,
+        "fits_caps": {
+          "131072": false,
+          "163840": false,
+          "196608": false,
+          "229376": false,
+          "245760": false,
+          "262144": false
+        }
+      },
+      {
+        "candidate_name": "graphwalks-next-native-char-bucket",
+        "problem_type": "parents",
+        "native_args": {
+          "split": "train",
+          "scoring": "exact",
+          "problem_type": "parents",
+          "prompt_chars_filter": "262145-524288",
+          "shuffle": false,
+          "seed": 0,
+          "num_examples": -1
+        },
+        "selected_index": 8,
+        "example_id": 8,
+        "messages_sha256": "8da2cf5e2e19fb0e2b95f3d42afcef7d87ca2d3e5e10b89df656e0ac474bbbe6",
+        "raw_user_characters": 437484,
+        "raw_user_tokens": 357274,
+        "templated_input_tokens": 357324,
+        "template_token_delta": 50,
+        "output_budget_tokens": 8192,
+        "engine_reserve_tokens": 2,
+        "budget_total_tokens": 365518,
+        "rendered_prompt_sha256": "9ecacca9db48e24cd8f3b40460d11a071694298c029b8173c0e24bc3af2ded13",
+        "token_ids_sha256": "73b8bc9360ba29a2cb61e92b024845ff00c5aa2304c1da51fbbea09222ee8885",
+        "native_template_and_server_callable_ids_identical": true,
+        "fits_caps": {
+          "131072": false,
+          "163840": false,
+          "196608": false,
+          "229376": false,
+          "245760": false,
+          "262144": false
+        }
+      },
+      {
+        "candidate_name": "graphwalks-next-native-char-bucket",
+        "problem_type": "parents",
+        "native_args": {
+          "split": "train",
+          "scoring": "exact",
+          "problem_type": "parents",
+          "prompt_chars_filter": "262145-524288",
+          "shuffle": false,
+          "seed": 0,
+          "num_examples": -1
+        },
+        "selected_index": 9,
+        "example_id": 9,
+        "messages_sha256": "65b8bffc27a037007edfbf9caf774f4cf01df2cf5368e204ac2bcefde45e2431",
+        "raw_user_characters": 437559,
+        "raw_user_tokens": 357429,
+        "templated_input_tokens": 357479,
+        "template_token_delta": 50,
+        "output_budget_tokens": 8192,
+        "engine_reserve_tokens": 2,
+        "budget_total_tokens": 365673,
+        "rendered_prompt_sha256": "cf0abfcb5d0b5545be6a75580c91e010313a9fb156beaddfdeb8f85139a730f4",
+        "token_ids_sha256": "c63ea9b6272ac7d75e032c30c091cbfcb2e80000ab68976477b0d00a990f0beb",
+        "native_template_and_server_callable_ids_identical": true,
+        "fits_caps": {
+          "131072": false,
+          "163840": false,
+          "196608": false,
+          "229376": false,
+          "245760": false,
+          "262144": false
+        }
+      },
+      {
+        "candidate_name": "graphwalks-next-native-char-bucket",
+        "problem_type": "parents",
+        "native_args": {
+          "split": "train",
+          "scoring": "exact",
+          "problem_type": "parents",
+          "prompt_chars_filter": "262145-524288",
+          "shuffle": false,
+          "seed": 0,
+          "num_examples": -1
+        },
+        "selected_index": 10,
+        "example_id": 10,
+        "messages_sha256": "e28f10c95c711783c637c9263a0d3e19be364379ed208ff72191db312bc0b169",
+        "raw_user_characters": 437559,
+        "raw_user_tokens": 357610,
+        "templated_input_tokens": 357660,
+        "template_token_delta": 50,
+        "output_budget_tokens": 8192,
+        "engine_reserve_tokens": 2,
+        "budget_total_tokens": 365854,
+        "rendered_prompt_sha256": "c315b6eebd3b947ef17096e183e261f1f1a9d9103eb081fa6194654c4c6d959b",
+        "token_ids_sha256": "2b022cfb537d0bc4be6149989704b36767b14f73917375411c4e0bc891a63d8a",
+        "native_template_and_server_callable_ids_identical": true,
+        "fits_caps": {
+          "131072": false,
+          "163840": false,
+          "196608": false,
+          "229376": false,
+          "245760": false,
+          "262144": false
+        }
+      },
+      {
+        "candidate_name": "graphwalks-next-native-char-bucket",
+        "problem_type": "parents",
+        "native_args": {
+          "split": "train",
+          "scoring": "exact",
+          "problem_type": "parents",
+          "prompt_chars_filter": "262145-524288",
+          "shuffle": false,
+          "seed": 0,
+          "num_examples": -1
+        },
+        "selected_index": 11,
+        "example_id": 11,
+        "messages_sha256": "2b59989f83d1aa462055c8fef4be9b544bf6d4bd382287c3453dc9e8652b36ba",
+        "raw_user_characters": 437559,
+        "raw_user_tokens": 357643,
+        "templated_input_tokens": 357693,
+        "template_token_delta": 50,
+        "output_budget_tokens": 8192,
+        "engine_reserve_tokens": 2,
+        "budget_total_tokens": 365887,
+        "rendered_prompt_sha256": "8a9a69673452b74df58e42734c5c3c971dba9cfe748b160179c1bac2a3b5ac16",
+        "token_ids_sha256": "bd51263b096b91086bff72524681ada51c0930218b1163363314ec04feefe010",
+        "native_template_and_server_callable_ids_identical": true,
+        "fits_caps": {
+          "131072": false,
+          "163840": false,
+          "196608": false,
+          "229376": false,
+          "245760": false,
+          "262144": false
+        }
+      },
+      {
+        "candidate_name": "graphwalks-next-native-char-bucket",
+        "problem_type": "parents",
+        "native_args": {
+          "split": "train",
+          "scoring": "exact",
+          "problem_type": "parents",
+          "prompt_chars_filter": "262145-524288",
+          "shuffle": false,
+          "seed": 0,
+          "num_examples": -1
+        },
+        "selected_index": 12,
+        "example_id": 12,
+        "messages_sha256": "b274ee55d4e6f484b7f07befe2be713bf04f396d47ca311b829a45b79b4fd685",
+        "raw_user_characters": 437559,
+        "raw_user_tokens": 357612,
+        "templated_input_tokens": 357662,
+        "template_token_delta": 50,
+        "output_budget_tokens": 8192,
+        "engine_reserve_tokens": 2,
+        "budget_total_tokens": 365856,
+        "rendered_prompt_sha256": "23c45ff5132fcb351fe837c6426de942db1bdd1d59161639d86585ac500f2124",
+        "token_ids_sha256": "fd4b615d62da3a0dee400cccb3e8eea634c195f613f7a7de3d42df4e46d7eb74",
+        "native_template_and_server_callable_ids_identical": true,
+        "fits_caps": {
+          "131072": false,
+          "163840": false,
+          "196608": false,
+          "229376": false,
+          "245760": false,
+          "262144": false
+        }
+      },
+      {
+        "candidate_name": "graphwalks-next-native-char-bucket",
+        "problem_type": "parents",
+        "native_args": {
+          "split": "train",
+          "scoring": "exact",
+          "problem_type": "parents",
+          "prompt_chars_filter": "262145-524288",
+          "shuffle": false,
+          "seed": 0,
+          "num_examples": -1
+        },
+        "selected_index": 13,
+        "example_id": 13,
+        "messages_sha256": "e340e7d87b510396d0f1c8c97e5cabe4b7e105ab53983e8273eb5e01aa9c1e81",
+        "raw_user_characters": 437509,
+        "raw_user_tokens": 357743,
+        "templated_input_tokens": 357793,
+        "template_token_delta": 50,
+        "output_budget_tokens": 8192,
+        "engine_reserve_tokens": 2,
+        "budget_total_tokens": 365987,
+        "rendered_prompt_sha256": "c37930f7d4ba74dbf252a4e1fac0fa06e23eee2f880010b5499f1d1602d573ed",
+        "token_ids_sha256": "7c48f656b675d599a39565389e8d580a08de80d926d4d958eee144fd56109fbd",
+        "native_template_and_server_callable_ids_identical": true,
+        "fits_caps": {
+          "131072": false,
+          "163840": false,
+          "196608": false,
+          "229376": false,
+          "245760": false,
+          "262144": false
+        }
+      },
+      {
+        "candidate_name": "graphwalks-next-native-char-bucket",
+        "problem_type": "parents",
+        "native_args": {
+          "split": "train",
+          "scoring": "exact",
+          "problem_type": "parents",
+          "prompt_chars_filter": "262145-524288",
+          "shuffle": false,
+          "seed": 0,
+          "num_examples": -1
+        },
+        "selected_index": 14,
+        "example_id": 14,
+        "messages_sha256": "cde7946d3d0bbe824856cc3f277f3419e991af9038bc12a2ce82f5df06da0cff",
+        "raw_user_characters": 437509,
+        "raw_user_tokens": 357554,
+        "templated_input_tokens": 357604,
+        "template_token_delta": 50,
+        "output_budget_tokens": 8192,
+        "engine_reserve_tokens": 2,
+        "budget_total_tokens": 365798,
+        "rendered_prompt_sha256": "0e13790ebaa0e7d14620c398ff17e96534a422ab361026970de3500d4dad52fa",
+        "token_ids_sha256": "82d701a044965b266e10c0507e087735e8cb47208871ed22e22a4611dacca2d5",
+        "native_template_and_server_callable_ids_identical": true,
+        "fits_caps": {
+          "131072": false,
+          "163840": false,
+          "196608": false,
+          "229376": false,
+          "245760": false,
+          "262144": false
+        }
+      },
+      {
+        "candidate_name": "graphwalks-next-native-char-bucket",
+        "problem_type": "parents",
+        "native_args": {
+          "split": "train",
+          "scoring": "exact",
+          "problem_type": "parents",
+          "prompt_chars_filter": "262145-524288",
+          "shuffle": false,
+          "seed": 0,
+          "num_examples": -1
+        },
+        "selected_index": 15,
+        "example_id": 15,
+        "messages_sha256": "b9b177ea13de28e764d1b2a59ef81df7b27d32aecc04bb8b93c68424e1a166b3",
+        "raw_user_characters": 437509,
+        "raw_user_tokens": 357912,
+        "templated_input_tokens": 357962,
+        "template_token_delta": 50,
+        "output_budget_tokens": 8192,
+        "engine_reserve_tokens": 2,
+        "budget_total_tokens": 366156,
+        "rendered_prompt_sha256": "dbe1387f3383606d61b52e28510b166fd9e6b6d2253bebcd651a5983c3944ba8",
+        "token_ids_sha256": "9be7b5081b9da75cbc36b0c3af1cda1ed1db95aa031ac466bdd070ec1748c7c4",
+        "native_template_and_server_callable_ids_identical": true,
+        "fits_caps": {
+          "131072": false,
+          "163840": false,
+          "196608": false,
+          "229376": false,
+          "245760": false,
+          "262144": false
+        }
+      }
+    ],
+    "tokenizer_files_sha256": {
+      "chat_template.jinja": "c3cf9e34abf4f9e36c2d72165aa9c132d3e2a725b6c2586aaa3a8af9d7a81041",
+      "tokenizer.json": "06b9509352d2af50381ab2247e083b80d32d5c0aba91c272ca9ff729b6a0e523",
+      "tokenizer_config.json": "5f7aa0d810000c4a0940b35c8f16e56c3439260fccc13a321826ebc3ccf2501f",
+      "config.json": "cc9f3743b1b48b72a13f40cb917c76c222f0aa143ea52549d664052e607cddb9",
+      "generation_config.json": "1a450b75a54bf9e6ffdc681d8b764d453061dd2d271df33fcfed46949b67c3de",
+      "processor_config.json": "d89ef49ce9cd37fbf510158e13c1ef063d9286411c1ec9049932dbe0487143b1"
+    },
+    "transformers": "5.12.1",
+    "tokenizers": "0.22.2",
+    "tokenizer_class": "Qwen2Tokenizer",
+    "sample_limit": 32,
+    "native_population_size": 200,
+    "untokenized_population_rows": 168,
+    "model_requests_sent": 0
+  },
+  "execution": {
+    "image_id": "sha256:8a1eeb69ca67af0d54688cf11b46700448f15cde5395f013b0b5484244f1dfb7",
+    "cpus": 2,
+    "gpu": "none",
+    "network": "none",
+    "native_source_inspection_exit_code": 0,
+    "native_export_exit_code": 0,
+    "tokenizer_diagnostic_exit_code": 0,
+    "owned_work_directory": "/tmp/inference-graphwalks-deeper-budget-7d_275ed",
+    "dependencies_changed": false,
+    "existing_profiles_modified": false,
+    "server_requests_sent": 0,
+    "upstream_scoring_executed": false
+  },
+  "proposal": {
+    "name": "graphwalks-next-native-char-bucket-probe16",
+    "kind": "distinct diagnostic candidate, not an approved fitting quality profile",
+    "native_selection": "first16 bfs plus first16 parents, inclusive source prompt_chars262145\u2013524288",
+    "fit_status": "rejected_for_all_sampled_rows_at_all131072\u2013262144caps",
+    "whole200_candidate_pool_fit": "unknown;168rowsuntokenized",
+    "requested200000_to253950_input_token_band": "no sampled rows in band",
+    "runtime_profile_file_created": false,
+    "next_step": "Do not run this sampled candidate. No deeper token-fit profile is justified. Any further token measurement requires separate approval; do not rewrite prompts, score locally, pad, trim, or silently choose other rows."
+  },
+  "hashes": {
+    "datasets_lock_sha256": "83a1ae74e1f094d1df852d50fda89e8fbf65d356f777c7adbb9005675a10d372",
+    "source_lock_sha256": "e1c0b40a710f98f694a8e7e7b83a27a90bdf1eaf7555cbd54783f57e01d10c1e",
+    "graphwalks_uv_lock_sha256": "61121296bcfc0f9d7d74bb9bcbca9ceb57229eb7bfffa20c0fc106e6495e3460",
+    "inspector_sha256": "b6ce1fe6ad5ac0876911709912728c77e9aefcb8e4eb090b0dffda87e1dcef88",
+    "exporter_sha256": "8d95f0c043d9ada4b746d5da0a4a191f19ebf6dab4d31c7fc0cadea421498865",
+    "tokenizer_diagnostic_sha256": "d18ad3578dcfb1bd25a5f56bf000a1b3ee170ee9906ca66ae70d1d08b538d451",
+    "tokenizer_files_sha256": {
+      "chat_template.jinja": "c3cf9e34abf4f9e36c2d72165aa9c132d3e2a725b6c2586aaa3a8af9d7a81041",
+      "tokenizer.json": "06b9509352d2af50381ab2247e083b80d32d5c0aba91c272ca9ff729b6a0e523",
+      "tokenizer_config.json": "5f7aa0d810000c4a0940b35c8f16e56c3439260fccc13a321826ebc3ccf2501f",
+      "config.json": "cc9f3743b1b48b72a13f40cb917c76c222f0aa143ea52549d664052e607cddb9",
+      "generation_config.json": "1a450b75a54bf9e6ffdc681d8b764d453061dd2d271df33fcfed46949b67c3de",
+      "processor_config.json": "d89ef49ce9cd37fbf510158e13c1ef063d9286411c1ec9049932dbe0487143b1"
+    }
+  },
+  "preserved_smoke_quick_proof_sha256": "f0e376430bb78da2e81dcd7ac41faa16bca7938601b9f6ecd2ca856e292f686a",
+  "scope_limits": [
+    "32additionalnative-selectedrows tokenized; no full200-rowtoken sweep.",
+    "Character-bucket inventory covers source metadata only, not token depth or quality.",
+    "All32samplednextbucketrows exceed262144 even for input alone;168remainingrows are unchecked, not assumed fitting or failing.",
+    "No selectedsample reaches200000\u2013253950tokenband; native524289\u20131048576charbucket contains0rows, and followingpopulatedbucket~1.748Mcharacters was not tokenized.",
+    "Counts include template-owned xhigh systeminstruction and assistant thinkingprefix under same verified tokenizer and convention8192output+2reserve.",
+    "Source-traced local preprocessing equality is not observed endpoint usage or runtime quality."
+  ]
+}

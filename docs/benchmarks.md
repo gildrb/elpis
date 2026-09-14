@@ -28,9 +28,14 @@ a different SGLang benchmark package. The upstream module accepts
 The dataset is upstream's ShareGPT source, frozen in `bench/matrix.json` at
 revision `192ab2185289094fc556ec8ce5ce1e8e587154ca`. Download its named JSON from
 that revision, verify its listed SHA256 and size, and mount it read-only at
-`/bench-fixtures/sharegpt.json`. The recorded hash is public LFS metadata, not a
-claim that this refactor downloaded the full dataset. Do not allow an implicit
+`/bench-fixtures/sharegpt.json`. The full 672837942-byte file was downloaded from the pinned revision and its
+SHA256 verified during this refactor; the raw fixture remains outside Git. Do not allow an implicit
 upstream download or replacement when the local fixture is missing.
+
+For explicit packed mode, use tokenizer path
+`/models/compact-target-rholsc8k/packed` instead of the dense path shown below.
+The verified tokenizer bytes are identical; the chosen path must exist in the
+actual candidate container. Do not fall back to a Hub tokenizer.
 
 After verifying that fixture, create a new private output directory under
 `/cache/bench-RUN` in the candidate container. Replace `RUN` with a unique run ID.
@@ -56,16 +61,29 @@ docker exec "$CONTAINER" bash -c '
   --output-file /cache/bench-RUN/c1-depth1024-cold.jsonl
 ```
 
-This is a **cold, synthetic repeated-text throughput** fixture, not a capability
+This is a **cold-start, synthetic repeated-text throughput** fixture, not a capability
 score or an agent workload. The upstream `random` implementation samples and
 repeats/truncates ShareGPT input tokens. Integer inputs preserve exact lengths;
 no chat template is applied. EOS is ignored by default for the fixed output
 budget. `random-ids` is not substituted: upstream warns it can induce NaNs.
-For a warm paired run, omit `--flush-cache` and reuse the same seed/fixture after
-an explicitly recorded warmup. Never flush a shared production endpoint.
+`--flush-cache` runs once after warmup, not before each request. Later requests
+can reuse prefixes. For a warm paired run, first prime the complete same fixture,
+omit `--flush-cache`, and require `SGLANG_IS_IN_CI` to be unset/false: upstream
+also flushes when that variable is true. Built-in warmup only uses the first
+prompt and caps its output at32 tokens; it does not warm every fixture request.
+Never flush a shared production endpoint.
 
-Keep raw official JSONL and request details private. Record completed output
-throughput, TTFT and TPOT distributions, end-to-end latency and failures.
+Keep raw official JSONL and request details private: they include full server
+information. `--output-details` does not save input IDs; preserve a separate
+exact-ID fixture snapshot. The [CPU-generated snapshot manifest](../bench/throughput-fixture.json)
+records all eight planned depths; it is not a record of sent HTTP payloads. The seed controls client Python/NumPy generation, not
+the server sampler. HTTP200 alone is counted as success upstream; independently
+check nonempty output, requested completion length, truncation and errors.
+Record completed output throughput, TTFT and TPOT distributions, end-to-end
+latency and failures. Official output throughput divides successful output
+tokens by the entire benchmark interval (including a server-info fetch); it is
+not pure decode tokens/s. Missing cached-token telemetry is treated as zero
+upstream, so verify field availability before claiming zero cache hits.
 Measure prefill throughput from engine phase metrics; do not rename total input
 throughput or input/TTFT as pure prefill throughput. Record DFlash acceptance and
 accepted tokens per verify from engine telemetry where available; otherwise null.

@@ -1,0 +1,104 @@
+{
+  "schema_version": 1,
+  "classification": "PACKED_KVARN_2048_KERNEL_PROFILE_STAGE15_TILE_PARTIAL_WIN_26X_GATE_NOT_MET",
+  "candidate_image": "sha256:f1ce16cb28594ab30661511019e3b55f32f3616e989a645496057e16c52d45d5",
+  "candidate_image_alias": "qwen-inference:refactor-stage15",
+  "patch": "patches/kvarn-prefill-tile.patch (experimental.series entry 15, sha256 27439d284462cfe775bca34667dc56e240f26669a18193110363cf6b42929844)",
+  "window": "short-window protocol: hard recovery unit (+2700 s) armed before any stop; qwen-inference-health.timer suspended for the window and restored; maintenance lease held; baseline restored and authenticated",
+  "candidate_started_utc": "2026-09-13T21:48:55.464783+00:00",
+  "ready_at_utc": "2026-09-13T21:50:05.699203+00:00",
+  "probe": {
+    "tool": "python -m bench.capacity (uv run --offline --locked)",
+    "input_tokens": 2048,
+    "requested_output_tokens": 128,
+    "timeout_seconds": 240,
+    "exit_code": 0,
+    "status": "request_completed",
+    "cached_tokens": 0,
+    "num_retractions": 0,
+    "elapsed_seconds": 15.039896875998238,
+    "artifacts": "/tmp/inference-stage15-prof-b2a5653a/capacity-2048 (private, 0700)"
+  },
+  "warmup": "one unprofiled completion before profiling absorbed serving-start Triton JIT; warmup HTTP 200 in 82.9 s (includes ROWS=32 split compile); reply content OK",
+  "profiler": {
+    "method": "POST /start_profile {output_dir=/cache/prof, activities=[GPU], num_steps=2} — auto-stop bounded the capture to the prefill; /stop_profile correctly returned 500 (already stopped)",
+    "trace_file": "1789336288.5843933-TP-0.trace.json.gz (7634032 bytes)",
+    "events": 437938,
+    "kernels": 103699,
+    "gpu_busy_ms": 3051.87,
+    "span_ms": 4098.90,
+    "gpu_busy_fraction": 0.745
+  },
+  "kernel_buckets_whole_capture": [
+    {"bucket": "marlin_gemm_w4a16", "kernel": "sglang::device::marlin::Marlin bf16", "ms": 1442.1, "count": 526, "mean_us": 2741.7, "share_of_busy": 0.473},
+    {"bucket": "kvarn_attn_split", "kernel": "_packed_attention_split", "ms": 1081.6, "count": 8192, "mean_us": 132.0, "share_of_busy": 0.354},
+    {"bucket": "kvarn_store_pipeline", "kernels": "_fused_rotate_balance_quantize/_prepare_write/_pack_quantized_codes/_rotate_keys_for_tiles/_plan_complete_tiles/_publish_complete_tiles/_validate_write_values/_scatter_write", "ms": 374.8, "count": 70992, "mean_us": 5.3, "share_of_busy": 0.123},
+    {"bucket": "other", "kernels": "norms/rope/elementwise/memcpy", "ms": 86.2, "count": 15285, "mean_us": 5.6, "share_of_busy": 0.028},
+    {"bucket": "gdn_linear_attn", "kernels": "upstream fla chunk_gated_delta_rule/chunk_fwd_o/recompute_w_u/causal_conv1d", "ms": 40.1, "count": 512, "mean_us": 78.3, "share_of_busy": 0.013},
+    {"bucket": "kvarn_attn_reduce", "kernel": "_packed_attention_reduce", "ms": 27.1, "count": 8192, "mean_us": 3.3, "share_of_busy": 0.009}
+  ],
+  "microbatch_structure_measured": {
+    "split_call_count": 8192,
+    "expected_from_source": "2 chunks x 16 full-attention layers x 128 eight-query micro-iterations x 2 four-query wrapper tiles = 8192",
+    "match": "exact",
+    "note": "the 8-query serving call is launched as two ROWS=32 programs after the 8-query ROWS=64 specialization CUDA-OOM'd at 0.67 GiB free device memory"
+  },
+  "chunk_segments_from_trace": [
+    {"segment": "chunk 1 (done 0->1024)", "wall_ms": 1878.6, "busy_ms": 1406.0, "split_ms": 499.1, "split_mean_us": 121.8},
+    {"segment": "chunk 2 (done 1024->2048)", "wall_ms": 1781.2, "busy_ms": 1504.7, "split_ms": 582.5, "split_mean_us": 142.2}
+  ],
+  "versus_stage14_same_probe": {
+    "stage14_image": "sha256:d69f861b02ca29a845a2254af2cbe534f94afee65510421a1519b773d9000973",
+    "stage14_split_ms": 3309.1,
+    "stage14_split_count": 4096,
+    "stage14_split_mean_us_chunk1_chunk2": [252.0, 1158.0],
+    "stage14_busy_ms": 5235.4,
+    "stage14_marlin_ms": 1442.6,
+    "split_total_speedup": 3.06,
+    "split_per_launch_speedup": 6.12,
+    "chunk2_split_ms_speedup": 4.07,
+    "busy_speedup": 1.72,
+    "chunk1_to_chunk2_split_mean_growth": {"stage14": 4.6, "stage15": 1.17},
+    "acceptance_gate_26x_on_depth_linear_term": "not_met"
+  },
+  "depth_attribution": {
+    "split_mean_growth_chunk1_to_chunk2": "1.17x for a 2x cached-prefix growth (was 4.6x on the per-query kernel): the superlinear term is gone at this depth",
+    "new_majority_bucket": "Marlin W4A16 GEMMs are 47.3% of busy and unchanged vs stage-14 (1442 ms); attention is no longer the majority at 2048 tokens",
+    "conclusion": "the 40-70x eager-KVarN gap is partially repaired at 2048 tokens; remaining split cost still scales with page count and will dominate again at 262144 if left linear"
+  },
+  "engine_base_commit": "0bcd822377da7b5718e674eaf9c870d349424dd1",
+  "ordered_patch_sha256_count": 15,
+  "launch_config_sha256": "59b0a4ed3cc875e237493c40c0ab85c2e24fb11b919aefd0726a95766209695f",
+  "prior_failed_serving_attempts": [
+    "MLIR RemoveLayoutConversions on 1-D tl.where(row_ok, lower_row, 0) at TABLE_WIDTH=2057; replaced with multiplicative masking",
+    "native KVarN status bits=3 on first 8-token prefill with int64 serving metadata; wrapper now copies table/ids/bounds to int32",
+    "CUDA OOM launching ROWS=64 8-query programs at 0.67 GiB free; wrapper tiles 4 queries, ROWS=32"
+  ],
+  "parity_on_this_kernel": {
+    "fixture": "patches/qualification/kvarn-prefill-tile-parity.py",
+    "passed": true,
+    "includes_serving_first_chunk": true,
+    "memcheck_on_ROWS32": "skipped this iteration; compute-sanitizer 0 errors on the prior fatter ROWS=64 specialization (image sha256:c61f63ab598f1661c529d072bb4ed5ebedb4d82bdfffbc05668cc4368204c1fc, 1125.7 s)"
+  },
+  "safety": {
+    "health_timer_suspended_then_restored": true,
+    "recovery_unit_armed_seconds": 2700,
+    "recovery_unit_disarmed_after_success": true,
+    "baseline_restore": "authenticated_health_models_short_completion_passed",
+    "baseline_restored_utc": "2026-09-13T21:53:31+00:00",
+    "window_final_state": "completed"
+  },
+  "implications": [
+    "The 26x acceptance gate on the depth-linear split term is not met (3.06x total, 6.12x per launch, 4.07x on chunk-2 split milliseconds).",
+    "Marlin is now the 2048-token majority (47%); even a perfect attention kernel leaves the same ~1.4 s GEMM floor per two-chunk capture as stage-14.",
+    "The chunk1→chunk2 split-mean growth fell from 4.6x to 1.17x, so the quadratic-looking 12.9 h extrapolation from the 46 K deep probe does not apply unchanged to this kernel; a new depth curve is required before any 262144 rerun.",
+    "Items 3/4 (C1/GSP/KVarN-vs-FP8/power, Prime Envs A/B) stay blocked until the operator either iterates the kernel or re-scopes depth with this curve published. Benches are not changed."
+  ],
+  "limitations": [
+    "GPU-only capture: no CPU-side op/launch-gap timeline; busy fraction 0.745 is inferred from kernel events vs span.",
+    "Two chunks, depth <=2048: page count is 8 then 16, too small to measure a 262144-linear term.",
+    "Profiler overhead unquantified.",
+    "One request; not capacity, numerics or quality evidence.",
+    "ROWS=32 memcheck not rerun on f1ce16cb; prior 0-error result was ROWS=64."
+  ]
+}

@@ -1,0 +1,363 @@
+diff --git a/python/sglang/srt/mem_cache/kvarn/types.py b/python/sglang/srt/mem_cache/kvarn/types.py
+--- a/python/sglang/srt/mem_cache/kvarn/types.py
++++ b/python/sglang/srt/mem_cache/kvarn/types.py
+@@ -80,13 +80,15 @@
+     eager_reserve_bytes: int
+     native_partial_output: torch.Tensor
+     native_partial_lse: torch.Tensor
++    native_acc_rot: torch.Tensor
++    native_den: torch.Tensor
+     native_status: torch.Tensor
+     native_seal_pages: torch.Tensor
+     native_rotated_keys: torch.Tensor
+ 
+     @property
+     def allocation_bytes(self) -> int:
+-        return sum(t.numel() * t.element_size() for t in (self.keys, self.values, self.output, self.native_partial_output, self.native_partial_lse, self.native_status, self.native_seal_pages, self.native_rotated_keys)) + self.eager_reserve_bytes
++        return sum(t.numel() * t.element_size() for t in (self.keys, self.values, self.output, self.native_partial_output, self.native_partial_lse, self.native_acc_rot, self.native_den, self.native_status, self.native_seal_pages, self.native_rotated_keys)) + self.eager_reserve_bytes
+ 
+     @classmethod
+     def create(cls, layout: KVarNLayout, capacity: KVarNCapacity,
+@@ -101,7 +103,7 @@
+                    + 32 * max_query_heads * layout.head_dim * 4
+                    + 4 * capacity.max_write_tokens * layout.kv_heads * layout.head_dim * dtype.itemsize)
+         qn = capacity.max_query_tokens
+-        native_bytes = (qn * max_query_heads * 16 * (layout.head_dim + 1) * 4 + 4 + capacity.tail_slots * 4
++        native_bytes = (qn * max_query_heads * 16 * (2 * layout.head_dim + 2) * 4 + 4 + capacity.tail_slots * 4
+                         + capacity.tail_slots * layout.kv_heads * layout.head_dim * 128 * 4)
+         required = (2 * capacity.max_visible_tokens * layout.kv_heads * layout.head_dim
+                     + capacity.max_query_tokens * max_query_heads * layout.head_dim) * dtype.itemsize + reserve + native_bytes
+@@ -114,6 +116,8 @@
+                    capacity.workspace_bytes - (required - reserve),
+                    torch.empty((qn, max_query_heads, 16, layout.head_dim), dtype=torch.float32, device=device),
+                    torch.empty((qn, max_query_heads, 16), dtype=torch.float32, device=device),
++                   torch.empty((qn, max_query_heads, 16, layout.head_dim), dtype=torch.float32, device=device),
++                   torch.empty((qn, max_query_heads, 16), dtype=torch.float32, device=device),
+                    torch.zeros((1,), dtype=torch.int32, device=device),
+                    torch.full((capacity.tail_slots,), -1, dtype=torch.int32, device=device),
+                    torch.empty((capacity.tail_slots, layout.kv_heads, layout.head_dim, 128), dtype=torch.float32, device=device))
+diff --git a/python/sglang/srt/mem_cache/kvarn/pool.py b/python/sglang/srt/mem_cache/kvarn/pool.py
+--- a/python/sglang/srt/mem_cache/kvarn/pool.py
++++ b/python/sglang/srt/mem_cache/kvarn/pool.py
+@@ -489,6 +489,8 @@
+             (ws.output, (32, query_heads, head_dim), torch.bfloat16),
+             (ws.native_partial_output, (32, query_heads, 16, head_dim), torch.float32),
+             (ws.native_partial_lse, (32, query_heads, 16), torch.float32),
++            (ws.native_acc_rot, (32, query_heads, 16, head_dim), torch.float32),
++            (ws.native_den, (32, query_heads, 16), torch.float32),
+             (ws.native_status, (1,), torch.int32),
+             (ws.native_seal_pages, (8,), torch.int32),
+             (ws.native_rotated_keys, (8, kv_heads, head_dim, 128), torch.float32),
+diff --git a/python/sglang/kernels/ops/kvarn/decode.py b/python/sglang/kernels/ops/kvarn/decode.py
+--- a/python/sglang/kernels/ops/kvarn/decode.py
++++ b/python/sglang/kernels/ops/kvarn/decode.py
+@@ -117,13 +117,14 @@
+     return output
+ 
+ 
++
+ import triton
+ import triton.language as tl
+ 
+ @triton.jit(do_not_specialize=["N"])
+ def _packed_attention_split(
+     Q, Table, RequestIds, Lower, Upper, Packed, RawK, RawV, PageToSlot,
+-    Committed, Provisional, Preview, Sink, Partial, Lse, Status, Scale, N,
++    Committed, Provisional, Preview, Sink, Partial, Lse, AccRot, Den, Status, Scale, N,
+     Q_STRIDE: tl.constexpr, Q_HEAD_STRIDE: tl.constexpr,
+     TABLE_STRIDE: tl.constexpr, TABLE_WIDTH: tl.constexpr, REQUESTS: tl.constexpr,
+     PARTIAL_Q_STRIDE: tl.constexpr, PARTIAL_H_STRIDE: tl.constexpr,
+@@ -135,116 +136,111 @@
+     V_PACKED: tl.constexpr, V_CHANNEL: tl.constexpr, V_SCALE: tl.constexpr,
+     V_ZERO: tl.constexpr,
+ ):
+-    # One program covers up to 32 query rows as 4-query tiles, the grouped-head
+-    # slice of one KV head, and one split-KV page range. A runtime 32-token
+-    # subloop per page feeds tensor-core dots. All rows share one page-table row.
+     kv_head = tl.program_id(0)
+     split = tl.program_id(1)
+     group: tl.constexpr = HQ // H
++    tile: tl.constexpr = 4
+     row = tl.arange(0, ROWS)
+     g = row % group
+     d = tl.arange(0, D)
+     token = tl.arange(0, BLOCK)
+     request = tl.load(RequestIds)
+-    tile: tl.constexpr = 4
++    min_lower = tl.full((), 2147483647, tl.int32)
++    max_upper = tl.full((), 0, tl.int32)
+     for q_base in range(0, N, tile):
+         qi = q_base + row // group
+         row_real = ((row // group) < tile) & (qi < N)
+-        head = kv_head * group + g
+-        # Bounds may arrive as int64 (serving) or int32; unify to int32 here so
+-        # every downstream select/reduction follows the int32-qualified layout
+-        # path (an int64 select trips a Triton RemoveLayoutConversions bug).
+         lower_row = tl.load(Lower + qi, mask=row_real, other=0).to(tl.int32)
+         upper_row = tl.load(Upper + qi, mask=row_real, other=0).to(tl.int32)
+         metadata_ok = (request >= 0) & (request < REQUESTS) \
+             & (lower_row >= 0) & (upper_row >= lower_row) & (upper_row <= TABLE_WIDTH * 128)
+         row_ok = row_real & metadata_ok
+-        lower_row = lower_row * row_ok.to(lower_row.dtype)
+-        upper_row = upper_row * row_ok.to(upper_row.dtype)
+-        q = tl.load(Q + qi[:, None] * Q_STRIDE + head[:, None] * Q_HEAD_STRIDE + d[None, :],
++        min_lower = tl.minimum(min_lower, tl.min(tl.where(row_ok, lower_row, 2147483647)))
++        max_upper = tl.maximum(max_upper, tl.max(tl.where(row_ok, upper_row, 0)))
++        q = tl.load(Q + qi[:, None] * Q_STRIDE + (kv_head * group + g)[:, None] * Q_HEAD_STRIDE + d[None, :],
+                     mask=row_ok[:, None], other=0.0).to(tl.float32)
+         query_ok = tl.sum((tl.abs(q) <= 3.402823466e38).to(tl.int32), 1) == D
+-        bad_meta = tl.sum((row_real & ~metadata_ok).to(tl.int32)) > 0
+-        tl.atomic_or(Status, tl.where(bad_meta, 1, 0))
+-        bad_query = tl.sum((row_ok & ~query_ok).to(tl.int32)) > 0
+-        tl.atomic_or(Status, tl.where(bad_query, 1, 0))
+-        q = tl.where(query_ok[:, None], q, 0.0)
+-        rotated_q = q
+-        for bit in tl.static_range(0, 8 if D == 256 else 7):
+-            step = 1 << bit
+-            partner_index = tl.broadcast_to((d ^ step)[None, :], (ROWS, D))
+-            partner = tl.gather(rotated_q, partner_index, axis=1)
+-            rotated_q = tl.where((d[None, :] & step) == 0, rotated_q + partner, partner - rotated_q)
+-        rotated_q = rotated_q * (D ** -0.5)
+-        q16 = q.to(tl.float16)
+-        r16 = rotated_q.to(tl.float16)
+-
+-        first_page = tl.min(tl.where(row_ok, lower_row, 2147483647))
+-        max_upper = tl.max(tl.where(row_ok, upper_row, 0))
+-        first_page = tl.minimum(first_page // 128, max_upper // 128)
+-        pages = tl.where(max_upper > 0, (max_upper + 127) // 128 - first_page, 0)
+-        per_split = (pages + SPLITS - 1) // SPLITS
+-        begin = first_page + split * per_split
+-        end = tl.minimum(begin + per_split, first_page + pages)
+-
+-        maximum = tl.full((ROWS,), -float("inf"), tl.float32)
+-        denominator = tl.full((ROWS,), 0.0, tl.float32)
+-        acc_raw = tl.zeros((ROWS, D), tl.float32)
+-        acc_rot = tl.zeros((ROWS, D), tl.float32)
+-
+-        for logical in range(begin, end):
+-            page = tl.load(Table + request * TABLE_STRIDE + logical)
+-            in_range = (page > 0) & (page < PAGES)
+-            slot = tl.load(PageToSlot + page, mask=in_range, other=-1)
+-            page_ok = in_range & (slot < SLOTS)
+-            needed = tl.sum(
+-                (row_ok & (upper_row > logical * 128) & (lower_row < (logical + 1) * 128)).to(tl.int32)
+-            ) > 0
+-            tl.atomic_or(Status, tl.where(needed & ~page_ok, 1, 0))
+-            preview = tl.load(Preview + page, mask=page_ok, other=0)
+-            sink = tl.load(Sink + page, mask=page_ok, other=0)
+-            raw_ok = page_ok & (slot >= 0)
+-            safe_slot = tl.where(slot >= 0, slot, 0)
+-            base = (tl.where(page > 0, page, 1).to(tl.int64) * H + kv_head) * TILE_BYTES
+-            halves = (Packed + base).to(tl.pointer_type(tl.float16))
+-            use_raw = row_ok & (slot >= 0) \
+-                & (sink | ~(preview & (upper_row > (logical + 1) * 128)))
+-            for start in range(0, 128, BLOCK):
+-                tok = start + token
+-                committed = tl.load(Committed + page * 128 + tok, mask=page_ok, other=0)
+-                provisional = tl.load(Provisional + page * 128 + tok, mask=page_ok, other=0)
+-                written = committed | provisional
++        tl.atomic_or(Status, tl.where(tl.sum((row_real & ~metadata_ok).to(tl.int32)) > 0, 1, 0))
++        tl.atomic_or(Status, tl.where(tl.sum((row_ok & ~query_ok).to(tl.int32)) > 0, 1, 0))
++    first_page = tl.minimum(min_lower // 128, max_upper // 128)
++    pages = tl.where(max_upper > 0, (max_upper + 127) // 128 - first_page, 0)
++    per_split = (pages + SPLITS - 1) // SPLITS
++    begin = first_page + split * per_split
++    end = tl.minimum(begin + per_split, first_page + pages)
++    for logical in range(begin, end):
++        page = tl.load(Table + request * TABLE_STRIDE + logical)
++        in_range = (page > 0) & (page < PAGES)
++        slot = tl.load(PageToSlot + page, mask=in_range, other=-1)
++        page_ok = in_range & (slot < SLOTS)
++        preview = tl.load(Preview + page, mask=page_ok, other=0)
++        sink = tl.load(Sink + page, mask=page_ok, other=0)
++        raw_ok = page_ok & (slot >= 0)
++        safe_slot = tl.where(slot >= 0, slot, 0)
++        base = (tl.where(page > 0, page, 1).to(tl.int64) * H + kv_head) * TILE_BYTES
++        halves = (Packed + base).to(tl.pointer_type(tl.float16))
++        for start in range(0, 128, BLOCK):
++            tok = start + token
++            committed = tl.load(Committed + page * 128 + tok, mask=page_ok, other=0)
++            provisional = tl.load(Provisional + page * 128 + tok, mask=page_ok, other=0)
++            written = committed | provisional
++            raw_cols = raw_ok & written
++            keys_raw_t = tl.load(RawK + (safe_slot.to(tl.int64) * 128 + tok[None, :]) * H * D
++                                 + kv_head * D + d[:, None],
++                                 mask=raw_cols[None, :], other=0.0).to(tl.float16)
++            values_raw = tl.load(RawV + (safe_slot.to(tl.int64) * 128 + tok[:, None]) * H * D
++                                 + kv_head * D + d[None, :],
++                                 mask=raw_cols[:, None], other=0.0).to(tl.float16)
++            ks = tl.load(halves + K_SCALE // 2 + d, mask=page_ok, other=0.0).to(tl.float32)
++            kz = tl.load(halves + K_ZERO // 2 + d, mask=page_ok, other=0.0).to(tl.float32)
++            kt = tl.load(halves + K_TOKEN // 2 + tok, mask=page_ok, other=0.0).to(tl.float32)
++            kbyte = tl.load(Packed + base + d[:, None] * 64 + tok[None, :] // 2,
++                            mask=page_ok, other=0).to(tl.int32)
++            keys_t = (((kbyte >> ((tok[None, :] % 2) * 4)) & 15).to(tl.float32) * ks[:, None]
++                      + kz[:, None]) * kt[None, :]
++            vc = tl.load(halves + V_CHANNEL // 2 + d, mask=page_ok, other=0.0).to(tl.float32)
++            vs = tl.load(halves + V_SCALE // 2 + tok, mask=page_ok, other=0.0).to(tl.float32)
++            vz = tl.load(halves + V_ZERO // 2 + tok, mask=page_ok, other=0.0).to(tl.float32)
++            vbyte = tl.load(Packed + base + V_PACKED + tok[:, None] * (D // 4) + d[None, :] // 4,
++                            mask=page_ok, other=0).to(tl.int32)
++            values_packed = (((vbyte >> ((d[None, :] % 4) * 2)) & 3).to(tl.float32) * vs[:, None]
++                             + vz[:, None]) * vc[None, :]
++            for q_base in range(0, N, tile):
++                qi = q_base + row // group
++                row_real = ((row // group) < tile) & (qi < N)
++                head = kv_head * group + g
++                lower_row = tl.load(Lower + qi, mask=row_real, other=0).to(tl.int32)
++                upper_row = tl.load(Upper + qi, mask=row_real, other=0).to(tl.int32)
++                metadata_ok = (request >= 0) & (request < REQUESTS) \
++                    & (lower_row >= 0) & (upper_row >= lower_row) & (upper_row <= TABLE_WIDTH * 128)
++                row_ok = row_real & metadata_ok
++                needed = tl.sum(
++                    (row_ok & (upper_row > logical * 128) & (lower_row < (logical + 1) * 128)).to(tl.int32)
++                ) > 0
++                tl.atomic_or(Status, tl.where(needed & ~page_ok, 1, 0))
++                q = tl.load(Q + qi[:, None] * Q_STRIDE + head[:, None] * Q_HEAD_STRIDE + d[None, :],
++                            mask=row_ok[:, None], other=0.0).to(tl.float32)
++                q = tl.where((tl.sum((tl.abs(q) <= 3.402823466e38).to(tl.int32), 1) == D)[:, None], q, 0.0)
++                rotated_q = q
++                for bit in tl.static_range(0, 8 if D == 256 else 7):
++                    step = 1 << bit
++                    partner_index = tl.broadcast_to((d ^ step)[None, :], (ROWS, D))
++                    partner = tl.gather(rotated_q, partner_index, axis=1)
++                    rotated_q = tl.where((d[None, :] & step) == 0, rotated_q + partner, partner - rotated_q)
++                q16 = q.to(tl.float16)
++                r16 = (rotated_q * (D ** -0.5)).to(tl.float16)
++                use_raw = row_ok & (slot >= 0) \
++                    & (sink | ~(preview & (upper_row > (logical + 1) * 128)))
+                 position = logical * 128 + tok[None, :]
+                 active = row_ok[:, None] & (position >= lower_row[:, None]) \
+                     & (position < upper_row[:, None])
+                 valid = active & written[None, :] & page_ok
+-                missing = tl.sum((active & page_ok & ~written[None, :]).to(tl.int32)) > 0
+-                tl.atomic_or(Status, tl.where(missing, 1, 0))
+-                raw_cols = raw_ok & written
+-                keys_raw_t = tl.load(RawK + (safe_slot.to(tl.int64) * 128 + tok[None, :]) * H * D
+-                                     + kv_head * D + d[:, None],
+-                                     mask=raw_cols[None, :], other=0.0).to(tl.float16)
+-                values_raw = tl.load(RawV + (safe_slot.to(tl.int64) * 128 + tok[:, None]) * H * D
+-                                     + kv_head * D + d[None, :],
+-                                     mask=raw_cols[:, None], other=0.0).to(tl.float16)
+-                ks = tl.load(halves + K_SCALE // 2 + d, mask=page_ok, other=0.0).to(tl.float32)
+-                kz = tl.load(halves + K_ZERO // 2 + d, mask=page_ok, other=0.0).to(tl.float32)
+-                kt = tl.load(halves + K_TOKEN // 2 + tok, mask=page_ok, other=0.0).to(tl.float32)
+-                kbyte = tl.load(Packed + base + d[:, None] * 64 + tok[None, :] // 2,
+-                                mask=page_ok, other=0).to(tl.int32)
+-                keys_t = (((kbyte >> ((tok[None, :] % 2) * 4)) & 15).to(tl.float32) * ks[:, None]
+-                          + kz[:, None]) * kt[None, :]
+-                vc = tl.load(halves + V_CHANNEL // 2 + d, mask=page_ok, other=0.0).to(tl.float32)
+-                vs = tl.load(halves + V_SCALE // 2 + tok, mask=page_ok, other=0.0).to(tl.float32)
+-                vz = tl.load(halves + V_ZERO // 2 + tok, mask=page_ok, other=0.0).to(tl.float32)
+-                vbyte = tl.load(Packed + base + V_PACKED + tok[:, None] * (D // 4) + d[None, :] // 4,
+-                                mask=page_ok, other=0).to(tl.int32)
+-                values_packed = (((vbyte >> ((d[None, :] % 4) * 2)) & 3).to(tl.float32) * vs[:, None]
+-                                 + vz[:, None]) * vc[None, :]
+-                # Sequential domain passes with a two-step online softmax update.
+-                # Split alphas are exact: their product telescopes to
+-                # exp(m_old - m_new), and a zero alpha only ever scales
+-                # accumulators that are still zero.
++                tl.atomic_or(Status, tl.where(tl.sum((active & page_ok & ~written[None, :]).to(tl.int32)) > 0, 1, 0))
++                ptr = qi * LSE_Q_STRIDE + head * LSE_H_STRIDE + split
++                acc_ptr = qi[:, None] * PARTIAL_Q_STRIDE + head[:, None] * PARTIAL_H_STRIDE + split * D + d[None, :]
++                maximum = tl.load(Lse + ptr, mask=row_real, other=-float("inf"))
++                denominator = tl.load(Den + ptr, mask=row_real, other=0.0)
++                acc_raw = tl.load(Partial + acc_ptr, mask=row_real[:, None], other=0.0)
++                acc_rot = tl.load(AccRot + acc_ptr, mask=row_real[:, None], other=0.0)
+                 scores_raw = tl.dot(q16, keys_raw_t) * Scale
+                 scores_raw = tl.where(use_raw[:, None] & valid, scores_raw, -float("inf"))
+                 max_raw = tl.maximum(maximum, tl.max(scores_raw, 1))
+@@ -252,8 +248,7 @@
+                 alpha_raw = tl.where(live_raw, tl.exp(maximum - max_raw), 0.0)
+                 p_raw = tl.where(live_raw[:, None] & (use_raw[:, None] & valid),
+                                  tl.exp(scores_raw - max_raw[:, None]), 0.0)
+-                acc_raw = acc_raw * alpha_raw[:, None] \
+-                    + tl.dot(p_raw.to(tl.float16), values_raw)
++                acc_raw = acc_raw * alpha_raw[:, None] + tl.dot(p_raw.to(tl.float16), values_raw)
+                 acc_rot = acc_rot * alpha_raw[:, None]
+                 denominator = denominator * alpha_raw + tl.sum(p_raw, 1)
+                 maximum = max_raw
+@@ -269,7 +264,20 @@
+                 acc_raw = acc_raw * alpha_packed[:, None]
+                 denominator = denominator * alpha_packed + tl.sum(p_packed, 1)
+                 maximum = max_packed
+-
++                tl.store(Partial + acc_ptr, acc_raw, mask=row_real[:, None])
++                tl.store(AccRot + acc_ptr, acc_rot, mask=row_real[:, None])
++                tl.store(Lse + ptr, maximum, mask=row_real)
++                tl.store(Den + ptr, denominator, mask=row_real)
++    for q_base in range(0, N, tile):
++        qi = q_base + row // group
++        row_real = ((row // group) < tile) & (qi < N)
++        head = kv_head * group + g
++        ptr = qi * LSE_Q_STRIDE + head * LSE_H_STRIDE + split
++        acc_ptr = qi[:, None] * PARTIAL_Q_STRIDE + head[:, None] * PARTIAL_H_STRIDE + split * D + d[None, :]
++        acc_raw = tl.load(Partial + acc_ptr, mask=row_real[:, None], other=0.0)
++        acc_rot = tl.load(AccRot + acc_ptr, mask=row_real[:, None], other=0.0)
++        denominator = tl.load(Den + ptr, mask=row_real, other=0.0)
++        maximum = tl.load(Lse + ptr, mask=row_real, other=-float("inf"))
+         inv = acc_rot
+         for bit in tl.static_range(0, 8 if D == 256 else 7):
+             step = 1 << bit
+@@ -281,9 +289,8 @@
+         safe_denominator = tl.where(nonempty, denominator, 1.0)
+         output = numerator / safe_denominator[:, None]
+         lse = tl.where(nonempty, maximum + tl.log(safe_denominator), -float("inf"))
+-        tl.store(Partial + qi[:, None] * PARTIAL_Q_STRIDE + head[:, None] * PARTIAL_H_STRIDE
+-                 + split * D + d[None, :], output, mask=row_real[:, None])
+-        tl.store(Lse + qi * LSE_Q_STRIDE + head * LSE_H_STRIDE + split, lse, mask=row_real)
++        tl.store(Partial + acc_ptr, output, mask=row_real[:, None])
++        tl.store(Lse + ptr, lse, mask=row_real)
+ 
+ 
+ @triton.jit(do_not_specialize=["N_SPLITS"])
+@@ -330,21 +337,12 @@
+                          request_page_table: torch.Tensor, query_request_ids: torch.Tensor,
+                          lower_bounds: torch.Tensor, upper_bounds: torch.Tensor,
+                          scale: float, fixedworkspace: KVarNWorkspace) -> torch.Tensor:
+-    """Native fixed-capacity, independent-per-query split-KV attention.
+-
+-    Original-coordinate raw tiles and rotated packed tiles are accumulated
+-    separately. Only the packed accumulator is inverse transformed. No
+-    context-length scratch and no shared-query speculative verification path.
+-    Caller clears/checks workspace.native_status at transaction boundaries.
+-
+-    Stage 15 tile contract: every query row of one call must reference the
+-    same single request/page-table row; kvarn_backend constructs exactly that
+-    geometry (one request, zero request ids, one page-table row).
+-    """
++    """Native fixed-capacity split-KV attention with KV dequant hoisted across query tiles."""
+     if Q.ndim != 3 or Q.shape[2] != view.layout.head_dim:
+         raise ValueError("native query shape mismatch")
+     queries, heads, d = Q.shape
+     partial, lse = fixedworkspace.native_partial_output, fixedworkspace.native_partial_lse
++    acc_rot, den = fixedworkspace.native_acc_rot, fixedworkspace.native_den
+     if queries < 1 or queries > partial.shape[0] or heads < 1 or heads > partial.shape[1] or heads % view.layout.kv_heads != 0:
+         raise ValueError("native attention query count exceeds workspace or grouped heads")
+     if Q.dtype != fixedworkspace.output.dtype or not isfinite(scale) or scale <= 0:
+@@ -371,10 +369,15 @@
+     if n_splits == 0:
+         output.zero_()
+         return output
++    partial.zero_()
++    acc_rot.zero_()
++    den.zero_()
++    lse.fill_(float("-inf"))
+     _packed_attention_split[(view.layout.kv_heads, n_splits)](
+         Q, table, request_ids, lower, upper,
+         view.packed, view.raw_keys, view.raw_values, view.page_to_tail_slot,
+-        view.committed_mask, view.provisional_mask, view.preview_ready, view.sink_pages, partial, lse,
++        view.committed_mask, view.provisional_mask, view.preview_ready, view.sink_pages,
++        partial, lse, acc_rot, den,
+         fixedworkspace.native_status, scale, queries,
+         Q_STRIDE=Q.stride(0), Q_HEAD_STRIDE=Q.stride(1),
+         TABLE_STRIDE=table.stride(0), TABLE_WIDTH=table.shape[1], REQUESTS=table.shape[0],
+@@ -382,7 +385,7 @@
+         LSE_Q_STRIDE=lse.stride(0), LSE_H_STRIDE=lse.stride(1),
+         D=d, H=view.layout.kv_heads, HQ=heads, PAGES=view.packed.shape[0],
+         SLOTS=view.raw_keys.shape[0], TILE_BYTES=view.layout.tile_bytes,
+-        SPLITS=splits, ROWS=rows, BLOCK=32,
++        SPLITS=splits, ROWS=rows, BLOCK=16,
+         K_SCALE=o.k_scale, K_ZERO=o.k_zero, K_TOKEN=o.k_token,
+         V_PACKED=o.v_packed, V_CHANNEL=o.v_channel, V_SCALE=o.v_scale,
+         V_ZERO=o.v_zero, num_warps=4, num_stages=1)

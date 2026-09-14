@@ -9,7 +9,7 @@ id = "aime25"
 
 [env.agent]
 max_turns = 1
-max_output_tokens = 8192
+max_output_tokens = 32768
 
 [env.agent.timeout]
 setup = 600.0

@@ -19,6 +19,14 @@ for argument in "$@"; do
     *) echo "Unknown direct evaluation argument." >&2; exit 2 ;;
   esac
 done
+transport_args=()
+if [[ "${QWEN_EVAL_BASE_URL+x}" == x ]]; then
+  case "$QWEN_EVAL_BASE_URL" in
+    http://127.0.0.1:18020/v1|http://127.0.0.1:18021/v1)
+      transport_args=(--api-base-url "$QWEN_EVAL_BASE_URL") ;;
+    *) echo "QWEN_EVAL_BASE_URL must be the approved loopback18020 or18021 /v1 URL." >&2; exit 2 ;;
+  esac
+fi
 "$root/setup" --check
 if [[ "$selection" == all || "$selection" == mrcr ]]; then "$eval_root/scripts/data" --check mrcr-v2; fi
 if [[ "$selection" == all || "$selection" == graphwalks ]]; then "$eval_root/scripts/data" --check graphwalks; fi
@@ -41,7 +49,7 @@ fi
 [[ ! -L "$root/.runs" ]] || { echo "Refusing symlink run root." >&2; exit 1; }
 mkdir -p -- "$root/.runs"
 run=$(mktemp -d "$root/.runs/$profile.XXXXXXXX")
-mkdir -p -- "$run/work/openai" "$run/cache/datasets" "$run/home" "$run/provenance"
+mkdir -p -- "$run/work/openai" "$run/cache/datasets" "$run/home" "$run/provenance/effective-configs"
 ln -s -- "$eval_root/.cache/mrcr_v2" "$run/work/mrcr_v2"
 graph_revision=$(jq -er '.huggingface.graphwalks.revision | select(test("^[a-f0-9]{40}$"))' "$eval_root/datasets.lock")
 ln -s -- "$eval_root/.cache/huggingface/hub/datasets--openai--graphwalks/snapshots/$graph_revision" "$run/work/openai/graphwalks"
@@ -62,9 +70,11 @@ for config in "$root/configs/$profile/"*.toml; do
     *) echo "Unexpected frozen profile entry." >&2; exit 1 ;;
   esac
   if [[ "$selection" != all && "$selection" != "$project" ]]; then continue; fi
-  uv run --project "$root/$project" --locked --no-sync python "$root/inspect_dataset.py" "$config"
+  effective_config="$run/provenance/effective-configs/$(basename -- "$config")"
+  uv run --project "$root/$project" --locked --no-sync python "$root/prepare_transport.py" "$config" "$effective_config" "${transport_args[@]}"
+  uv run --project "$root/$project" --locked --no-sync python "$root/inspect_dataset.py" "$effective_config"
   if [[ "$dry" == false ]]; then
-    uv run --project "$root/$project" --locked --no-sync vf-eval "$config" --disable-tui --abbreviated-summary
+    uv run --project "$root/$project" --locked --no-sync vf-eval "$effective_config" --disable-tui --abbreviated-summary
   fi
 done
 printf 'Direct upstream evaluation artifacts: %s\n' "$run"

@@ -13,6 +13,11 @@ case "$context" in
   *) echo "Unknown qualification context rung." >&2; exit 1 ;;
 esac
 pool=$((context + 1024))
+mem_fraction="${QWEN_MEM_FRACTION_STATIC:-0.94}"
+case "$mem_fraction" in
+  0.94 | 0.95 | 0.96 | 0.97 | 0.98) ;;
+  *) echo "Unsupported static memory fraction; choose 0.94..0.98 in 0.01 steps." >&2; exit 1 ;;
+esac
 speculation=1
 if [[ "${QWEN_ALLOW_UNQUALIFIED:-0}" != "1" ]]; then
   echo "This unqualified candidate requires QWEN_ALLOW_UNQUALIFIED=1." >&2
@@ -70,13 +75,27 @@ export SGLANG_ENABLE_LOGPROB_CHUNK=1
 export SGLANG_LOGPROB_CHUNK_SIZE=256
 
 representation="${QWEN_MODEL_REPRESENTATION:-dense}"
+representation_args=()
 case "$representation" in
-  dense) model_path="${MODELS}/compact-target-rholsc8k/artifact" ;;
+  dense)
+    # Fail closed on a contradictory inherited loader selection.
+    case "${SGLANG_EXPERIMENTAL_PACKED_W8_EMBEDDING:-}" in
+      "" | 0) unset SGLANG_EXPERIMENTAL_PACKED_W8_EMBEDDING ;;
+      *) echo "Dense representation rejects an inherited packed-loader flag." >&2; exit 1 ;;
+    esac
+    model_path="${MODELS}/compact-target-rholsc8k/artifact"
+    ;;
   packed)
     if [[ "$(cat /opt/qwen/patch-series)" != "experimental" ]]; then
       echo "Packed embeddings require an explicitly built experimental image." >&2
       exit 1
     fi
+    if (( speculation != 1 )); then
+      echo "Packed embeddings require DFLASH; target-only is source-blocked." >&2
+      exit 1
+    fi
+    export SGLANG_EXPERIMENTAL_PACKED_W8_EMBEDDING=1
+    representation_args=(--load-format safetensors --dtype bfloat16)
     model_path="${MODELS}/compact-target-rholsc8k/packed"
     echo "EXPERIMENTAL packed embeddings: no runtime or quality qualification claim." >&2
     ;;
@@ -124,6 +143,7 @@ fi
 echo "[entrypoint] launching sglang on port $PORT as $SERVED_MODEL_NAME"
 exec python3 -m sglang.launch_server \
   --model-path "$model_path" \
+  "${representation_args[@]}" \
   --served-model-name "$SERVED_MODEL_NAME" \
   --tp 1 \
   --context-length "$context" \
@@ -134,7 +154,7 @@ exec python3 -m sglang.launch_server \
   --sleep-on-idle \
   --chunked-prefill-size 1024 \
   --mamba-radix-cache-strategy extra_buffer \
-  --mem-fraction-static 0.94 \
+  --mem-fraction-static "$mem_fraction" \
   --max-mamba-cache-size 8 \
   --mamba-ssm-dtype bfloat16 \
   --kv-cache-dtype "$kv_dtype" \

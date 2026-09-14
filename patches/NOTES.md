@@ -10,7 +10,7 @@ fork revision `3958762c198b7e9e0167e6aedda1b8c3f9a8afb1` already includes the
 three baseline patches; do not use it as the patch input.
 
 `baseline.series` lists three ordered SHA256-bound Git unified patches.
-`experimental.series` lists eight more, applied after the baseline. All patch
+`experimental.series` lists fourteen more, applied after the baseline. All patch
 paths are relative to the upstream repository root. `apply.sh` requires an exact,
 clean upstream Git checkout and uses `git apply --check --index` followed by
 `git apply --index` for each patch. Git records the changes in the build index;
@@ -26,7 +26,7 @@ source verifier or source reconstruction dependency.
 | Build set | Ordered patches | Evidence scope |
 |---|---|---|
 | Baseline | packed-head-predicate, quant-aware-fc, mamba-cache-prefix | Historical measured 64K runtime; packaging changes do not qualify a new deployment |
-| Experimental extension | qwen3_5, packed_w8_embedding, mm_utils, kvarn-candidate, sampler-checkpoint2, kvarn-pack-layout, quant-loader-guard, kvarn-native-rungs | Source-preserved candidate, not full-model qualified |
+| Experimental extension | qwen3_5, packed_w8_embedding, mm_utils, kvarn-candidate, sampler-checkpoint2, kvarn-pack-layout, quant-loader-guard, kvarn-native-rungs, packed-embedding-lora-defaults, kvarn-hybrid-attrs, kvarn-reserved-accounting, kvarn-prefill-tile | Source-preserved candidate, not full-model qualified |
 
 KVarN remains experimental. The first 240K full-model attempt failed before
 startup with a CUDA illegal memory access; it produced no candidate throughput,
@@ -137,3 +137,120 @@ an eight-token `TARGET_VERIFY` batch. Stage 11 deliberately preserves both guard
 A separate no-draft implementation needs explicit matching budget/accounting and
 host-side status propagation before sampling/cache publication, plus lifecycle
 qualification. This is a source blocker, not a measured target-only GPU failure.
+
+## Stage 12: nullable no-LoRA defaults
+
+**Base:** unchanged stages 1–11 at `source.env`. **Class:** compatibility.
+**Subsystem/purpose:** packed target constructor admission; accept upstream's
+ordinary no-path nullable enable flags, which are not normalized to `False` by
+the no-LoRA CLI path. Only identity `None` and `False` are accepted for
+`enable_lora` and `enable_lora_overlap_loading`; `lora_paths` must be `None`.
+True flags, invalid types (including integer zero), empty/nonempty path values
+and unsupported generic modes still fail. No LoRA implementation is enabled.
+All other guards, tensor math, kernels and capacities are unchanged.
+
+**Risk/validation:** this fixes a source-proven default mismatch, not later
+loader or GPU behavior. Forty-two CPU cases exercise the actual constructor
+with real config classes and mocked process context, stopping at the next
+unchanged loader guard. Cases cover four allowed default combinations,
+16 invalid flags, seven invalid paths and15 unchanged generic-mode rejections.
+No model tensors, GPU or numerical checks ran. Evidence:
+`packed-embedding-lora-defaults-cpu.json`. Upstream PR status: not recorded.
+
+**Stage 13 — hybrid wrapper attribute aliases:** the 0.98 GPU admission window
+allocated both KV pools and then crashed in `HybridLinearAttnBackend.__init__`
+because `KVarNAttnBackend` never set `token_to_kv_pool`, `req_to_token_pool` or
+`kv_index_translator`. The stage adds the three aliases exactly as upstream
+flashinfer/triton constructors do. Risk/validation: nine CPU cases ran the real
+constructor and wrapper against subclassed stub pools with isinstance guards
+intact; a negative control reproduces the pre-fix AttributeError. No tensors,
+model loading, GPU or numerics ran. Evidence: `kvarn-hybrid-attrs-cpu.json`.
+Upstream PR status: not recorded.
+
+## Stage 15: query-tiled packed attention kernel
+
+**Base:** unchanged stages 1–14 at `source.env`. **Class:** performance repair
+of a measured defect. The 2048-token kernel profile
+(`../bench/results/packed-kvarn-2048-kernel-profile.json`) localized the
+40–70× depth-dependent prefill gap entirely to `_packed_attention_split`
+(63% of GPU busy, ~0.7% of fp32 peak, mean duration growing with cached depth
+while GEMM/GDN/store stayed flat). **Subsystem/purpose:** retile the native
+split kernel so one program serves every query row of the microbatch and the
+whole grouped-head slice of one KV head: each packed page is dequantized once
+per program (not once per query-head), masks load once per page block, and
+scores/updates run through tensor-core `tl.dot` with fp32 accumulation and
+tf32 inputs instead of per-token fp32 multiply-reduces. The PyTorch oracle
+`packed_attention`, the reduce kernel, the store pipeline, the 8-query
+microbatch loop, workspace shapes and the reviewed 64 MiB envelope are
+unchanged. Kernel policy (bounds, raw/packed/preview/sink selection, sticky
+status bits, empty-row zeros) is preserved; the wrapper documents the
+single-request tile contract the backend already constructs.
+
+**Risk/validation:** tensor-core/tf32 arithmetic differs numerically from the
+per-query fp32 kernel inside the packed-value quantization envelope; parity is
+validated by `qualification/kvarn-prefill-tile-parity.py` on one exclusive GPU
+against the unchanged PyTorch oracle at the packing-repair tolerances
+(atol 2⁻¹⁰, rtol 2⁻⁷, rmse 2⁻¹¹), including a serving-first-chunk (8-token
+incomplete page, int64 table) case, raw-tail pages, partial-page bounds, empty
+rows, sub-8 query counts and sticky-status negative controls. Serving required
+three kernel revisions after the first parity pass: multiplicative masking
+instead of 1-D `tl.where` (MLIR layout bug at TABLE_WIDTH=2057), int32 copies
+of serving metadata, and 4-query/ROWS=32 wrapper tiles after the 8-query/ROWS=64
+specialization CUDA-OOM'd at 0.67 GiB free. Host-side empty-split elision
+launches only working splits (reduce masks the rest). Measured 2048-token
+re-profile (`../bench/results/packed-kvarn-2048-kernel-profile-stage15.json`):
+split 3.06× total / 6.12× per launch vs stage-14, chunk1→chunk2 mean growth
+4.6×→1.17×. Measured 8192-token eight-chunk re-profile
+(`../bench/results/packed-kvarn-8192-kernel-profile-stage15.json`): split mean
+101→453 µs, linear ≈6.3 µs/page; elision helps only while pages<16; 26× gate
+not met; naive 262144 split extrapolation ~3.8 h. No capacity or quality claim.
+Benches are unchanged.
+
+## Stage 16: 32-query prefill tile
+
+**Base:** unchanged stages 1–15. **Class:** performance repair. Workspace
+`max_query_tokens` 8→32 (64 MiB envelope still holds), backend prefill
+chunk equals the workspace, kernel fuses those 32 queries in one launch
+(internal 4-query tiles, BLOCK=32). Verify remains an 8-token block.
+Measured 8192-token re-profile
+(`../bench/results/packed-kvarn-8192-kernel-profile-stage16.json`): wall
+143s→35s, launches 32768→4096, busy fraction 0.54→0.90. Marlin 45% at this
+depth. 262144 split extrapolation ~2.0 h. syv-ai KVarN prefill at 100k is
+1050 tok/s; this run is 568 tok/s GPU-span at 8k. KV-once across internal
+tiles (`kvarn-prefill-kv-once.patch`) failed: 8192 41.2 s and 32768 169.4 s
+versus stage16 35.0 s / 105.5 s. Not in the series.
+
+## Stage 17: fused 32-query × one grouped head
+
+**Base:** stages 1–16 (query32, not kv-once). **Class:** performance repair.
+One program is all query rows of one grouped head and one split; packed K/V
+dequantizes once per page tile; softmax accumulators stay in registers.
+Grid `(query_heads, splits)` not `(kv_heads, splits)`. Overlay on stage16:
+parity passed (48.7 s); 8192 wall 16.8 s vs 35.0 s; 32768 wall 107.6 s vs
+105.5 s. No 32k gain. Not in the series. Benches unchanged.
+
+## Stage 18: dequant + FlashInfer prefill
+
+**Base:** stage16 query32. **Class:** performance repair. Huawei/syv path:
+materialize packed tiles in rotated space, FlashInfer, Hadamard Q and
+output only. Backend writes 128-token pages and seals before one FA over
+the full query chunk. Chunk 64 pages (~33 MiB) above that. Overlay on
+stage16: flash vs oracle rmse 7e-5; 8192 wall 15.2 s vs 35.0 s; 32768
+wall 50.4 s vs 105.5 s (~650 tok/s). 8192 GPU profile: Marlin W4A16 6.16 s,
+FlashInfer prefill 0.25 s. FA loses at 1024 (5.27 s vs stage16 4.05 s);
+GPU-span 1569 tok/s still ahead. Rebuilt series image f0df3d2f (17 patches):
+oracle rmse 7e-5; 8192 wall 17.9 s; 32768 wall 52.9 s. Benches unchanged.
+
+## Stage 18b: always-FA dispatch
+
+**Base:** stage18. **Class:** bug fix in the stage18 dispatch. The
+`max_upper<=2048` gate ran the stage16 split kernel on the first two chunks
+of every request; the gap profile (trace 1789405790, busy 0.914) shows
+split-attn 0.70 s vs FA 2.4 ms per layer-chunk in-request — the standalone
+1024 comparison had been JIT-skewed. Dispatch is now FA whenever native.
+Patch sha256 623e7ba4640942cb6ef9dd9870e0c1416bc13d02dd272b40da8b507d3c54c7c8.
+Image 7b2d45db: 8192 wall 16.9 s; 32768 wall 45.7 s (717 tok/s, 2.31x
+stage16). Marlin measured at the fp16 ceiling (61-63 TFLOPs; cuBLAS 69;
+torch._int_mm int8 44-50 TOPS, slower); the only lever beyond this is the
+vLLM marlin-int8 W4A8 transplant. Benches unchanged.
+

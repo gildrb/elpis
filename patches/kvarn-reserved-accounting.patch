@@ -1,0 +1,85 @@
+diff --git a/python/sglang/srt/managers/scheduler_components/invariant_checker.py b/python/sglang/srt/managers/scheduler_components/invariant_checker.py
+index e2af23cfb9..190d506cde 100644
+--- a/python/sglang/srt/managers/scheduler_components/invariant_checker.py
++++ b/python/sglang/srt/managers/scheduler_components/invariant_checker.py
+@@ -73,13 +73,21 @@ class SchedulerInvariantChecker:
+         session_held: int,
+         total: int,
+         uncached: int = 0,
++        reserved: int = 0,
+     ) -> Tuple[bool, str]:
+-        """Check: available + evictable + protected + session_held + uncached == total."""
+-        total_accounted = available + evictable + protected + session_held + uncached
++        """Check: available + evictable + protected + session_held + uncached + reserved == total.
++
++        ``reserved`` counts tokens the allocator itself owns for its lifetime
++        (``BaseTokenToKVPoolAllocator.reserved_size``); they sit in no other
++        bucket, so omitting them would report a permanent false leak.
++        """
++        total_accounted = (
++            available + evictable + protected + session_held + uncached + reserved
++        )
+         leak = total_accounted != total
+         msg = (
+             f"[{pool_name}] {total=}, {available=}, {evictable=}, "
+-            f"{protected=}, {session_held=}, {uncached=}"
++            f"{protected=}, {session_held=}, {uncached=}, {reserved=}"
+         )
+         return leak, msg
+ 
+@@ -124,6 +132,9 @@ class SchedulerInvariantChecker:
+             # Pair the static per-layer total with the conserve view, never the
+             # byte-coordinated one -- see `conserve_full_available_size`.
+             full_available = allocator.conserve_full_available_size()
++        # Allocator-owned lifetime tokens (e.g. a reserved graph-dummy page)
++        # belong to no session or cache bucket; count them as their own.
++        full_reserved = allocator.reserved_size()
+         leak, msg = self._check_pool_invariant(
+             "full",
+             full_available,
+@@ -132,6 +143,7 @@ class SchedulerInvariantChecker:
+             session_held,
+             total,
+             uncached,
++            full_reserved,
+         )
+         if leak and get_parallel().dcp_enabled and allocator.page_size > 1:
+             # Radix/Mamba cache accounting is logical-token based while DCP full
+diff --git a/python/sglang/srt/mem_cache/allocator/base.py b/python/sglang/srt/mem_cache/allocator/base.py
+index c9fb67c42f..5d06e89ea3 100644
+--- a/python/sglang/srt/mem_cache/allocator/base.py
++++ b/python/sglang/srt/mem_cache/allocator/base.py
+@@ -84,6 +84,14 @@ class BaseTokenToKVPoolAllocator(abc.ABC):
+         """
+         return []
+ 
++    def reserved_size(self) -> int:
++        """Tokens permanently removed from the free list and owned by the
++        allocator itself for its whole lifetime -- never by a session or a
++        cache entry. Idle memory-conservation checks count them as their own
++        component instead of reporting them as leaked. Default: none.
++        """
++        return 0
++
+     def debug_print(self) -> str:
+         return ""
+ 
+diff --git a/python/sglang/srt/mem_cache/kvarn_allocator.py b/python/sglang/srt/mem_cache/kvarn_allocator.py
+index 83454c3b48..f33dc727d1 100644
+--- a/python/sglang/srt/mem_cache/kvarn_allocator.py
++++ b/python/sglang/srt/mem_cache/kvarn_allocator.py
+@@ -89,6 +89,14 @@ class KVarNPageAllocator(PagedTokenToKVPoolAllocator):
+             for pool in self.kvarn_pools:
+                 pool.register_graph_dummy_pages(pages)
+ 
++    def reserved_size(self) -> int:
++        # The graph-dummy page is excluded from the free list for the runner
++        # lifetime (see _release_page_ids); report it as allocator-owned so the
++        # idle conservation check counts it instead of flagging a leak.
++        if self._graph_dummy_locations is None:
++            return 0
++        return int(self._graph_dummy_locations.numel())
++
+     def evict_to_free_tokens(self, tree_cache: BasePrefixCache | None, num_tokens: int) -> None:
+         from sglang.srt.mem_cache.base_prefix_cache import EvictParams
+ 

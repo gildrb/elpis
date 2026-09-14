@@ -1,0 +1,89 @@
+{
+ "schema_version": 1,
+ "classification": "PACKED_KVARN_262144_DEEP_PROBE_INCONCLUSIVE_PREFILL_TIME_NOT_MEMORY",
+ "candidate_image": "sha256:d69f861b02ca29a845a2254af2cbe534f94afee65510421a1519b773d9000973",
+ "candidate_image_alias": "qwen-inference:refactor-stage14",
+ "window": "long-window protocol: hard recovery unit (+2700 s) armed before any stop; qwen-inference-health.timer suspended for the window and restored; maintenance lease held; baseline restored and authenticated",
+ "candidate_started_utc": "2026-09-13T14:43:01.682621+00:00",
+ "ready_at_utc": "2026-09-13T14:44:21.993248+00:00",
+ "probe_started_utc": "2026-09-13T14:44:21.993384+00:00",
+ "probe_finished_utc": "2026-09-13T15:14:22.259522+00:00",
+ "probe": {
+  "tool": "python -m bench.capacity (uv run --offline --locked)",
+  "input_tokens": 262014,
+  "total_budget_tokens": 262144,
+  "timeout_seconds": 1800,
+  "exit_code": 2,
+  "status": "inconclusive",
+  "reason": "request deadline exceeded",
+  "input_ids_sha256": "8a7aab6d35134a71009c82ff4d7a4b01227a5bd9b2b12c36fc9a69d3a62bfeb2",
+  "cache_salt_sha256_scope": "in_process fresh random salt",
+  "artifacts": "/tmp/inference-stage14-deep-e9fd5a8d/capacity-262014 (private, 0700)"
+ },
+ "engine_progress_during_window": {
+  "chunks_completed": 45,
+  "tokens_prefilled": 46080,
+  "pending_remaining_at_deadline": 215934,
+  "input_throughput_start_tok_s": 27.0,
+  "input_throughput_end_tok_s": 15.7,
+  "chunk_seconds_start_approx": 38,
+  "chunk_seconds_end_approx": 65,
+  "chunk_time_model": "seconds per 1024-token chunk grows linearly with prefilled length (fit ~1.6 + 0.001376*done_tokens); total prefill time is quadratic in context length",
+  "extrapolated_full_prefill_seconds_approx": 46500,
+  "extrapolated_full_prefill_hours_approx": 12.9,
+  "retractions": 0,
+  "errors": "none in scheduler log",
+  "full_token_usage_at_46k_cached": 0.18,
+  "memory_pressure": "none observed; pools stable at 23441-23705 MiB device usage"
+ },
+ "gpu_telemetry_during_probe": {
+  "model": "NVIDIA GeForce RTX 3090",
+  "samples": 1791,
+  "utilization_pct_median": 100.0,
+  "power_w_median": 271.54,
+  "power_w_max": 281.26,
+  "temperature_c_max": 72.0,
+  "memory_used_mib_min_max": [
+   23441.0,
+   23705.0
+  ],
+  "interpretation": "compute-bound: kernels saturated the GPU at the 280 W cap; no stall, no idle waiting"
+ },
+ "engine_base_commit": "0bcd822377da7b5718e674eaf9c870d349424dd1",
+ "ordered_patch_sha256": [
+  "71fcf894281ea12367d9aa2aac5b8f8303fc4b7e21a84fc849c1c05a36889b4e",
+  "fb8abf81343bb1e99fc8c8037a12a794d946b86e6564903c691b435bd3d0e8ab",
+  "06ebc7c718253b8294c0e01a8419e1bbdea054ac19bf20239210ade4a322e9bf",
+  "2e8d0383b78d8138f4ca08982b523b21c4d56beab20c78d5ea07644d9722a6ae",
+  "608b85fa5c9da8885360e4dfe4cb9201389c220d08c2b719e23f3a15a1bd63aa",
+  "eec8df29e6bf90134f879dad7c90669a1a8b7842e85813c6539b5c4b0fecbab4",
+  "67ae617ed91b27f604a3b389bd545112b323f8d99716378fb6eef9d4640b0226",
+  "f4d820cc7e883cb92008f3b6d209025f2b546877df42c6a3f997b0e8021eca77",
+  "c32b1f55c2ef0fb3e7201586d499a878e7b1dcd0b052ee6920a4c21839cc23bc",
+  "5c4f82472f19688a450273681e002287c9385cb320d3380db1428056c3ae4b8d",
+  "1d0ebc94080e1b3d1ec0e18435be3f95d456eb852bb2a0a2bf37ef1cede2f79f",
+  "e7ea328bbb5619f916d65023179e990b59a1d5deacf7aeb90be1a1053b7db630",
+  "212373bdaa7870dc4fc8b6994c7896fd56a33c64707c6ec276ce94d1609e52f2",
+  "59d84c2c580328d0e9369c801d9de5c45ff2354bdc5f991e9cb654b222626328"
+ ],
+ "launch_config_sha256": "83c153ec4ec686b7ebd9cedde91772985aa2898635bdb5ada7f644526eecc0b3",
+ "safety": {
+  "health_timer_suspended_then_restored": true,
+  "recovery_unit_armed_seconds": 2700,
+  "recovery_unit_disarmed_after_success": true,
+  "baseline_restore": "authenticated_health_models_short_completion_passed",
+  "baseline_restored_utc": "2026-09-13T15:15:53+00:00",
+  "window_final_state": "completed"
+ },
+ "implications": [
+  "Memory capacity at depth is not disproved: 46,080 tokens cached with full token usage 0.18 and zero retractions before the deadline; the binding constraint is prefill compute time.",
+  "Eager KVarN prefill is 40-70x slower than the dense FP8 baseline (~1.06K tok/s cold at 24K): 15-27 tok/s declining with depth, quadratic total.",
+  "The probe CLI hard-caps a single request at 1800 s, so the 262144 stage cannot complete on this runtime without a prefill-throughput repair; only roughly <=30K-token single requests fit the cap today.",
+  "Depth-table C1 (to 261118), GSP prefix-reuse at depth and GraphWalks 179K rows are time-infeasible on this runtime as designed; they need either a prefill kernel repair or re-scoping with the measured timing curve."
+ ],
+ "limitations": [
+  "Inconclusive probe: request_completed was not reached; no output, numerics or quality evidence exists.",
+  "Throughput figures are scheduler-log input-throughput lines and chunk timestamps, not the official benchmark client.",
+  "The 12.9 h extrapolation is a linear fit to the chunk-time growth over 45 chunks; it is an estimate, not a measurement."
+ ]
+}

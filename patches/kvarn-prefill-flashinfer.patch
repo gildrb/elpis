@@ -1,0 +1,275 @@
+diff --git a/python/sglang/kernels/ops/kvarn/decode.py b/python/sglang/kernels/ops/kvarn/decode.py
+--- a/python/sglang/kernels/ops/kvarn/decode.py
++++ b/python/sglang/kernels/ops/kvarn/decode.py
+@@ -392,3 +392,206 @@
+         OUTPUT_Q_STRIDE=output.stride(0), OUTPUT_H_STRIDE=output.stride(1),
+         D=d, SPLITS=splits, N_SPLITS=n_splits, num_warps=4, num_stages=1)
+     return output
++
++
++
++@triton.jit
++def _materialize_page(
++    Table, Packed, RawK, RawV, PageToSlot, Committed, Provisional, Preview, Sink,
++    KOut, VOut, Status,
++    TABLE_STRIDE: tl.constexpr, REQUEST: tl.constexpr,
++    D: tl.constexpr, H: tl.constexpr, PAGES: tl.constexpr, SLOTS: tl.constexpr,
++    TILE_BYTES: tl.constexpr,
++    K_SCALE: tl.constexpr, K_ZERO: tl.constexpr, K_TOKEN: tl.constexpr,
++    V_PACKED: tl.constexpr, V_CHANNEL: tl.constexpr, V_SCALE: tl.constexpr,
++    V_ZERO: tl.constexpr,
++):
++    logical = tl.program_id(0)
++    kv_head = tl.program_id(1)
++    d = tl.arange(0, D)
++    page = tl.load(Table + REQUEST * TABLE_STRIDE + logical)
++    in_range = (page > 0) & (page < PAGES)
++    slot = tl.load(PageToSlot + page, mask=in_range, other=-1)
++    page_ok = in_range & (slot < SLOTS)
++    tl.atomic_or(Status, tl.where(~in_range, 1, 0))
++    sink = tl.load(Sink + page, mask=page_ok, other=0)
++    preview = tl.load(Preview + page, mask=page_ok, other=0)
++    use_raw = page_ok & (slot >= 0) & (sink | ~preview)
++    safe_slot = tl.where(slot >= 0, slot, 0)
++    base = (tl.where(page > 0, page, 1).to(tl.int64) * H + kv_head) * TILE_BYTES
++    halves = (Packed + base).to(tl.pointer_type(tl.float16))
++    ks = tl.load(halves + K_SCALE // 2 + d, mask=page_ok, other=0.0).to(tl.float32)
++    kz = tl.load(halves + K_ZERO // 2 + d, mask=page_ok, other=0.0).to(tl.float32)
++    vc = tl.load(halves + V_CHANNEL // 2 + d, mask=page_ok, other=0.0).to(tl.float32)
++    token = tl.arange(0, 32)
++    for start in range(0, 128, 32):
++        tok = start + token
++        committed = tl.load(Committed + page * 128 + tok, mask=page_ok, other=0)
++        provisional = tl.load(Provisional + page * 128 + tok, mask=page_ok, other=0)
++        written = committed | provisional
++        raw_mask = use_raw & written
++        keys_raw = tl.load(RawK + (safe_slot.to(tl.int64) * 128 + tok[:, None]) * H * D
++                           + kv_head * D + d[None, :],
++                           mask=raw_mask[:, None], other=0.0).to(tl.float32)
++        values_raw = tl.load(RawV + (safe_slot.to(tl.int64) * 128 + tok[:, None]) * H * D
++                             + kv_head * D + d[None, :],
++                             mask=raw_mask[:, None], other=0.0).to(tl.float32)
++        kt = tl.load(halves + K_TOKEN // 2 + tok, mask=page_ok, other=0.0).to(tl.float32)
++        kbyte = tl.load(Packed + base + d[:, None] * 64 + tok[None, :] // 2,
++                        mask=page_ok, other=0).to(tl.int32)
++        keys_rot = (((kbyte >> ((tok[None, :] % 2) * 4)) & 15).to(tl.float32) * ks[:, None]
++                    + kz[:, None]) * kt[None, :]
++        keys_rot = tl.trans(keys_rot)
++        vs = tl.load(halves + V_SCALE // 2 + tok, mask=page_ok, other=0.0).to(tl.float32)
++        vz = tl.load(halves + V_ZERO // 2 + tok, mask=page_ok, other=0.0).to(tl.float32)
++        vbyte = tl.load(Packed + base + V_PACKED + tok[:, None] * (D // 4) + d[None, :] // 4,
++                        mask=page_ok, other=0).to(tl.int32)
++        values_rot = (((vbyte >> ((d[None, :] % 4) * 2)) & 3).to(tl.float32) * vs[:, None]
++                      + vz[:, None]) * vc[None, :]
++        packed_ok = page_ok & (~use_raw) & written
++        keys = tl.where(raw_mask[:, None], keys_raw, tl.where(packed_ok[:, None], keys_rot, 0.0))
++        values = tl.where(raw_mask[:, None], values_raw, tl.where(packed_ok[:, None], values_rot, 0.0))
++        dest = (logical.to(tl.int64) * 128 + tok[:, None]) * H * D + kv_head * D + d[None, :]
++        tl.store(KOut + dest, keys.to(tl.float16), mask=page_ok)
++        tl.store(VOut + dest, values.to(tl.float16), mask=page_ok)
++
++
++def packed_attention_flash(Q: torch.Tensor, view: KVarNLayerView,
++                           request_page_table: torch.Tensor, query_request_ids: torch.Tensor,
++                           lower_bounds: torch.Tensor, upper_bounds: torch.Tensor,
++                           scale: float, fixedworkspace: KVarNWorkspace) -> torch.Tensor:
++    """Dequant packed KV in rotated space, FlashInfer, unrotate output."""
++    import flashinfer
++    if Q.ndim != 3 or Q.shape[2] != view.layout.head_dim:
++        raise ValueError("native query shape mismatch")
++    queries, heads, d = Q.shape
++    if heads < 1 or heads % view.layout.kv_heads != 0:
++        raise ValueError("native attention requires grouped heads")
++    if Q.dtype != fixedworkspace.output.dtype or not isfinite(scale) or scale <= 0:
++        raise ValueError("invalid native query dtype/scale")
++    if request_page_table.ndim != 2 or request_page_table.dtype not in (torch.int32, torch.int64):
++        raise ValueError("native page table must be integer matrix")
++    for tensor in (query_request_ids, lower_bounds, upper_bounds):
++        if tensor.shape != (queries,) or tensor.dtype not in (torch.int32, torch.int64):
++            raise ValueError("native query metadata must be integer per-query vectors")
++    for tensor in (Q, request_page_table, query_request_ids, lower_bounds, upper_bounds):
++        if not tensor.is_cuda or tensor.device != view.packed.device or not tensor.is_contiguous():
++            raise ValueError("native attention inputs must be contiguous on cache CUDA device")
++    table = request_page_table.to(torch.int32).contiguous()
++    request_ids = query_request_ids.to(torch.int32).contiguous()
++    lower = lower_bounds.to(torch.int32).contiguous()
++    upper = upper_bounds.to(torch.int32).contiguous()
++    output = torch.empty_like(Q)
++    live = upper > lower
++    if int(live.sum().item()) == 0:
++        output.zero_()
++        return output
++    if int((request_ids[live] != request_ids[live][0]).sum().item()) != 0:
++        raise ValueError("flash path requires one request")
++    request = int(request_ids[live][0].item())
++    if not 0 <= request < table.shape[0]:
++        fixedworkspace.native_status.fill_(1)
++        output.zero_()
++        return output
++    max_upper = int(upper[live].max().item())
++    min_lower = int(lower[live].min().item())
++    if min_lower < 0 or max_upper > table.shape[1] * 128:
++        fixedworkspace.native_status.fill_(1)
++        output.zero_()
++        return output
++    n_pages = (max_upper + 127) // 128
++    if n_pages <= 0:
++        output.zero_()
++        return output
++    kv_heads = view.layout.kv_heads
++    o = KVarNOffsets.from_layout(view.layout)
++    q16 = hadamard(Q.float()).to(torch.float16)
++    chunk_pages = n_pages if n_pages <= 64 else 64
++    acc = None
++    lse = None
++    for page_lo in range(0, n_pages, chunk_pages):
++        page_hi = min(page_lo + chunk_pages, n_pages)
++        n = page_hi - page_lo
++        tokens = n * 128
++        k_fp16 = torch.empty((tokens, kv_heads, d), dtype=torch.float16, device=Q.device)
++        v_fp16 = torch.empty((tokens, kv_heads, d), dtype=torch.float16, device=Q.device)
++        sub = table[request:request + 1, page_lo:page_hi].contiguous()
++        _materialize_page[(n, kv_heads)](
++            sub, view.packed, view.raw_keys, view.raw_values, view.page_to_tail_slot,
++            view.committed_mask, view.provisional_mask, view.preview_ready, view.sink_pages,
++            k_fp16, v_fp16, fixedworkspace.native_status,
++            TABLE_STRIDE=sub.stride(0), REQUEST=0,
++            D=d, H=kv_heads, PAGES=view.packed.shape[0], SLOTS=view.raw_keys.shape[0],
++            TILE_BYTES=view.layout.tile_bytes,
++            K_SCALE=o.k_scale, K_ZERO=o.k_zero, K_TOKEN=o.k_token,
++            V_PACKED=o.v_packed, V_CHANNEL=o.v_channel, V_SCALE=o.v_scale, V_ZERO=o.v_zero,
++            num_warps=4, num_stages=1)
++        phys = sub[0]
++        valid = (phys > 0) & (phys < view.packed.shape[0])
++        safe = torch.where(valid, phys, torch.zeros_like(phys))
++        slots = view.page_to_tail_slot[safe]
++        preview = view.preview_ready[safe]
++        sink = view.sink_pages[safe]
++        use_raw = valid & (slots >= 0) & (sink | ~preview)
++        if bool(use_raw.any().item()):
++            k_view = k_fp16.view(n, 128, kv_heads, d)
++            v_view = v_fp16.view(n, 128, kv_heads, d)
++            k_view[use_raw] = hadamard(k_view[use_raw].float()).to(torch.float16)
++            v_view[use_raw] = hadamard(v_view[use_raw].float()).to(torch.float16)
++        start = page_lo * 128
++        stop = min(page_hi * 128, max_upper)
++        k_used = k_fp16[:stop - start]
++        v_used = v_fp16[:stop - start]
++        pos = torch.arange(start, stop, device=Q.device)
++        mask = (pos[None, :] >= lower[:, None]) & (pos[None, :] < upper[:, None])
++        if not bool(mask.any().item()):
++            del k_fp16, v_fp16
++            continue
++        expected = upper[0] + torch.arange(queries, device=Q.device, dtype=upper.dtype)
++        one_shot = page_lo == 0 and page_hi == n_pages
++        causal = one_shot and bool((lower == 0).all().item()) and bool(torch.equal(upper, expected))
++        if causal:
++            chunk = flashinfer.single_prefill_with_kv_cache(
++                q16, k_used, v_used, causal=True, sm_scale=scale, kv_layout="NHD",
++                return_lse=True,
++            )
++        else:
++            chunk = flashinfer.single_prefill_with_kv_cache(
++                q16, k_used, v_used, custom_mask=mask, causal=False, sm_scale=scale,
++                kv_layout="NHD", return_lse=True,
++            )
++        if not isinstance(chunk, tuple):
++            raise RuntimeError("flashinfer did not return LSE")
++        o_chunk, lse_chunk = chunk
++        o_chunk = o_chunk.float()
++        lse_chunk = lse_chunk.float()
++        if lse_chunk.ndim == 1:
++            lse_chunk = lse_chunk[:, None].expand(-1, heads).contiguous()
++        dead = ~mask.any(dim=1)
++        lse_chunk = lse_chunk.clone()
++        lse_chunk[dead] = float('-inf')
++        o_chunk[dead] = 0
++        if acc is None:
++            acc = o_chunk
++            lse = lse_chunk
++        else:
++            m = torch.maximum(lse, lse_chunk)
++            a = torch.exp(lse - m)
++            b = torch.exp(lse_chunk - m)
++            a = torch.where(torch.isfinite(a), a, torch.zeros_like(a))
++            b = torch.where(torch.isfinite(b), b, torch.zeros_like(b))
++            if a.ndim == 2:
++                acc = a.unsqueeze(-1) * acc + b.unsqueeze(-1) * o_chunk
++            else:
++                acc = a * acc + b * o_chunk
++            den = a + b
++            lse = m + torch.log(den.clamp_min(1e-30))
++            lse = torch.where(den > 0, lse, torch.full_like(lse, float('-inf')))
++        del k_fp16, v_fp16, k_used, v_used
++    if acc is None:
++        output.zero_()
++        return output
++    attn = hadamard(acc)
++    output.copy_(attn.to(Q.dtype))
++    output[~live] = 0
++    return output
+diff --git a/python/sglang/srt/layers/attention/kvarn_backend.py b/python/sglang/srt/layers/attention/kvarn_backend.py
+--- a/python/sglang/srt/layers/attention/kvarn_backend.py
++++ b/python/sglang/srt/layers/attention/kvarn_backend.py
+@@ -10,7 +10,7 @@
+ from sglang.srt.layers.attention.base_attn_backend import AttentionBackend, SharedReadEnds
+ from sglang.srt.layers.radix_attention import AttentionType, RadixAttention
+ from sglang.srt.mem_cache.kvarn.kernels import packed_attention
+-from sglang.kernels.ops.kvarn.decode import packed_attention_out
++from sglang.kernels.ops.kvarn.decode import packed_attention_flash, packed_attention_out
+ from sglang.srt.mem_cache.kvarn.pool import KVarNTokenToKVPool
+ from sglang.srt.mem_cache.kvarn_allocator import KVarNPageAllocator
+ from sglang.srt.mem_cache.memory_pool import HybridLinearKVPool
+@@ -182,20 +182,37 @@
+         provisional = forward_batch.forward_mode.is_target_verify()
+         if provisional and queries.shape[0] != 8:
+             raise ValueError("KVarN target verify requires an eight-token linear block")
+-        attention = packed_attention_out if self.pool.native_enabled else packed_attention
+-        result = torch.empty_like(queries)
+-        chunk_size = self.pool.workspace.output.shape[0]
+-        for start in range(0, queries.shape[0], chunk_size):
+-            stop = min(start + chunk_size, queries.shape[0])
+-            self.pool.begin_write(
+-                local_layer, forward_batch.out_cache_loc[start:stop],
+-                keys[start:stop], values[start:stop], provisional=provisional,
++        view = self.pool.layer_view(local_layer)
++        use_flash = self.pool.native_enabled
++        if use_flash:
++            write_chunk = self.pool.capacity.max_write_tokens
++            for start in range(0, queries.shape[0], write_chunk):
++                stop = min(start + write_chunk, queries.shape[0])
++                self.pool.begin_write(
++                    local_layer, forward_batch.out_cache_loc[start:stop],
++                    keys[start:stop], values[start:stop], provisional=provisional,
++                )
++                self.pool.finish_attention(local_layer)
++            result = packed_attention_flash(
++                queries, view, metadata.request_page_table, metadata.query_request_ids,
++                metadata.lower_bounds, metadata.upper_bounds, layer.scaling,
++                self.pool.workspace,
+             )
+-            result[start:stop].copy_(attention(
+-                queries[start:stop], self.pool.layer_view(local_layer),
+-                metadata.request_page_table, metadata.query_request_ids[start:stop],
+-                metadata.lower_bounds[start:stop], metadata.upper_bounds[start:stop],
+-                layer.scaling, self.pool.workspace,
+-            ))
+-            self.pool.finish_attention(local_layer)
++        else:
++            attention = packed_attention_out if self.pool.native_enabled else packed_attention
++            result = torch.empty_like(queries)
++            chunk_size = self.pool.workspace.output.shape[0]
++            for start in range(0, queries.shape[0], chunk_size):
++                stop = min(start + chunk_size, queries.shape[0])
++                self.pool.begin_write(
++                    local_layer, forward_batch.out_cache_loc[start:stop],
++                    keys[start:stop], values[start:stop], provisional=provisional,
++                )
++                result[start:stop].copy_(attention(
++                    queries[start:stop], view, metadata.request_page_table,
++                    metadata.query_request_ids[start:stop],
++                    metadata.lower_bounds[start:stop], metadata.upper_bounds[start:stop],
++                    layer.scaling, self.pool.workspace,
++                ))
++                self.pool.finish_attention(local_layer)
+         return result.reshape(-1, layer.tp_q_head_num * layer.v_head_dim)

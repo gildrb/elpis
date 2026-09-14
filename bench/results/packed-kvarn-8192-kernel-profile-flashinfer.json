@@ -1,0 +1,19 @@
+{
+  "schema_version": 1,
+  "classification": "PACKED_KVARN_8192_KERNEL_PROFILE_FLASHINFER_ROTATED",
+  "candidate_image": "sha256:a91d9c4e6f00a24e758ee772a47162463ba7ec3fbfdfee87d07e48f34bdea79d",
+  "decode_overlay": "kvarn-prefill-flashinfer.patch",
+  "window": "/tmp/inference-flash-prof-k4n",
+  "probe_elapsed_seconds_under_profiler": 23.52814218000276,
+  "unprofiled_8192_elapsed_seconds": 15.162876564980252,
+  "trace": "1789393560.277529-TP-0.trace.json.gz",
+  "kernel_seconds": {
+    "marlin_w4a16": 6.160,
+    "fused_rotate_balance_quantize": 0.702,
+    "flashinfer_single_prefill": 0.250,
+    "gdn_chunk_kernels_sum": 0.16,
+    "elementwise_copy": 0.342
+  },
+  "implication": "FlashInfer attention is 0.25 s of an 8192 request. Marlin W4A16 GEMM is 6.16 s. Beating syv-ai at this depth is a GEMM problem, not packed-KV attention.",
+  "baseline_restored": true
+}

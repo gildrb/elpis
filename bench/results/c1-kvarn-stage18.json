@@ -1,0 +1,46 @@
+{
+  "schema_version": 1,
+  "classification": "C1_OFFICIAL_SGLANG_BENCHMARK_SERVING_KVARN_STAGE18_REBUILT",
+  "module": "python3 -m sglang.benchmark.serving",
+  "candidate": "qwen-inference:refactor-stage18 sha256:f0df3d2f88ad00e5c279088a5696d0463827a6159c90bb79bf9ef6a3752f0e1c (17-patch series, FA prefill baked in)",
+  "sampling": {
+    "seed": 20260913,
+    "num_prompts": 8,
+    "random_output_len": 1024,
+    "max_concurrency": 1,
+    "temperature": 0,
+    "flush_cache": true
+  },
+  "depths": {
+    "8192": {
+      "completed": 8,
+      "duration_s": 281.71,
+      "input_tok_s": 232.64,
+      "output_tok_s": 27.88,
+      "median_ttft_ms": 9564.12,
+      "p90_ttft_ms": 9610.51,
+      "median_tpot_ms": 23.34,
+      "accept_length": 6.15,
+      "jsonl": "stage18-depth8192.jsonl (private)"
+    },
+    "32768": {
+      "completed": 8,
+      "duration_s": 627.42,
+      "input_tok_s": 417.81,
+      "output_tok_s": 12.99,
+      "median_ttft_ms": 40684.49,
+      "p90_ttft_ms": 41006.56,
+      "median_tpot_ms": 41.44,
+      "accept_length": 5.37,
+      "jsonl": "stage18-depth32768.jsonl (private)"
+    }
+  },
+  "fp8_baseline_reference": {
+    "8192": {"duration_s": 89.16, "input_tok_s": 735.03, "output_tok_s": 88.63, "mean_ttft_ms": 6526.20, "median_tpot_ms": 4.30, "accept_length": 6.10},
+    "32768": {"duration_s": 296.22, "input_tok_s": 884.98, "output_tok_s": 23.77, "mean_ttft_ms": 29372.45, "median_tpot_ms": 4.74, "accept_length": 6.25},
+    "note": "FP8 baseline is 64k-context live service; cannot admit 65536+"
+  },
+  "window": "/tmp/inference-stage18-c1-k4n",
+  "baseline_restored": true,
+  "note": "First 32768-in/1024-out official-harness completion on the native 262144 candidate. Decode gap is W4A16 Marlin GEMM; prefill TTFT within 1.4x of FP8. Not a syv-ai beat."
+}

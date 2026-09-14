@@ -57,6 +57,20 @@ The existing `eval/datasets.lock` authenticates unchanged MRCR CSV assets by GCS
 
 Each invocation creates a private fresh `.runs/PROFILE.XXXXXXXX/`. Its working directory contains symlinks to verified raw datasets; GraphWalks' hardcoded `openai/graphwalks` resolves as that local path through the official datasets library. HF network access is disabled and the derived Arrow cache is fresh. No user/shared HF cache or source file is rewritten.
 
+### Explicit candidate routing
+
+The frozen configs retain `http://127.0.0.1:18020/v1`. Before using a candidate on port18021, set `QWEN_EVAL_BASE_URL=http://127.0.0.1:18021/v1` explicitly. Only those exact loopback18020/18021 `/v1` URLs are accepted; an unset variable preserves the frozen URL, and empty or other values fail closed.
+
+Historical `vf-eval CONFIG.toml -b URL` parses the flag but ignores it on the TOML path. The wrapper does not use that ineffective override. It creates an exclusive private effective TOML copy, changes only `api_base_url`, and uses the upstream TOML loader to require every normalized non-transport field to remain identical. All eleven original config files stay unchanged.
+
+Each effective config has adjacent `.provenance.json` with original/effective hashes and URLs, the non-transport equality check and operator `QWEN_RECIPE_ID`. This records the supplied identity, not an independent verification of the running image. Review that identity before approving requests. Both loader-only dry runs and approved evaluations use the effective config.
+
+```sh
+QWEN_EVAL_BASE_URL=http://127.0.0.1:18021/v1 eval/direct/run smoke --dry-run
+```
+
+The separate `TOKEN-BUDGET.md` proof shows the frozen quick large-MRCR rows exceed262144 tokens. Do not run those rows or the rejected next GraphWalks character-bucket sample. A fitting budget does not itself authorize requests or prove runtime quality.
+
 After endpoint approval only:
 
 ```sh

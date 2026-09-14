@@ -1,0 +1,40 @@
+{
+  "schema_version": 1,
+  "classification": "GSP_OFFICIAL_SGLANG_BENCHMARK_SERVING_KVARN_FLASHINFER_8X4",
+  "module": "python3 -m sglang.benchmark.serving --dataset-name generated-shared-prefix",
+  "candidate": "stage16 image + kvarn-prefill-flashinfer overlay, context_length 262144",
+  "frozen_knobs": {
+    "gsp_num_groups": 8,
+    "gsp_prompts_per_group": 4,
+    "gsp_system_prompt_len": 2048,
+    "gsp_question_len": 128,
+    "gsp_output_len": 256,
+    "gsp_ordered": true,
+    "seed": 20260913,
+    "max_concurrency": 1,
+    "temperature": 0,
+    "flush_cache": true,
+    "tokenize_prompt": "off (upstream GSP asserts it off; supplies own ids)"
+  },
+  "completed": 32,
+  "duration_s": 270.92,
+  "total_input_tokens": 74418,
+  "total_output_tokens": 7399,
+  "input_tok_s": 274.68,
+  "output_tok_s": 27.31,
+  "mean_ttft_ms": 1401.16,
+  "median_ttft_ms": 334.79,
+  "p90_ttft_ms": 3220.39,
+  "median_tpot_ms": 24.39,
+  "accept_length": 4.83,
+  "fp8_baseline": {
+    "duration_s": 53.56,
+    "input_tok_s": 1389.37,
+    "output_tok_s": 127.12,
+    "median_ttft_ms": 226.03,
+    "p90_ttft_ms": 2092.50,
+    "accept_length": 5.08
+  },
+  "prefix_reuse_signal": "median TTFT 335 ms vs p90 3220 ms under ordered groups — prefix reuse works through KVarN packed pages",
+  "note": "Low-qty official harness. W4A16 Marlin decode dominates the gap. JSONL private. Baseline restored."
+}

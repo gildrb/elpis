@@ -1,0 +1,32 @@
+{
+  "schema_version": 1,
+  "classification": "GSP_OFFICIAL_SGLANG_BENCHMARK_SERVING_FP8_BASELINE",
+  "module": "python3 -m sglang.benchmark.serving --dataset-name generated-shared-prefix",
+  "service": "qwen-inference.service live baseline",
+  "frozen_knobs": {
+    "gsp_num_groups": 8,
+    "gsp_prompts_per_group": 4,
+    "gsp_system_prompt_len": 2048,
+    "gsp_question_len": 128,
+    "gsp_output_len": 256,
+    "gsp_ordered": true,
+    "seed": 20260913,
+    "max_concurrency": 1,
+    "temperature": 0,
+    "enable_thinking": false,
+    "flush_cache": true,
+    "note": "Official defaults are 64 groups x 16 prompts; this freeze is 32 prompts so prefix reuse is measurable without a 1024-request wall."
+  },
+  "completed": 32,
+  "duration_s": 53.56,
+  "total_input_tokens": 74418,
+  "total_output_tokens": 6809,
+  "input_tok_s": 1389.37,
+  "output_tok_s": 127.12,
+  "mean_ttft_ms": 625.52,
+  "median_ttft_ms": 226.03,
+  "p90_ttft_ms": 2092.50,
+  "accept_length": 5.08,
+  "prefix_reuse_signal": "median TTFT 226 ms vs p90 2092 ms under ordered groups",
+  "jsonl": "gsp-baseline.jsonl"
+}

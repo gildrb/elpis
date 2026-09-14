@@ -183,3 +183,22 @@ public inputs before explicitly installing either representation.
 Hold representation fixed when comparing KV or speculation. A packed KVarN trial
 changes two variables relative to a dense FP8 trial; it is not an isolated KV A/B.
 The same unqualified acknowledgment and approved exclusive GPU access apply.
+
+The packed selector explicitly enables `SGLANG_EXPERIMENTAL_PACKED_W8_EMBEDDING=1`
+and uses `--load-format safetensors --dtype bfloat16`, as required by the patched
+loader. Dense mode clears an absent, empty or zero packed-loader flag and rejects any
+other inherited value, including `1`. Packed target-only is
+rejected before model verification: the current loader admits DFlash only.
+Multimodal loading remains enabled; no language-only, LoRA, compilation or
+parallel-mode escape is added. This wiring still needs actual GPU-loader
+qualification. Earlier inventory-only checks did not exercise model construction.
+
+### Bounded static-memory control
+
+`QWEN_MEM_FRACTION_STATIC` accepts only `0.94` (default), `0.95`, `0.96`, `0.97`
+or `0.98`. It changes only SGLang's existing static-memory fraction argument.
+All choices remain behind the unqualified acknowledgment. Higher values are
+measurement candidates, not promoted defaults or proof that a model fits. Keep
+the value fixed for matched comparisons and record requested versus allocated
+capacity; strict capacity rejection remains enabled. No automatic retries with
+larger fractions or smaller contexts occur.

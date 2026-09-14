@@ -29,14 +29,21 @@ partial build, not an acceptable runtime.
 | 9 | Experimental | `kvarn-pack-layout.patch` |
 | 10 | Experimental | `quant-loader-guard.patch` |
 | 11 | Experimental | `kvarn-native-rungs.patch` |
+| 12 | Experimental | `packed-embedding-lora-defaults.patch` |
+| 13 | Experimental | `kvarn-hybrid-attrs.patch` |
+| 14 | Experimental | `kvarn-reserved-accounting.patch` |
+| 15 | Experimental | `kvarn-prefill-tile.patch` |
+| 16 | Experimental | `kvarn-prefill-query32.patch` |
+| 17 | — | `kvarn-prefill-kv-once.patch` (rejected; not in series) |
+| 18 | Experimental | `kvarn-prefill-flashinfer.patch` |
 
 [`baseline.series`](baseline.series) contains stages 1–3.
-[`experimental.series`](experimental.series) contains stages 4–11, appended to
+[`experimental.series`](experimental.series) contains stages 4–18, appended to
 the baseline only when `experimental` is explicitly passed instead of `baseline`
 on a **fresh** checkout. Each line is `SHA256  patch-filename`; line order is
 application order. These are build sets, not runtime profiles.
 
-The experimental set covers 38 files (21 modifications and 17 additions).
+The experimental set covers 40 files (23 modifications and 17 additions).
 KVarN remains experimental: its first full-model 240K attempt failed before
 startup. The packing repair passed 90 attention and two status small-fixture
 cases with zero memory-check errors. This does **not** qualify full-model
@@ -66,3 +73,61 @@ Platform admission is mocked; real pool scalar checks stop at the CUDA-only
 boundary. These checks do not allocate native pools, compile CUDA kernels,
 prove model fit or qualify GPU execution. All previous GPU evidence remains
 bound to its old source and small-fixture scope.
+
+## Nullable LoRA defaults compatibility
+
+Stage 12 accepts only identity `None` or identity `False` for the two upstream
+LoRA enable flags, and requires `lora_paths is None`. Normal no-LoRA CLI defaults
+are nullable; no false CLI flag is available. `True`, numeric zero, other types
+and any path value remain rejected. Every other packed loader guard is unchanged.
+This enables no LoRA feature and changes no tensor math, kernels or capacity.
+See `packed-embedding-lora-defaults-cpu.json`: 42 CPU cases ran the actual
+constructor through these guards, then deliberately stopped before loading.
+Passing admission does not establish model startup or numerical/GPU parity.
+
+## Hybrid wrapper attribute aliases
+
+Stage 13 sets the three attributes upstream's `HybridLinearAttnBackend` reads
+from its full-attention child — `token_to_kv_pool`, `req_to_token_pool` and
+`kv_index_translator` — matching the flashinfer/triton constructor convention.
+The 0.98 admission window proved the gap: pools allocated, then
+`AttributeError: 'KVarNAttnBackend' object has no attribute 'token_to_kv_pool'`
+before API readiness. See `kvarn-hybrid-attrs-cpu.json`: nine CPU cases ran the
+real constructor and the real wrapper with subclassed stub pools; a negative
+control confirms the pre-fix contract still fails. This is wiring only: no
+tensor math, kernel, GPU startup or capacity claim.
+
+## Allocator-reserved token accounting
+
+Stage 14 makes allocator-owned lifetime tokens a first-class component of the
+idle memory-conservation invariant. The KVarN page allocator reserves exactly
+one 128-token page for the graph-dummy address (`reserve_graph_dummy_page`,
+enforced for the runner lifetime by `_release_page_ids`), so
+`available + evictable + protected + session_held + uncached` falls 128 short
+of `total` forever. The 0.98 stage-13 window proved it: pools built to
+`total=263168`, the scheduler entered its event loop, and the first idle tick
+crashed with `pool memory leak detected! [full] total=263168, available=263040`.
+The reservation is by design; the leak report was false. `BaseTokenToKVPoolAllocator`
+gains `reserved_size()` (default 0), `KVarNPageAllocator` reports the dummy page,
+and the invariant becomes
+`available + evictable + protected + session_held + uncached + reserved == total`
+with `reserved` printed in every pool message. See
+`kvarn-reserved-accounting-cpu.json`: 22 CPU cases ran the real allocator
+(free-list arithmetic, reservation, `clear`, lifetime-free guard) and the real
+checker (hybrid-SSM idle path, busy path, stock-allocator non-regression,
+pre-fix negative control) inside the pinned stage-13 runtime image. This is
+accounting only: no tensor math, kernel, GPU startup or capacity claim.
+
+## Query-tiled packed attention kernel
+
+Stage 15 repairs the measured prefill defect: the kernel profile showed
+`_packed_attention_split` alone carried the depth-linear chunk-time slope
+(63% of GPU busy at ≤2048 tokens, one program per query per head, fp32
+multiply-reduces, per-query-head re-dequantization). The retile serves all
+microbatch query rows and one KV head's grouped heads per program, dequantizes
+each packed page once, loads page masks once, and computes scores/updates with
+tensor-core dots (fp32 accumulate, tf32 inputs). Kernel policy and every
+reviewed envelope (workspace, store pipeline, microbatch loop) are unchanged.
+Validation is the GPU parity fixture `qualification/kvarn-prefill-tile-parity.py`
+against the unchanged PyTorch oracle plus a measured re-profile of the prefill
+slope; neither has run yet at this writing. No capacity or quality claim.

@@ -1,0 +1,15 @@
+{
+  "status": "passed-cpu-only",
+  "cases": 42,
+  "allowed_lora_default_combinations": 4,
+  "rejected_flag_cases": 16,
+  "rejected_path_cases": 7,
+  "unchanged_generic_guard_cases": 15,
+  "limits": "Actual constructor ran with real config classes and mocked process context; allowed cases stop at next unchanged loader guard, before tensors/model loading. No GPU/model startup/numerics tested.",
+  "patch_sha256": "e7ea328bbb5619f916d65023179e990b59a1d5deacf7aeb90be1a1053b7db630",
+  "runtime_image": "sha256:494fe39c7746a911e87ed59f88ea2c2955f77f491fc46df1002b56202cc2a51b",
+  "before_qwen3_5_sha256": "fd17feb9e18b22cf11101ccbafb1edcdff2e66eeaf220f588b263f25e58ef038",
+  "after_qwen3_5_sha256": "a3bd78035925dd0c0e2fcaa38f80f6770b9a3fd8c31d522249a611f31d60cac1",
+  "cpu_script_sha256": "7b13492da6d35370522751d9c1787eb2c37691b503c7a6cad3adb8bb081abdcb",
+  "prior_eleven_patch_bytes_unchanged": true
+}

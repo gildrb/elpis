@@ -1,0 +1,16 @@
+{
+  "schema_version": 1,
+  "classification": "PACKED_KVARN_KV_ONCE_32768_STILL_REGRESSION",
+  "candidate_image": "sha256:efb5d7349dbd3af74f3941e89c1ee95d6521c5b26567a75e41506d05e4416952",
+  "candidate_image_alias": "qwen-inference:refactor-stage17",
+  "context_length": 262144,
+  "input_tokens": 32768,
+  "output_tokens": 128,
+  "elapsed_seconds": 169.36,
+  "num_retractions": 0,
+  "versus_stage16_32768_s": 105.5,
+  "ratio": 1.61,
+  "decision": "do not ship; stage16 a91d9c4e remains the native candidate",
+  "cause": "HBM softmax-state traffic still dominates at 32k; BLOCK=16 lost dequant hoist",
+  "baseline_restored": true
+}

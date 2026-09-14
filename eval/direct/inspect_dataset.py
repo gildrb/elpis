@@ -27,6 +27,7 @@ for config in configs:
     json.dump(
         {
             "environment": config["env_id"],
+            "api_base_url": config["api_base_url"],
             "name": config["name"],
             "environment_type": type(env).__name__,
             "examples": len(dataset),

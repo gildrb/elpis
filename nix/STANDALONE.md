@@ -84,3 +84,8 @@ Do not activate this adapter over the occupied baseline. Stop the old service
 through its original configuration only after approval and preserve its rollback
 generation, image and artifacts. Static Nix validation is not activation or a
 cold-boot, hang-recovery, suspend/resume, capacity or model-quality result.
+
+The optional `workstation.qwenInference.memFractionStatic` accepts only strings
+`"0.94"` through `"0.98"` in 0.01 steps; its default `null` uses Docker's canonical
+0.94 setting. The foreground Nix adapter also inherits `QWEN_MEM_FRACTION_STATIC`.
+These are explicit unqualified memory trials, not a default promotion.

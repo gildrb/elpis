@@ -1,0 +1,123 @@
+{
+  "schema_version": 1,
+  "scope": "cpu_packed_embedding_module_forward_vs_dense_artifact_all_rows",
+  "checked_at": "2026-09-13",
+  "objective": "PackedW8Embedding runtime module forward must reproduce the dense artifact embedding rows bit-exactly for the complete vocabulary",
+  "module": "sglang.srt.layers.packed_w8_embedding.PackedW8Embedding",
+  "fixtures": {
+    "packed": {
+      "path_role": "attempt source set (packed representation)",
+      "index_total_size": 18603127520,
+      "tensors": [
+        "model.language_model.embed_tokens.weight_packed",
+        "model.language_model.embed_tokens.weight_scale",
+        "model.language_model.embed_tokens.weight_shape"
+      ],
+      "inventory": "source.sha256",
+      "files": 17
+    },
+    "dense": {
+      "path_role": "attempt conversion artifact (dense reference)",
+      "index_total_size": 17043054464,
+      "tensors": [
+        "model.language_model.embed_tokens.weight"
+      ],
+      "inventory": "artifact.sha256",
+      "files": 17
+    }
+  },
+  "comparison": {
+    "rows_total": 248320,
+    "chunk_rows": 512,
+    "dtype_view": "int16 bit pattern",
+    "mismatched_chunks_required": 0,
+    "packed_flow_sha256": "b6814ffeeaaa533efb2d269f1be536e2e28e9845dc38160dcf5ebd89503e2350",
+    "dense_reference_sha256": "b6814ffeeaaa533efb2d269f1be536e2e28e9845dc38160dcf5ebd89503e2350",
+    "sha256_equal": true
+  },
+  "runs": [
+    {
+      "role": "initial rerun after the BF16-default fix (torch.set_default_dtype(bfloat16)); container invocation not retained",
+      "result": {
+        "schema_version": 1,
+        "status": "completed",
+        "rows_compared": 248320,
+        "mismatched_chunks": 0,
+        "bit_exact_int16": true,
+        "packed_flow_sha256": "b6814ffeeaaa533efb2d269f1be536e2e28e9845dc38160dcf5ebd89503e2350",
+        "dense_reference_sha256": "b6814ffeeaaa533efb2d269f1be536e2e28e9845dc38160dcf5ebd89503e2350",
+        "packed_index_total_size": 18603127520,
+        "dense_index_total_size": 17043054464,
+        "chunk_rows": 512,
+        "seconds": 20.789,
+        "scope": "CPU module forward vs dense artifact rows; no GPU/no model serving"
+      }
+    },
+    {
+      "role": "provenance-captured reproduction",
+      "runtime_image": "sha256:880b09a2cb697977eae8cbc3ec452a573d9c03b65bd38e2493ff66fc9820c0ea",
+      "image_alias": "qwen-inference:refactor-stage12",
+      "container_invocation": [
+        "docker",
+        "run",
+        "--rm",
+        "--pull",
+        "never",
+        "--network",
+        "none",
+        "--read-only",
+        "--cap-drop",
+        "ALL",
+        "--security-opt",
+        "no-new-privileges:true",
+        "--cpus",
+        "4",
+        "--memory",
+        "32g",
+        "--memory-swap",
+        "32g",
+        "-e",
+        "NVIDIA_VISIBLE_DEVICES=void",
+        "-e",
+        "CUDA_VISIBLE_DEVICES=",
+        "-e",
+        "PYTHONDONTWRITEBYTECODE=1",
+        "--tmpfs",
+        "/tmp:rw,noexec,nosuid,size=1g",
+        "--entrypoint",
+        "python3",
+        "-v",
+        "/tmp/inference-packed-forward-proof-350c46bc/run_forward_check.py:/check/run_forward_check.py:ro",
+        "-v",
+        "/tmp/inference-full-reproduction-vz5z4cf0/attempt/source:/packed:ro",
+        "-v",
+        "/tmp/inference-full-reproduction-vz5z4cf0/attempt/conversion/artifact:/dense:ro",
+        "-v",
+        "/tmp/inference-packed-forward-proof-350c46bc/out:/out:rw",
+        "-v",
+        "/tmp/inference-packed-forward-proof-350c46bc/cache:/cache:rw",
+        "sha256:880b09a2cb697977eae8cbc3ec452a573d9c03b65bd38e2493ff66fc9820c0ea",
+        "/check/run_forward_check.py"
+      ],
+      "network": "none",
+      "gpu": "none (NVIDIA_VISIBLE_DEVICES=void, CUDA_VISIBLE_DEVICES empty)",
+      "result": {
+        "schema_version": 1,
+        "status": "completed",
+        "rows_compared": 248320,
+        "mismatched_chunks": 0,
+        "bit_exact_int16": true,
+        "packed_flow_sha256": "b6814ffeeaaa533efb2d269f1be536e2e28e9845dc38160dcf5ebd89503e2350",
+        "dense_reference_sha256": "b6814ffeeaaa533efb2d269f1be536e2e28e9845dc38160dcf5ebd89503e2350",
+        "packed_index_total_size": 18603127520,
+        "dense_index_total_size": 17043054464,
+        "chunk_rows": 512,
+        "seconds": 9.802,
+        "scope": "CPU module forward vs dense artifact rows; no GPU/no model serving"
+      }
+    }
+  ],
+  "agreement": "both runs completed with zero mismatched chunks over all 248320 rows and identical packed-flow/dense-reference SHA256 values",
+  "boundary": "CPU module-forward arithmetic proof only: no GPU, no model serving, no sampler, no quality claim; it complements the conversion numerical proof in embedding-validation.json",
+  "producer_script": "packed-forward-check.py"
+}

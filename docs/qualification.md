@@ -53,7 +53,7 @@ space inside the total context, plus engine-required accounting overhead.
 | 196608 | — | — | — | — | Not run |
 | 229376 | — | — | — | — | Not run |
 | 245760 | — | — | — | — | Not qualified; earlier startup failure |
-| 262144 | — | — | — | — | FP8 pool68004; no deep request |
+| 262144 | — | — | — | — | FP8 pool68004; packed KVarN 0.94 profile-rejected (211328<263168); 0.98 pool cap passed but hybrid wiring failed; no deep request |
 
 A row passes only after startup, near-depth request acceptance, completed
 prefill, meaningful subsequent output, measured VRAM safety, finite numerics
@@ -87,7 +87,7 @@ environments for capability; file-search tasks measure a different workload.
 [The second window](../bench/results/refactor-kvarn-startup.json) expired before
 candidate launch because the agent resumed after the independent recovery
 deadline. The original service was restored and passed authenticated health,
-model and short-completion checks. **No KVarN GPU measurement exists.** This is
+model and short-completion checks. **No KVarN GPU measurement was made in that window.** This is
 not an allocation failure, startup failure or capacity result for KVarN. No
 further GPU trial was made in this run.
 
@@ -106,6 +106,60 @@ blocked: the ordinary worker does not yet check native sticky error status befor
 publishing results. Do not remove that guard merely to obtain a comparison.
 Target-only FP8/BF16 controls are available, but a different KV policy is a
 confounded comparison and must be labeled as such.
+
+## Packed trial exposed a launcher defect
+
+[The first packed-path GPU trial](../bench/results/packed-kvarn-262144.json)
+used image `8a1eeb69…` but omitted the packed embedding activation flag. The
+loader skipped the packed embedding parameters and allocated a dense-sized
+embedding. It then rejected requested pool263168 against profiled139520.
+**This is not a valid packed-model capacity result.** No request or capability
+score was produced. The scheduler's explicit process-tree termination must not
+be mislabeled as a CUDA OOM; Docker reported `OOMKilled=false`.
+
+The correction must bind the explicit representation to its loader flag,
+`safetensors` load format, BF16 dtype and DFlash2 requirement. File hashing alone
+does not prove that the intended model-loading branch was selected. Corrected
+images need separate runtime qualification; the old image is retained for evidence.
+
+The next separate experimental patch, `packed-embedding-lora-defaults.patch`,
+corrects upstream's disabled LoRA defaults (`None`) without enabling LoRA. Only
+identity `None` or `False` is accepted for the two LoRA flags; any supplied paths,
+true values or invalid types are rejected. All other guards remain unchanged.
+Forty-two CPU constructor checks passed; the complete twelve-stage series applies
+to the pinned source. This is compatibility evidence, not a GPU loader pass.
+
+## Corrected packed image: first GPU admission result
+
+The corrected twelve-patch image `880b09a2…` binds the packed representation to
+its loader flag, `safetensors`, BF16 dtype and DFlash2, accepts only genuinely
+disabled LoRA defaults, and adds a bounded 0.94–0.98 memory-fraction control.
+Its CPU boundary and constructor checks passed. A first corrected-window attempt
+was cancelled by the wall-clock guard before anything was stopped; the baseline
+never went down.
+
+[The 0.94 admission window](../bench/results/packed-kvarn-094-admission.json)
+then loaded the packed target for real: the gate was bound, no loader skip
+warning appeared, and the target/draft weights took 14.75/1.22 GB. The KVarN
+profiler backed only **211328 tokens** against the requested 263168 pool cap,
+and the scheduler refused to advertise an unbacked context length. This is a
+valid packed-load startup rejection, not a capacity result: no readiness,
+VRAM-at-ready, deep request or quality result exists. The conditional 0.98
+retry was not taken because under seven minutes remained in the window; it runs
+in a separate window with the same image and protocol. The baseline was
+restored and re-authenticated.
+
+[The 0.98 admission window](../bench/results/packed-kvarn-098-admission.json)
+then passed the strict pool-cap check for the first time: no profile rejection
+occurred, the Mamba cache and both KV pools were allocated, and 1.09 GB
+remained available. Startup still failed before API readiness, now at
+attention-backend wiring: upstream's `HybridLinearAttnBackend` reads
+`token_to_kv_pool`, `req_to_token_pool` and `kv_index_translator` from its
+full-attention child, but the experimental `KVarNAttnBackend` constructor never
+set them. This is a source-level integration gap in the patch chain, not a
+memory-capacity result. **No admission, readiness or VRAM evidence exists**;
+the deep-request probe stays deferred. The fix must ship as a new patch stage
+with a new image identity and its own CPU checks.
 
 ## Known blockers
 

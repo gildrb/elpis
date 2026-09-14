@@ -28,6 +28,11 @@ in {
       default = false;
       description = "Explicitly permit the unqualified 262144-token candidate.";
     };
+    memFractionStatic = lib.mkOption {
+      type = lib.types.nullOr (lib.types.enum [ "0.94" "0.95" "0.96" "0.97" "0.98" ]);
+      default = null;
+      description = "Optional unqualified static-memory control; null uses the canonical Docker default.";
+    };
     image = lib.mkOption {
       type = lib.types.str;
       default = "qwen-inference:local";
@@ -49,7 +54,8 @@ in {
           "QWEN_PORT=${toString cfg.port}"
           "QWEN_IMAGE=${cfg.image}"
           "QWEN_ALLOW_UNQUALIFIED=${if cfg.allowUnqualified then "1" else "0"}"
-        ];
+        ] ++ lib.optional (cfg.memFractionStatic != null)
+          "QWEN_MEM_FRACTION_STATIC=${cfg.memFractionStatic}";
         ExecStartPre = lib.optional (cfg.requiredMountPoint != null)
           "${pkgs.util-linux}/bin/mountpoint --quiet -- ${lib.escapeShellArg cfg.requiredMountPoint}";
         ExecStart = "${command} up --detach --no-build --pull never --wait --wait-timeout 1200";

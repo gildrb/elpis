@@ -1,0 +1,13 @@
+{
+  "schema_version": 1,
+  "classification": "PACKED_KVARN_KV_ONCE_REGRESSION_NOT_SHIPPED",
+  "candidate_image": "sha256:efb5d7349dbd3af74f3941e89c1ee95d6521c5b26567a75e41506d05e4416952",
+  "patch": "patches/kvarn-prefill-kv-once.patch",
+  "parity": "passed (BLOCK=16 after SMEM 102400>101376 at BLOCK=32)",
+  "8192_wall_s": 41.19,
+  "versus_stage16_8192_wall_s": 35.01,
+  "split_ms": 9572.2,
+  "versus_stage16_split_ms": 5610.2,
+  "decision": "do not use as serving recipe; stage16 a91d9c4e remains the measured candidate",
+  "cause": "HBM running-acc traffic plus BLOCK=16 SMEM fit lost the dequant hoist; chunk8 split mean 2104→3766 us"
+}

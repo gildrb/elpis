@@ -1,0 +1,61 @@
+{
+  "schema_version": 1,
+  "classification": "C1_OFFICIAL_SGLANG_BENCHMARK_SERVING_FP8_BASELINE",
+  "module": "python3 -m sglang.benchmark.serving",
+  "backend": "sglang",
+  "service": "qwen-inference.service live baseline",
+  "context_length": 65536,
+  "sampling": {
+    "temperature": 0,
+    "disable_ignore_eos": true,
+    "enable_thinking": false,
+    "seed": 20260913,
+    "max_concurrency": 1,
+    "num_prompts": 8,
+    "random_output_len": 1024,
+    "random_range_ratio": 1,
+    "tokenize_prompt": true,
+    "flush_cache": true,
+    "dataset": "random ShareGPT_V3 sha256 35f0e213ce091ed9b9af2a1f0755e9d39f9ccec34ab281cd4ca60d70f6479ba4"
+  },
+  "depths": {
+    "1024": {
+      "completed": 8,
+      "duration_s": 34.74,
+      "input_tok_s": 235.78,
+      "output_tok_s": 218.86,
+      "mean_ttft_ms": 843.61,
+      "median_tpot_ms": 3.54,
+      "accept_length": 6.05,
+      "jsonl": "c1-1024-baseline.jsonl"
+    },
+    "8192": {
+      "completed": 8,
+      "duration_s": 89.16,
+      "input_tok_s": 735.03,
+      "output_tok_s": 88.63,
+      "mean_ttft_ms": 6526.20,
+      "median_tpot_ms": 4.30,
+      "accept_length": 6.10,
+      "jsonl": "c1-8192-baseline.jsonl"
+    },
+    "32768": {
+      "completed": 8,
+      "duration_s": 296.22,
+      "input_tok_s": 884.98,
+      "output_tok_s": 23.77,
+      "mean_ttft_ms": 29372.45,
+      "median_tpot_ms": 4.74,
+      "accept_length": 6.25,
+      "jsonl": "c1-32768-baseline.jsonl"
+    }
+  },
+  "not_attempted": {
+    "65536": "65536 input + 1024 output + 2 reserve exceeds 64k baseline context; not silently clamped",
+    "131072": "exceeds 64k baseline",
+    "196608": "exceeds 64k baseline",
+    "245760": "exceeds 64k baseline",
+    "261118": "exceeds 64k baseline",
+    "kvarn_stage16": "not the live service; candidate windows restore baseline"
+  }
+}

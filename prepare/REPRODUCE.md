@@ -159,3 +159,12 @@ full dense and packed verifier passes with the final extended verifier's SHA256.
 Both branches authenticated all 17 target and 2 draft files. Scoped verifier
 typing and formatting passed; Ruff retained 37 existing diagnostics versus 38
 before this extension, with no newly introduced rule counts.
+
+[packed-forward-validation.json](packed-forward-validation.json) records the
+module-level complement: the runtime `PackedW8Embedding` module, loaded from the
+packed tensors in `source/`, reproduced all 248,320 dense artifact rows
+bit-exactly in two independent CPU runs; packed-flow and dense-reference
+SHA256 are identical. The second run's exact container invocation is recorded.
+It used the frozen twelve-patch stage12 image with no GPU and no network. This
+is CPU unpacking-arithmetic evidence only: no GPU forward, no serving, and no
+sampler or quality claim.

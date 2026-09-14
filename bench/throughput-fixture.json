@@ -1,0 +1,91 @@
+{
+  "schema_version": 1,
+  "status": "cpu_fixture_generation_only_no_requests",
+  "dataset": {
+    "repo": "anon8231489123/ShareGPT_Vicuna_unfiltered",
+    "revision": "192ab2185289094fc556ec8ce5ce1e8e587154ca",
+    "file": "ShareGPT_V3_unfiltered_cleaned_split.json",
+    "sha256": "35f0e213ce091ed9b9af2a1f0755e9d39f9ccec34ab281cd4ca60d70f6479ba4",
+    "bytes": 672837942,
+    "evidence": "Full672837942-byte pinned download verified against public LFS SHA256 on2026-09-13; no data rewrite.",
+    "sampling": "official random dataset, token IDs, seed20260913, range_ratio1; no chat template"
+  },
+  "dataset_download_verified_sha256": "35f0e213ce091ed9b9af2a1f0755e9d39f9ccec34ab281cd4ca60d70f6479ba4",
+  "generator_image": "sha256:8a1eeb69ca67af0d54688cf11b46700448f15cde5395f013b0b5484244f1dfb7",
+  "engine_base_commit": "0bcd822377da7b5718e674eaf9c870d349424dd1",
+  "generator_api": "sglang.benchmark.datasets.get_dataset",
+  "generator_script_sha256": "246065e0728c62b3c137e4b407278942ea151f93aa4b3f86895970c37ab62171",
+  "settings": {
+    "dataset_name": "random",
+    "tokenize_prompt": true,
+    "random_range_ratio": 1,
+    "num_prompts": 8,
+    "seed_python_and_numpy_per_depth": 20260913,
+    "chat_template": false,
+    "output_tokens_each": 1024
+  },
+  "serialization": "UTF8 JSONL, compact separators, each row has input_ids then output_tokens, newline after every row",
+  "files": [
+    {
+      "input_tokens": 1024,
+      "requests": 8,
+      "output_tokens_each": 1024,
+      "file": "depth-1024.jsonl",
+      "sha256": "641f6ca218c2a30ce3fed8b5f55696274fd80b3a59d5ff252c0b3de172a2bf42"
+    },
+    {
+      "input_tokens": 8192,
+      "requests": 8,
+      "output_tokens_each": 1024,
+      "file": "depth-8192.jsonl",
+      "sha256": "983f0e2dbf10f69a91471037b5e66bca08e330175ac35ca4f6bdc686ed5bc779"
+    },
+    {
+      "input_tokens": 32768,
+      "requests": 8,
+      "output_tokens_each": 1024,
+      "file": "depth-32768.jsonl",
+      "sha256": "db8a9ecb1680dde75d443075654295da32e872c7a0fe9e54a02ab8d69c53bfd7"
+    },
+    {
+      "input_tokens": 65536,
+      "requests": 8,
+      "output_tokens_each": 1024,
+      "file": "depth-65536.jsonl",
+      "sha256": "37802a967b866016a133d7a90698a2a041999a99da6aa5311f48aa956c8faf64"
+    },
+    {
+      "input_tokens": 131072,
+      "requests": 8,
+      "output_tokens_each": 1024,
+      "file": "depth-131072.jsonl",
+      "sha256": "1f08215968b1ce8c83535d21bfde2d1185886f7ac400e85d5f1ac77db8f2a076"
+    },
+    {
+      "input_tokens": 196608,
+      "requests": 8,
+      "output_tokens_each": 1024,
+      "file": "depth-196608.jsonl",
+      "sha256": "b5cefd819ee8c2c668ba137334cecd424ae04072adb6e13afdffb6fb76f087ea"
+    },
+    {
+      "input_tokens": 245760,
+      "requests": 8,
+      "output_tokens_each": 1024,
+      "file": "depth-245760.jsonl",
+      "sha256": "3b2c2296a0a43c8d2c19599e6fc2a91dd1fd740c009a290e08a7154eb35aad19"
+    },
+    {
+      "input_tokens": 261118,
+      "requests": 8,
+      "output_tokens_each": 1024,
+      "file": "depth-261118.jsonl",
+      "sha256": "a200e2e31c19acde13c6f322f5ca2b43054147416570a825b5808cae83b9ece5"
+    }
+  ],
+  "limitations": [
+    "Native generator snapshot, not captured HTTP payloads. No model requests or performance measurements.",
+    "Raw public dataset and generated IDs remain outside Git; regenerate with pinned data/tokenizer/image and these settings.",
+    "Generator image has a known packed-loader defect unrelated to CPU dataset generation."
+  ]
+}

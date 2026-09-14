@@ -1,0 +1,842 @@
+{
+  "schema": 1,
+  "recorded_at_utc": "2026-09-13T12:29:44.292152+00:00",
+  "status": "bounded_native_upper_current_bucket_sample_fits196608_budget_not_runtime_or_whole_pool_qualification",
+  "native_args": {
+    "environment": "graphwalks",
+    "split": "train",
+    "scoring": "exact",
+    "problem_types": [
+      "bfs",
+      "parents"
+    ],
+    "prompt_chars_filter": "131073-262144",
+    "shuffle": false,
+    "seed": 0,
+    "environment_num_examples": -1,
+    "get_eval_dataset_n_per_type": 8
+  },
+  "source_counts_before_tokenization": {
+    "source_buckets": [
+      {
+        "problem_type": "bfs",
+        "buckets": [
+          {
+            "lower": 0,
+            "upper": 65536,
+            "rows": 250,
+            "min": 2650,
+            "max": 55626
+          },
+          {
+            "lower": 65537,
+            "upper": 131072,
+            "rows": 50,
+            "min": 110150,
+            "max": 110251
+          },
+          {
+            "lower": 131073,
+            "upper": 262144,
+            "rows": 50,
+            "min": 219425,
+            "max": 219451
+          },
+          {
+            "lower": 262145,
+            "upper": 524288,
+            "rows": 100,
+            "min": 437425,
+            "max": 437501
+          },
+          {
+            "lower": 524289,
+            "upper": 1048576,
+            "rows": 0,
+            "min": null,
+            "max": null
+          },
+          {
+            "lower": 1048577,
+            "upper": 2097152,
+            "rows": 100,
+            "min": 1748150,
+            "max": 1748226
+          },
+          {
+            "lower": 2097153,
+            "upper": 4194304,
+            "rows": 0,
+            "min": null,
+            "max": null
+          },
+          {
+            "lower": 4194305,
+            "upper": 100000000,
+            "rows": 0,
+            "min": null,
+            "max": null
+          }
+        ]
+      },
+      {
+        "problem_type": "parents",
+        "buckets": [
+          {
+            "lower": 0,
+            "upper": 65536,
+            "rows": 300,
+            "min": 2638,
+            "max": 55588
+          },
+          {
+            "lower": 65537,
+            "upper": 131072,
+            "rows": 50,
+            "min": 110163,
+            "max": 110238
+          },
+          {
+            "lower": 131073,
+            "upper": 262144,
+            "rows": 50,
+            "min": 219413,
+            "max": 219438
+          },
+          {
+            "lower": 262145,
+            "upper": 524288,
+            "rows": 100,
+            "min": 437413,
+            "max": 437488
+          },
+          {
+            "lower": 524289,
+            "upper": 1048576,
+            "rows": 0,
+            "min": null,
+            "max": null
+          },
+          {
+            "lower": 1048577,
+            "upper": 2097152,
+            "rows": 100,
+            "min": 1748138,
+            "max": 1748213
+          },
+          {
+            "lower": 2097153,
+            "upper": 4194304,
+            "rows": 0,
+            "min": null,
+            "max": null
+          },
+          {
+            "lower": 4194305,
+            "upper": 100000000,
+            "rows": 0,
+            "min": null,
+            "max": null
+          }
+        ]
+      }
+    ],
+    "native_next_bucket": [
+      {
+        "problem_type": "bfs",
+        "filter": "131073-262144",
+        "rows": 50,
+        "actual_prompt_characters_min": 219563,
+        "actual_prompt_characters_max": 219589
+      },
+      {
+        "problem_type": "parents",
+        "filter": "131073-262144",
+        "rows": 50,
+        "actual_prompt_characters_min": 219484,
+        "actual_prompt_characters_max": 219509
+      }
+    ],
+    "tokenization_performed": false,
+    "model_requests_sent": 0
+  },
+  "summary": [
+    {
+      "problem_type": "bfs",
+      "sample_rows": 8,
+      "native_population_rows": 50,
+      "untokenized_rows": 42,
+      "selected_native_indices": [
+        0,
+        1,
+        2,
+        3,
+        4,
+        5,
+        6,
+        7
+      ],
+      "templated_input_min": 178769,
+      "templated_input_max": 179103,
+      "budget_total_min": 186963,
+      "budget_total_max": 187297
+    },
+    {
+      "problem_type": "parents",
+      "sample_rows": 8,
+      "native_population_rows": 50,
+      "untokenized_rows": 42,
+      "selected_native_indices": [
+        0,
+        1,
+        2,
+        3,
+        4,
+        5,
+        6,
+        7
+      ],
+      "templated_input_min": 178672,
+      "templated_input_max": 179016,
+      "budget_total_min": 186866,
+      "budget_total_max": 187210
+    }
+  ],
+  "sample_measurement": {
+    "records": [
+      {
+        "candidate_name": "graphwalks-upper-current-native-char-bucket",
+        "problem_type": "bfs",
+        "native_args": {
+          "split": "train",
+          "scoring": "exact",
+          "problem_type": "bfs",
+          "prompt_chars_filter": "131073-262144",
+          "shuffle": false,
+          "seed": 0,
+          "num_examples": -1
+        },
+        "selected_index": 0,
+        "example_id": 0,
+        "messages_sha256": "3ae0dc3fe105516e9e5644b36ea161331e72c91f881b060e9b8ae2c75d80cac7",
+        "raw_user_characters": 219563,
+        "raw_user_tokens": 178719,
+        "templated_input_tokens": 178769,
+        "template_token_delta": 50,
+        "output_budget_tokens": 8192,
+        "engine_reserve_tokens": 2,
+        "budget_total_tokens": 186963,
+        "rendered_prompt_sha256": "b08b1239b71587a3d49efe00f0e30a8d1bc9134cb4530b114cc09e1abbde9f09",
+        "token_ids_sha256": "be813e6be2768a04bad55cad960ba796bfaf140e09a481ae781cad15bbfc98c3",
+        "native_template_and_server_callable_ids_identical": true,
+        "fits_caps": {
+          "131072": false,
+          "163840": false,
+          "196608": true,
+          "229376": true,
+          "245760": true,
+          "262144": true
+        }
+      },
+      {
+        "candidate_name": "graphwalks-upper-current-native-char-bucket",
+        "problem_type": "bfs",
+        "native_args": {
+          "split": "train",
+          "scoring": "exact",
+          "problem_type": "bfs",
+          "prompt_chars_filter": "131073-262144",
+          "shuffle": false,
+          "seed": 0,
+          "num_examples": -1
+        },
+        "selected_index": 1,
+        "example_id": 1,
+        "messages_sha256": "9ce87d5b4e33a0e6571c7479dd0e4bb28bc6bab70ba303123f017bed221e9fa1",
+        "raw_user_characters": 219563,
+        "raw_user_tokens": 178771,
+        "templated_input_tokens": 178821,
+        "template_token_delta": 50,
+        "output_budget_tokens": 8192,
+        "engine_reserve_tokens": 2,
+        "budget_total_tokens": 187015,
+        "rendered_prompt_sha256": "08e7a50313f216d6e09c34b430e7bee2a431838ac340c5a3989caa1ff3f75dec",
+        "token_ids_sha256": "6532a8389743fb69ea7aadb0cf08cd262c47fe0322f9c1eb81a75b072e45f0c1",
+        "native_template_and_server_callable_ids_identical": true,
+        "fits_caps": {
+          "131072": false,
+          "163840": false,
+          "196608": true,
+          "229376": true,
+          "245760": true,
+          "262144": true
+        }
+      },
+      {
+        "candidate_name": "graphwalks-upper-current-native-char-bucket",
+        "problem_type": "bfs",
+        "native_args": {
+          "split": "train",
+          "scoring": "exact",
+          "problem_type": "bfs",
+          "prompt_chars_filter": "131073-262144",
+          "shuffle": false,
+          "seed": 0,
+          "num_examples": -1
+        },
+        "selected_index": 2,
+        "example_id": 2,
+        "messages_sha256": "b05fb917f40d02560778f1973c3a4699ae2847f9f2bd1e2a5a3f67bb49e6cc50",
+        "raw_user_characters": 219563,
+        "raw_user_tokens": 178864,
+        "templated_input_tokens": 178914,
+        "template_token_delta": 50,
+        "output_budget_tokens": 8192,
+        "engine_reserve_tokens": 2,
+        "budget_total_tokens": 187108,
+        "rendered_prompt_sha256": "e3d02989859ae0ab2d69fbef7b16f34f230b2b6d2d0232b8bfc74bf8bbbf0eb2",
+        "token_ids_sha256": "2a8abd2f8da601f24ca75570a799c270850b5253105cb6a2eb80d9667b0b0dbb",
+        "native_template_and_server_callable_ids_identical": true,
+        "fits_caps": {
+          "131072": false,
+          "163840": false,
+          "196608": true,
+          "229376": true,
+          "245760": true,
+          "262144": true
+        }
+      },
+      {
+        "candidate_name": "graphwalks-upper-current-native-char-bucket",
+        "problem_type": "bfs",
+        "native_args": {
+          "split": "train",
+          "scoring": "exact",
+          "problem_type": "bfs",
+          "prompt_chars_filter": "131073-262144",
+          "shuffle": false,
+          "seed": 0,
+          "num_examples": -1
+        },
+        "selected_index": 3,
+        "example_id": 3,
+        "messages_sha256": "5211ee8df50d8db869287e65e7d74284db5b19223ea19bb340f477fa9245d4a0",
+        "raw_user_characters": 219588,
+        "raw_user_tokens": 179053,
+        "templated_input_tokens": 179103,
+        "template_token_delta": 50,
+        "output_budget_tokens": 8192,
+        "engine_reserve_tokens": 2,
+        "budget_total_tokens": 187297,
+        "rendered_prompt_sha256": "36c2c686c55bce16594539f98e2bb109f3b9109bee29b3badca32f42803448c8",
+        "token_ids_sha256": "0fd0146648a9445a15d67649f3a5a9404b206bdd89fc583a2fd5a2b1c42f489b",
+        "native_template_and_server_callable_ids_identical": true,
+        "fits_caps": {
+          "131072": false,
+          "163840": false,
+          "196608": true,
+          "229376": true,
+          "245760": true,
+          "262144": true
+        }
+      },
+      {
+        "candidate_name": "graphwalks-upper-current-native-char-bucket",
+        "problem_type": "bfs",
+        "native_args": {
+          "split": "train",
+          "scoring": "exact",
+          "problem_type": "bfs",
+          "prompt_chars_filter": "131073-262144",
+          "shuffle": false,
+          "seed": 0,
+          "num_examples": -1
+        },
+        "selected_index": 4,
+        "example_id": 4,
+        "messages_sha256": "20df435127f290c70b75da63c63891785f62978f94ac0efec2210d6265384dde",
+        "raw_user_characters": 219563,
+        "raw_user_tokens": 178869,
+        "templated_input_tokens": 178919,
+        "template_token_delta": 50,
+        "output_budget_tokens": 8192,
+        "engine_reserve_tokens": 2,
+        "budget_total_tokens": 187113,
+        "rendered_prompt_sha256": "fb56f8b788ba1b83bd8b888aac82cc55b010db47b79684222a07f7f845213bee",
+        "token_ids_sha256": "0f0c1c44f05517288065c5b784a83893e6fb5f47923f93bf1ceaa6ee87b5b3bb",
+        "native_template_and_server_callable_ids_identical": true,
+        "fits_caps": {
+          "131072": false,
+          "163840": false,
+          "196608": true,
+          "229376": true,
+          "245760": true,
+          "262144": true
+        }
+      },
+      {
+        "candidate_name": "graphwalks-upper-current-native-char-bucket",
+        "problem_type": "bfs",
+        "native_args": {
+          "split": "train",
+          "scoring": "exact",
+          "problem_type": "bfs",
+          "prompt_chars_filter": "131073-262144",
+          "shuffle": false,
+          "seed": 0,
+          "num_examples": -1
+        },
+        "selected_index": 5,
+        "example_id": 5,
+        "messages_sha256": "5421e4f07531a8048184dbcb522abda9ffeaf4d7e3775048846e880471af2120",
+        "raw_user_characters": 219563,
+        "raw_user_tokens": 178781,
+        "templated_input_tokens": 178831,
+        "template_token_delta": 50,
+        "output_budget_tokens": 8192,
+        "engine_reserve_tokens": 2,
+        "budget_total_tokens": 187025,
+        "rendered_prompt_sha256": "ab3c42a86b8a457ffdf52bb29ed6863fbd880e7b3499a18f07a2d431e95ded5f",
+        "token_ids_sha256": "176ea45af39c2fb8ea805e92e07342fec75b24866e8d488e00ccc4d1e4bdfc16",
+        "native_template_and_server_callable_ids_identical": true,
+        "fits_caps": {
+          "131072": false,
+          "163840": false,
+          "196608": true,
+          "229376": true,
+          "245760": true,
+          "262144": true
+        }
+      },
+      {
+        "candidate_name": "graphwalks-upper-current-native-char-bucket",
+        "problem_type": "bfs",
+        "native_args": {
+          "split": "train",
+          "scoring": "exact",
+          "problem_type": "bfs",
+          "prompt_chars_filter": "131073-262144",
+          "shuffle": false,
+          "seed": 0,
+          "num_examples": -1
+        },
+        "selected_index": 6,
+        "example_id": 6,
+        "messages_sha256": "f7e0643923f20c7c31206dd035db6805962239948c9292fc7105afeab41a3bca",
+        "raw_user_characters": 219563,
+        "raw_user_tokens": 178857,
+        "templated_input_tokens": 178907,
+        "template_token_delta": 50,
+        "output_budget_tokens": 8192,
+        "engine_reserve_tokens": 2,
+        "budget_total_tokens": 187101,
+        "rendered_prompt_sha256": "5e028f2f77bcd870695f9c048f4faa60e02317e30dbe7d42218dc7af26f2df3e",
+        "token_ids_sha256": "44d57b826e1840d33ba1a535c8be51b55595ca57d8e9903b3414a3a9472068d2",
+        "native_template_and_server_callable_ids_identical": true,
+        "fits_caps": {
+          "131072": false,
+          "163840": false,
+          "196608": true,
+          "229376": true,
+          "245760": true,
+          "262144": true
+        }
+      },
+      {
+        "candidate_name": "graphwalks-upper-current-native-char-bucket",
+        "problem_type": "bfs",
+        "native_args": {
+          "split": "train",
+          "scoring": "exact",
+          "problem_type": "bfs",
+          "prompt_chars_filter": "131073-262144",
+          "shuffle": false,
+          "seed": 0,
+          "num_examples": -1
+        },
+        "selected_index": 7,
+        "example_id": 7,
+        "messages_sha256": "95ea13be5b5affaa7124ce9727543f132cc5833c6d589fc92467c90e8a7427e0",
+        "raw_user_characters": 219563,
+        "raw_user_tokens": 178901,
+        "templated_input_tokens": 178951,
+        "template_token_delta": 50,
+        "output_budget_tokens": 8192,
+        "engine_reserve_tokens": 2,
+        "budget_total_tokens": 187145,
+        "rendered_prompt_sha256": "ceb8e5022c2c3f6cb03b9d6be44224accf2d48c9a09eaadb92c176cf9dd0c9a1",
+        "token_ids_sha256": "25e18ad8f5530d9c329b34a882b64a6a978be0f0bf6b8cae4ad7e905a85ea590",
+        "native_template_and_server_callable_ids_identical": true,
+        "fits_caps": {
+          "131072": false,
+          "163840": false,
+          "196608": true,
+          "229376": true,
+          "245760": true,
+          "262144": true
+        }
+      },
+      {
+        "candidate_name": "graphwalks-upper-current-native-char-bucket",
+        "problem_type": "parents",
+        "native_args": {
+          "split": "train",
+          "scoring": "exact",
+          "problem_type": "parents",
+          "prompt_chars_filter": "131073-262144",
+          "shuffle": false,
+          "seed": 0,
+          "num_examples": -1
+        },
+        "selected_index": 0,
+        "example_id": 0,
+        "messages_sha256": "eb4dc0459c7280e24fdb58848b87bfe8fd11daad851d42bd0fef303379fe6fd5",
+        "raw_user_characters": 219484,
+        "raw_user_tokens": 178887,
+        "templated_input_tokens": 178937,
+        "template_token_delta": 50,
+        "output_budget_tokens": 8192,
+        "engine_reserve_tokens": 2,
+        "budget_total_tokens": 187131,
+        "rendered_prompt_sha256": "9e529ee609af27992659b0765f7e5624cbdf4a4bf5fdabc38f76b2b5703e62a2",
+        "token_ids_sha256": "39d940bd89001e8e7abb39c1517fdca50d99f83300becedb41a5f8cf0fb506c2",
+        "native_template_and_server_callable_ids_identical": true,
+        "fits_caps": {
+          "131072": false,
+          "163840": false,
+          "196608": true,
+          "229376": true,
+          "245760": true,
+          "262144": true
+        }
+      },
+      {
+        "candidate_name": "graphwalks-upper-current-native-char-bucket",
+        "problem_type": "parents",
+        "native_args": {
+          "split": "train",
+          "scoring": "exact",
+          "problem_type": "parents",
+          "prompt_chars_filter": "131073-262144",
+          "shuffle": false,
+          "seed": 0,
+          "num_examples": -1
+        },
+        "selected_index": 1,
+        "example_id": 1,
+        "messages_sha256": "2f604220fb7e8e5ea09d051ead1b2ab13323dc6228378a02128971fbc22d9636",
+        "raw_user_characters": 219484,
+        "raw_user_tokens": 178857,
+        "templated_input_tokens": 178907,
+        "template_token_delta": 50,
+        "output_budget_tokens": 8192,
+        "engine_reserve_tokens": 2,
+        "budget_total_tokens": 187101,
+        "rendered_prompt_sha256": "99c44dbc90f7b8e0492f1cd6925f10d0e7b902b7adc0f6257ad892856d00af68",
+        "token_ids_sha256": "8277c24a0f21ef9fceda96b9854e495b18af87bcf2f1932620409d9276147959",
+        "native_template_and_server_callable_ids_identical": true,
+        "fits_caps": {
+          "131072": false,
+          "163840": false,
+          "196608": true,
+          "229376": true,
+          "245760": true,
+          "262144": true
+        }
+      },
+      {
+        "candidate_name": "graphwalks-upper-current-native-char-bucket",
+        "problem_type": "parents",
+        "native_args": {
+          "split": "train",
+          "scoring": "exact",
+          "problem_type": "parents",
+          "prompt_chars_filter": "131073-262144",
+          "shuffle": false,
+          "seed": 0,
+          "num_examples": -1
+        },
+        "selected_index": 2,
+        "example_id": 2,
+        "messages_sha256": "3e13a0af617d025658a9dcb81ee0541f47ecfc32dbb88f5539154998de10439d",
+        "raw_user_characters": 219509,
+        "raw_user_tokens": 178634,
+        "templated_input_tokens": 178684,
+        "template_token_delta": 50,
+        "output_budget_tokens": 8192,
+        "engine_reserve_tokens": 2,
+        "budget_total_tokens": 186878,
+        "rendered_prompt_sha256": "0774a45216fc3c265e25df71382c2c5856a82bc27bfb73728cf2fcc4053f3faa",
+        "token_ids_sha256": "134825da39d9f93760323987c97620b9cd2828a77e087d12062a073df341b59e",
+        "native_template_and_server_callable_ids_identical": true,
+        "fits_caps": {
+          "131072": false,
+          "163840": false,
+          "196608": true,
+          "229376": true,
+          "245760": true,
+          "262144": true
+        }
+      },
+      {
+        "candidate_name": "graphwalks-upper-current-native-char-bucket",
+        "problem_type": "parents",
+        "native_args": {
+          "split": "train",
+          "scoring": "exact",
+          "problem_type": "parents",
+          "prompt_chars_filter": "131073-262144",
+          "shuffle": false,
+          "seed": 0,
+          "num_examples": -1
+        },
+        "selected_index": 3,
+        "example_id": 3,
+        "messages_sha256": "cc85a2228d81039ed68df42ca92251196d3c64e5bc207f92d105c5008f0b1c03",
+        "raw_user_characters": 219509,
+        "raw_user_tokens": 178924,
+        "templated_input_tokens": 178974,
+        "template_token_delta": 50,
+        "output_budget_tokens": 8192,
+        "engine_reserve_tokens": 2,
+        "budget_total_tokens": 187168,
+        "rendered_prompt_sha256": "cc4de8d4e26463a8a405f2426ca7c89d2d878e0f4bcb21cc9b24d025211ccd17",
+        "token_ids_sha256": "0a355992c0392dc46b7d87aa238884c7b8a917a32f5d4f152066c4ca7a287c58",
+        "native_template_and_server_callable_ids_identical": true,
+        "fits_caps": {
+          "131072": false,
+          "163840": false,
+          "196608": true,
+          "229376": true,
+          "245760": true,
+          "262144": true
+        }
+      },
+      {
+        "candidate_name": "graphwalks-upper-current-native-char-bucket",
+        "problem_type": "parents",
+        "native_args": {
+          "split": "train",
+          "scoring": "exact",
+          "problem_type": "parents",
+          "prompt_chars_filter": "131073-262144",
+          "shuffle": false,
+          "seed": 0,
+          "num_examples": -1
+        },
+        "selected_index": 4,
+        "example_id": 4,
+        "messages_sha256": "e680500c2fb642163b0b6c6456a5c34b56254d07a7d9d0e33b03d5fa62bbf4aa",
+        "raw_user_characters": 219484,
+        "raw_user_tokens": 178622,
+        "templated_input_tokens": 178672,
+        "template_token_delta": 50,
+        "output_budget_tokens": 8192,
+        "engine_reserve_tokens": 2,
+        "budget_total_tokens": 186866,
+        "rendered_prompt_sha256": "66ca714c35963f01a1cc83a4467e6e2147e2556459c75d32cbb492649b3d824a",
+        "token_ids_sha256": "2deacb56509356fbecf3edfc2743678f9580f7187d00a0bb8cff9f477bd5fc58",
+        "native_template_and_server_callable_ids_identical": true,
+        "fits_caps": {
+          "131072": false,
+          "163840": false,
+          "196608": true,
+          "229376": true,
+          "245760": true,
+          "262144": true
+        }
+      },
+      {
+        "candidate_name": "graphwalks-upper-current-native-char-bucket",
+        "problem_type": "parents",
+        "native_args": {
+          "split": "train",
+          "scoring": "exact",
+          "problem_type": "parents",
+          "prompt_chars_filter": "131073-262144",
+          "shuffle": false,
+          "seed": 0,
+          "num_examples": -1
+        },
+        "selected_index": 5,
+        "example_id": 5,
+        "messages_sha256": "9d5483e8f2fc10cfe3e7424c7d36eab3c96c310e1e80de4e458aefa42fc82409",
+        "raw_user_characters": 219484,
+        "raw_user_tokens": 178874,
+        "templated_input_tokens": 178924,
+        "template_token_delta": 50,
+        "output_budget_tokens": 8192,
+        "engine_reserve_tokens": 2,
+        "budget_total_tokens": 187118,
+        "rendered_prompt_sha256": "f7c8236681a1fd0a0a436a9212f3fd16e46c294cc471480aa78f8bdab3b7ceb7",
+        "token_ids_sha256": "244612d0c083a4b49501c13588798df5bb22709d64d774b64ebbce3526cd2250",
+        "native_template_and_server_callable_ids_identical": true,
+        "fits_caps": {
+          "131072": false,
+          "163840": false,
+          "196608": true,
+          "229376": true,
+          "245760": true,
+          "262144": true
+        }
+      },
+      {
+        "candidate_name": "graphwalks-upper-current-native-char-bucket",
+        "problem_type": "parents",
+        "native_args": {
+          "split": "train",
+          "scoring": "exact",
+          "problem_type": "parents",
+          "prompt_chars_filter": "131073-262144",
+          "shuffle": false,
+          "seed": 0,
+          "num_examples": -1
+        },
+        "selected_index": 6,
+        "example_id": 6,
+        "messages_sha256": "20eda7ec62f937a057a2fc4f47d9ef256bdb33ffde334f3f0167a68d72d550d9",
+        "raw_user_characters": 219509,
+        "raw_user_tokens": 178966,
+        "templated_input_tokens": 179016,
+        "template_token_delta": 50,
+        "output_budget_tokens": 8192,
+        "engine_reserve_tokens": 2,
+        "budget_total_tokens": 187210,
+        "rendered_prompt_sha256": "6fc524109ba0b3e86c67a3dfd3d8d45f931fdfccf2807dbe132078aae1a3f967",
+        "token_ids_sha256": "6afc491a9d5663e2f5b6eac44703a706f3aab18d0bb22831a588bdcd7d012511",
+        "native_template_and_server_callable_ids_identical": true,
+        "fits_caps": {
+          "131072": false,
+          "163840": false,
+          "196608": true,
+          "229376": true,
+          "245760": true,
+          "262144": true
+        }
+      },
+      {
+        "candidate_name": "graphwalks-upper-current-native-char-bucket",
+        "problem_type": "parents",
+        "native_args": {
+          "split": "train",
+          "scoring": "exact",
+          "problem_type": "parents",
+          "prompt_chars_filter": "131073-262144",
+          "shuffle": false,
+          "seed": 0,
+          "num_examples": -1
+        },
+        "selected_index": 7,
+        "example_id": 7,
+        "messages_sha256": "0ebc4758e8a8eae59d64f0875b185c9ea7ae440568c76b463c3d443f8a79e35c",
+        "raw_user_characters": 219509,
+        "raw_user_tokens": 178841,
+        "templated_input_tokens": 178891,
+        "template_token_delta": 50,
+        "output_budget_tokens": 8192,
+        "engine_reserve_tokens": 2,
+        "budget_total_tokens": 187085,
+        "rendered_prompt_sha256": "a1880bd47ee0972e81a649035b3d63ccee0df46988908417a4845e01745625e7",
+        "token_ids_sha256": "cd40d424c1a85a8416be76cca36a5644f96dfd4a954b2c2c72d37f166e326520",
+        "native_template_and_server_callable_ids_identical": true,
+        "fits_caps": {
+          "131072": false,
+          "163840": false,
+          "196608": true,
+          "229376": true,
+          "245760": true,
+          "262144": true
+        }
+      }
+    ],
+    "tokenizer_files_sha256": {
+      "chat_template.jinja": "c3cf9e34abf4f9e36c2d72165aa9c132d3e2a725b6c2586aaa3a8af9d7a81041",
+      "tokenizer.json": "06b9509352d2af50381ab2247e083b80d32d5c0aba91c272ca9ff729b6a0e523",
+      "tokenizer_config.json": "5f7aa0d810000c4a0940b35c8f16e56c3439260fccc13a321826ebc3ccf2501f",
+      "config.json": "cc9f3743b1b48b72a13f40cb917c76c222f0aa143ea52549d664052e607cddb9",
+      "generation_config.json": "1a450b75a54bf9e6ffdc681d8b764d453061dd2d271df33fcfed46949b67c3de",
+      "processor_config.json": "d89ef49ce9cd37fbf510158e13c1ef063d9286411c1ec9049932dbe0487143b1"
+    },
+    "transformers": "5.12.1",
+    "tokenizers": "0.22.2",
+    "tokenizer_class": "Qwen2Tokenizer",
+    "sample_limit": 16,
+    "native_population_size": 100,
+    "untokenized_population_rows": 84,
+    "model_requests_sent": 0
+  },
+  "cap_summary": [
+    {
+      "cap": 131072,
+      "sampled_rows_fit": 0,
+      "sampled_rows_exceed": 16
+    },
+    {
+      "cap": 163840,
+      "sampled_rows_fit": 0,
+      "sampled_rows_exceed": 16
+    },
+    {
+      "cap": 196608,
+      "sampled_rows_fit": 16,
+      "sampled_rows_exceed": 0
+    },
+    {
+      "cap": 229376,
+      "sampled_rows_fit": 16,
+      "sampled_rows_exceed": 0
+    },
+    {
+      "cap": 245760,
+      "sampled_rows_fit": 16,
+      "sampled_rows_exceed": 0
+    },
+    {
+      "cap": 262144,
+      "sampled_rows_fit": 16,
+      "sampled_rows_exceed": 0
+    }
+  ],
+  "execution": {
+    "image_id": "sha256:8a1eeb69ca67af0d54688cf11b46700448f15cde5395f013b0b5484244f1dfb7",
+    "cpus": 2,
+    "gpu": "none",
+    "network": "none",
+    "native_inspection_exit_code": 0,
+    "native_export_exit_code": 0,
+    "tokenization_exit_code": 0,
+    "owned_work_directory": "/tmp/inference-graphwalks-upper-current-budget-79z430zl",
+    "dependencies_changed": false,
+    "server_requests_sent": 0,
+    "upstream_scoring_executed": false,
+    "existing_profiles_modified": false
+  },
+  "hashes": {
+    "datasets_lock_sha256": "83a1ae74e1f094d1df852d50fda89e8fbf65d356f777c7adbb9005675a10d372",
+    "sources_lock_sha256": "e1c0b40a710f98f694a8e7e7b83a27a90bdf1eaf7555cbd54783f57e01d10c1e",
+    "graphwalks_uv_lock_sha256": "61121296bcfc0f9d7d74bb9bcbca9ceb57229eb7bfffa20c0fc106e6495e3460",
+    "diagnostics_sha256": {
+      "inspect_candidates.py": "6efa9754be88a59976133bc6684aab41212dd04e321c0bb8b4c2acfde9c8d000",
+      "export_candidates.py": "d42c76b3f5ee951776b0ce7a6bb0a9b9ad311db63056e8c9861bf289c504030d",
+      "count_candidates.py": "7f546aff8733c747b29b0e7728cfd48ca5417642ebdf226c668bf7123165cee9"
+    },
+    "tokenizer_files_sha256": {
+      "chat_template.jinja": "c3cf9e34abf4f9e36c2d72165aa9c132d3e2a725b6c2586aaa3a8af9d7a81041",
+      "tokenizer.json": "06b9509352d2af50381ab2247e083b80d32d5c0aba91c272ca9ff729b6a0e523",
+      "tokenizer_config.json": "5f7aa0d810000c4a0940b35c8f16e56c3439260fccc13a321826ebc3ccf2501f",
+      "config.json": "cc9f3743b1b48b72a13f40cb917c76c222f0aa143ea52549d664052e607cddb9",
+      "generation_config.json": "1a450b75a54bf9e6ffdc681d8b764d453061dd2d271df33fcfed46949b67c3de",
+      "processor_config.json": "d89ef49ce9cd37fbf510158e13c1ef063d9286411c1ec9049932dbe0487143b1"
+    },
+    "preserved35_row_proof_sha256": "f0e376430bb78da2e81dcd7ac41faa16bca7938601b9f6ecd2ca856e292f686a",
+    "preserved32_row_oversized_next_bucket_proof_sha256": "7a96635a2b82f89432ffd558ddaca814c89b57fb764679e0472df40af17fb469"
+  },
+  "limits": [
+    "Only16 first native post-filter rows measured out of100;84otherrows unqualified.",
+    "No task rewards computed; deterministic first8 per operation selected before scoring, not cherry-picked scores.",
+    "Measured~179Kinput sample is below requested200K\u2013253950band; it is not a native262144-token-quality result.",
+    "Fit means exact local templatedinput+8192output+2conventionalreserve<=cap, not observed engine acceptance or completed outputs.",
+    "All earlier oversizedMRCR/nextGraph samples remain preserved; none trimmed, replaced, or silently excluded.",
+    "No new runtime profile file created; any separately frozen quality profile needs explicit population/scope and endpoint approval."
+  ]
+}
