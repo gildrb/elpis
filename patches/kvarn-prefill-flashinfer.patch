@@ -1,7 +1,7 @@
 diff --git a/python/sglang/kernels/ops/kvarn/decode.py b/python/sglang/kernels/ops/kvarn/decode.py
 --- a/python/sglang/kernels/ops/kvarn/decode.py
 +++ b/python/sglang/kernels/ops/kvarn/decode.py
-@@ -326,6 +326,70 @@
+@@ -326,6 +326,71 @@
      return min(splits, (pages + per_split - 1) // per_split)
  
  
@@ -31,7 +31,8 @@ diff --git a/python/sglang/kernels/ops/kvarn/decode.py b/python/sglang/kernels/o
 +    partial, lse = fixedworkspace.native_partial_output, fixedworkspace.native_partial_lse
 +    kv_heads = view.layout.kv_heads
 +    group = heads // kv_heads
-+    rows = triton.next_power_of_2(queries)
++    tile = 4
++    rows = triton.next_power_of_2(tile * group)
 +    splits = partial.shape[2]
 +    o = KVarNOffsets.from_layout(view.layout)
 +    empty = upper <= lower
@@ -72,7 +73,7 @@ diff --git a/python/sglang/kernels/ops/kvarn/decode.py b/python/sglang/kernels/o
  def packed_attention_out(Q: torch.Tensor, view: KVarNLayerView,
                           request_page_table: torch.Tensor, query_request_ids: torch.Tensor,
                           lower_bounds: torch.Tensor, upper_bounds: torch.Tensor,
-@@ -392,3 +456,206 @@
+@@ -392,3 +457,206 @@
          OUTPUT_Q_STRIDE=output.stride(0), OUTPUT_H_STRIDE=output.stride(1),
          D=d, SPLITS=splits, N_SPLITS=n_splits, num_warps=4, num_stages=1)
      return output
