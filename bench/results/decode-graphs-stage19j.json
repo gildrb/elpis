@@ -1,0 +1,29 @@
+{
+  "schema_version": 1,
+  "classification": "DECODE_CUDA_GRAPHS_STAGE19J",
+  "candidate_image": "sha256:a2fe4995d4151f1892589b7231cf870d76d508cf0508f5361d8ee1c9af9ce033",
+  "candidate_image_alias": "qwen-inference:refactor-stage19j",
+  "series": "experimental 18 patches; flashinfer patch sha256 3bff1e8b12eec402a888c9d0a757a062b2146dc71713d601d43a77c889f66d59",
+  "mode": "kvarn graph qualification: decode FULL graphs bs[1], prefill graphs disabled, context 245760 pool 246784 (capture-qualified geometry per kvarn_hook)",
+  "captures": {
+    "target_verify_graph_s": 2.25,
+    "draft_verify_graph_s": 3.60,
+    "graph_mem_gb": 0.08
+  },
+  "fixes_required_for_capture": [
+    "remove .item() host sync from nosync verify path (invalidates capture)",
+    "mask broadcast (queries,1,1) not (queries,1) against (queries,heads,D)",
+    "padding-robust N=min(upper.numel(),queries); neutral fill covers padded rows"
+  ],
+  "measurements_live": {
+    "decode_client_tok_s": {"stage19g_eager": 10.5, "stage19j_graphs": 26.5},
+    "decode_client_tok_s_9k_ctx": 23.5,
+    "engine_gen_tok_s": "55-83 bursts at depth, cuda graph: True",
+    "accept_len": "2.0-3.67",
+    "ttft_s": {"short": 0.16, "9k_ctx": 6.4}
+  },
+  "context_note": "Graph mode runs 245760 native (capture-qualified rung); 262144 requires requalifying capture workspace sizing. Honest delta: -16384 tokens vs the eager rung.",
+  "versus_syv": "syv CTX=huge KVarN DFlash2: ~67 tok/s mixed tasks bare metal. Our engine bursts now reach 66-83 at depth with graphs; client-side 26.5 (detokenizer/stream overhead included) vs their harness numbers.",
+  "window": "live deploy via unit drop-in + graph override compose",
+  "baseline_restored": "n/a - stage19j is the live deployment"
+}

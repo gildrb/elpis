@@ -1,7 +1,7 @@
 diff --git a/python/sglang/kernels/ops/kvarn/decode.py b/python/sglang/kernels/ops/kvarn/decode.py
 --- a/python/sglang/kernels/ops/kvarn/decode.py
 +++ b/python/sglang/kernels/ops/kvarn/decode.py
-@@ -326,6 +326,71 @@
+@@ -326,6 +326,77 @@
      return min(splits, (pages + per_split - 1) // per_split)
  
  
@@ -34,11 +34,15 @@ diff --git a/python/sglang/kernels/ops/kvarn/decode.py b/python/sglang/kernels/o
 +    tile = 4
 +    rows = triton.next_power_of_2(tile * group)
 +    splits = partial.shape[2]
++    # Graph capture pads the token dimension beyond the metadata vectors;
++    # only the first n rows carry real bounds. Rows past n stay neutral
++    # (zero partial, -inf LSE) and are zeroed in the output below.
++    n = min(int(upper.numel()), queries)
 +    o = KVarNOffsets.from_layout(view.layout)
-+    empty = upper <= lower
-+    if bool(empty.all().item()):
-+        output.zero_()
-+        return output
++    # No host early-return here: a .item() sync invalidates CUDA graph
++    # capture. Empty rows produce all-(-inf) LSE, the reducer's zero
++    # weights yield zero output for them, and the backend zeroes the
++    # rows afterwards from a device mask.
 +    # Splits whose page range is empty for this request may leave their
 +    # partial/LSE slots unwritten; the workspace is allocated with empty()
 +    # so stale values would leak through the reducer. Initialize every slot
@@ -49,7 +53,7 @@ diff --git a/python/sglang/kernels/ops/kvarn/decode.py b/python/sglang/kernels/o
 +        Q, table, request_ids, lower, upper,
 +        view.packed, view.raw_keys, view.raw_values, view.page_to_tail_slot,
 +        view.committed_mask, view.provisional_mask, view.preview_ready, view.sink_pages,
-+        partial, lse, fixedworkspace.native_status, scale, queries,
++        partial, lse, fixedworkspace.native_status, scale, n,
 +        Q_STRIDE=Q.stride(0), Q_HEAD_STRIDE=Q.stride(1),
 +        TABLE_STRIDE=table.stride(0), TABLE_WIDTH=table.shape[1], REQUESTS=table.shape[0],
 +        PARTIAL_Q_STRIDE=partial.stride(0), PARTIAL_H_STRIDE=partial.stride(1),
@@ -66,14 +70,16 @@ diff --git a/python/sglang/kernels/ops/kvarn/decode.py b/python/sglang/kernels/o
 +        LSE_Q_STRIDE=lse.stride(0), LSE_H_STRIDE=lse.stride(1),
 +        OUTPUT_Q_STRIDE=output.stride(0), OUTPUT_H_STRIDE=output.stride(1),
 +        D=d, SPLITS=splits, N_SPLITS=splits, num_warps=4, num_stages=1)
-+    output[empty] = 0
++    row_live = torch.zeros((queries,), dtype=torch.bool, device=output.device)
++    row_live[:n] = upper[:n] > lower[:n]
++    output.mul_(torch.logical_not(row_live).to(output.dtype)[:, None, None])
 +    return output
 +
 +
  def packed_attention_out(Q: torch.Tensor, view: KVarNLayerView,
                           request_page_table: torch.Tensor, query_request_ids: torch.Tensor,
                           lower_bounds: torch.Tensor, upper_bounds: torch.Tensor,
-@@ -392,3 +457,206 @@
+@@ -392,3 +463,206 @@
          OUTPUT_Q_STRIDE=output.stride(0), OUTPUT_H_STRIDE=output.stride(1),
          D=d, SPLITS=splits, N_SPLITS=n_splits, num_warps=4, num_stages=1)
      return output
