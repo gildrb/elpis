@@ -254,3 +254,49 @@ stage16). Marlin measured at the fp16 ceiling (61-63 TFLOPs; cuBLAS 69;
 torch._int_mm int8 44-50 TOPS, slower); the only lever beyond this is the
 vLLM marlin-int8 W4A8 transplant. Benches unchanged.
 
+
+
+## Stage 21: attention correctness repairs (P0-A/P0-B)
+
+**Base:** stage20 series (through dflash-draft-vocab). **Class:** correctness
+repair of two source defects introduced by earlier stages; both invalidated the
+speed records measured on top of them.
+
+**P0-A — inverted live-row mask in `packed_attention_out_nosync`.** Stage19j
+(5da6aba) replaced the correct `output[empty] = 0` zeroing with
+`output.mul_(torch.logical_not(row_live)...)` while removing host syncs for
+CUDA-graph capture. The polarity is inverted: LIVE verify rows were multiplied
+by zero and dead/padded rows were kept. The mask ran on every eight-token
+target-verify step, so stage19j/19/20 generations came from a model whose
+full-attention layers contributed zero attention output; the live endpoint
+emitted incoherent text and the 26.5-155 tok/s records were measured on that
+corrupted path. Stage19g parity (rmse-identical, `output[empty] = 0`) was
+never re-run after the stage19j rewrite. Fix: `output.masked_fill_(~row_live,
+0)` — assignment semantics (a stale NaN workspace cannot leak through
+multiplication by zero), device-side only, CUDA-graph safe.
+
+**P0-B — un-normalized, wrong-base chunk merge in `packed_attention_flash`.**
+Since stage18 (09940c8), multi-chunk prefill (>64 pages = >8192 tokens)
+combined FlashInfer-normalized chunk outputs as `a*O1 + b*O2` without dividing
+by the merged softmax mass `a+b`, and computed weights with `torch.exp`
+although FlashInfer returns log2-domain LSE (`ptx_log2` in the kernel). Every
+context deeper than 8192 tokens was served with attention outputs scaled by up
+to the chunk count. The stage18 oracle check ran only at 8192 tokens (exactly
+one chunk), so the merge was never covered. Fix: exp2 weights, divide by
+`a+b` (zero-mass rows stay 0/-inf), log2-domain LSE bookkeeping.
+
+**Qualification:** `qualification/kvarn-attention-regressions.py` (exclusive
+GPU, inside the candidate image). P0-A: mixed live/dead rows, graph-padding
+geometry (n<queries), all-dead, the production all-live eight-token verify
+block, NaN-poisoned workspace, and a negative control that re-applies the
+inverted mask and must be detected. P0-B: 130-page (three-chunk, uneven, raw
+tail) FA parity against the unchanged PyTorch oracle, a single-chunk control,
+an empirical FlashInfer LSE-base probe (measured ratio to natural log 1.4427 =
+1/ln2), and the equal-mass merge spec (outputs 2 and 4 must merge to 3).
+Evidence: `../bench/results/attention-regressions-stage20-pre-fix.json`
+(FAIL: live rows erased; multi-chunk rmse 1.1e-2) and
+`../bench/results/attention-regressions-stage21-post-fix.json` (PASS: live-row
+rmse 4.9e-5; multi-chunk rmse 2.5e-4 within the FA gate of kernel tolerances
+plus one output bf16 ulp). Module identities recorded inside both reports.
+All earlier stage19j/20 speed and acceptance records remain historical and are
+not promotable; corrected measurements follow in the decode ledger.

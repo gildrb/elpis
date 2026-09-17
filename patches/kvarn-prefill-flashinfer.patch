@@ -1,7 +1,7 @@
 diff --git a/python/sglang/kernels/ops/kvarn/decode.py b/python/sglang/kernels/ops/kvarn/decode.py
 --- a/python/sglang/kernels/ops/kvarn/decode.py
 +++ b/python/sglang/kernels/ops/kvarn/decode.py
-@@ -326,6 +326,77 @@
+@@ -326,6 +326,80 @@
      return min(splits, (pages + per_split - 1) // per_split)
  
  
@@ -72,14 +72,17 @@ diff --git a/python/sglang/kernels/ops/kvarn/decode.py b/python/sglang/kernels/o
 +        D=d, SPLITS=splits, N_SPLITS=splits, num_warps=4, num_stages=1)
 +    row_live = torch.zeros((queries,), dtype=torch.bool, device=output.device)
 +    row_live[:n] = upper[:n] > lower[:n]
-+    output.mul_(torch.logical_not(row_live).to(output.dtype)[:, None, None])
++    # Live rows keep their attention output; dead/padded rows are erased.
++    # masked_fill_ assigns, so a stale NaN workspace cannot leak through a
++    # multiplication by zero. Device-side only: CUDA-graph safe.
++    output.masked_fill_(torch.logical_not(row_live).view(-1, 1, 1), 0)
 +    return output
 +
 +
  def packed_attention_out(Q: torch.Tensor, view: KVarNLayerView,
                           request_page_table: torch.Tensor, query_request_ids: torch.Tensor,
                           lower_bounds: torch.Tensor, upper_bounds: torch.Tensor,
-@@ -392,3 +463,206 @@
+@@ -392,3 +466,211 @@
          OUTPUT_Q_STRIDE=output.stride(0), OUTPUT_H_STRIDE=output.stride(1),
          D=d, SPLITS=splits, N_SPLITS=n_splits, num_warps=4, num_stages=1)
      return output
@@ -266,17 +269,22 @@ diff --git a/python/sglang/kernels/ops/kvarn/decode.py b/python/sglang/kernels/o
 +            acc = o_chunk
 +            lse = lse_chunk
 +        else:
++            # FlashInfer returns log2-domain LSE (ptx_log2 in the kernel), so
++            # merge weights are exp2. Each chunk output is already normalized;
++            # the weighted sum must be divided by the merged mass (a+b), and
++            # rows with no mass in either chunk stay zero / -inf.
 +            m = torch.maximum(lse, lse_chunk)
-+            a = torch.exp(lse - m)
-+            b = torch.exp(lse_chunk - m)
++            a = torch.exp2(lse - m)
++            b = torch.exp2(lse_chunk - m)
 +            a = torch.where(torch.isfinite(a), a, torch.zeros_like(a))
 +            b = torch.where(torch.isfinite(b), b, torch.zeros_like(b))
-+            if a.ndim == 2:
-+                acc = a.unsqueeze(-1) * acc + b.unsqueeze(-1) * o_chunk
-+            else:
-+                acc = a * acc + b * o_chunk
 +            den = a + b
-+            lse = m + torch.log(den.clamp_min(1e-30))
++            safe_den = torch.where(den > 0, den, torch.ones_like(den))
++            if a.ndim == 2:
++                acc = (a.unsqueeze(-1) * acc + b.unsqueeze(-1) * o_chunk) / safe_den.unsqueeze(-1)
++            else:
++                acc = (a * acc + b * o_chunk) / safe_den
++            lse = m + torch.log2(safe_den)
 +            lse = torch.where(den > 0, lse, torch.full_like(lse, float('-inf')))
 +        del k_fp16, v_fp16, k_used, v_used
 +    if acc is None:
