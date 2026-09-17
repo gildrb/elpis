@@ -1,0 +1,86 @@
+# Decode bottleneck ledger
+
+Machine-readable experiment results accompany each entry under
+`bench/results/`; this file records the loop
+profile -> rank -> reproduce -> minimal patch -> correctness test ->
+paired benchmark -> keep/revert -> profile again for the sustained
+single-request decode objective (RTX 3090, TP1, KVarN + DFlash2).
+
+Baseline identity changes are recorded per entry. All stage19j/20 speed
+records were measured on corrupted attention (see P0-A/P0-B in
+[patch notes](../patches/NOTES.md)) and are not comparison baselines.
+
+## Corrected baseline (stage21, image built from a7598a5)
+
+Single-request streamed chat completions, exact input depths, 1024 committed
+output tokens, greedy; `committed_tok_s = completion_tokens / (wall - TTFT)`.
+Powers measured at the wall socket cap (280 W hardware limit).
+
+Five paired repetitions each (`decode-c1-corrected-stage21.json`), median
+(min..max):
+
+| depth (actual) | TTFT s | decode tok/s median (range) | accept gauge | watts p50 |
+|---:|---:|---|---:|---:|
+| 1076 | 1.25 | 80.7 (78.8-90.4) | 2.4-4.9 | 268 |
+| 8244 | 9.20 | 70.2 (66.9-76.3) | 3.1-5.5 | 270 |
+| 32821 | 40.77 | 45.0 (43.5-47.9) | 2.7-3.6 | 275 |
+
+Derived cycle time at the median accept gauge: ~36 ms (1k), ~50 ms (8k),
+~70 ms (32k). Acceptance is content-dependent and comparable to the
+competitor's 3.1-3.4; the deficit is cycle time.
+
+Engine telemetry: `cuda graph: True`, accept 3.0-4.9 content-dependent,
+engine gen throughput bursts 72-195 tok/s.
+
+## B1 — verify attention cost grows with context depth
+
+ID/priority/status: B1 / high / hypothesis, profiling pending.
+Exact source location: `_packed_attention_split` launched by
+`packed_attention_out_nosync` (patches/kvarn-prefill-flashinfer.patch);
+per-layer per verify step.
+Observed symptom: decode cycle time grows ~36 ms (1k ctx) -> ~63 ms (8k) ->
+~78 ms (32k) while accept stays ~3-3.5; stage15 measured ~6.3 us/page for the
+same kernel family; 256 pages x 16 layers x 6.3 us is ~26 ms at 32k context.
+Mechanism: each verify step re-scans every packed KV page of the request
+through a dequantizing Triton kernel; per-page cost dominates and scales
+linearly with depth. Competitor attention cost at 25k context is ~1 ms per
+verify position (~10x lower per page).
+Affected workloads: every C1 decode deeper than a few thousand tokens.
+Measured critical-path cost: pending profiler split (B1 profiling step).
+Evidence: corrected baseline rows above; stage15 kernel profiles
+(`packed-kvarn-*-kernel-profile-stage15.json`); hypothesis must be confirmed
+by trace before patching.
+Proposed fix: faster paged verify attention for the 8-query shape (SM86
+specialization: 24 q heads / 4 kv heads / d 256, 8 rows), or amortized
+dequant; prove parity against the PyTorch oracle via
+`qualification/kvarn-attention-regressions.py`.
+Correctness risks: inactive-row semantics, grouped-head indexing,
+provisional/sink page policy must be preserved exactly.
+Test/benchmark: regression fixture + `bench/decode.py` paired runs.
+Decision: open.
+Next largest bottleneck: B2.
+
+## B2 — base cycle time at shallow context (36 ms vs competitor 26.5 ms)
+
+ID/priority/status: B2 / high / open.
+Observed symptom: at ~1k context the full speculative cycle costs ~36 ms
+(81.5 tok/s at accept ~2.9); the competitor's DFlash2 step is 26.5 ms at
+comparable accept. Marlin W4A16 target forward is measured at the fp16
+ceiling (61-63 TFLOPs), so most of the gap is not GEMM throughput.
+Suspects: per-step Python/bookkeeping outside graphs, draft launch overhead,
+hidden-state gather, sampling, KVarN page lifecycle, detokenizer handoff.
+Measured critical-path cost: pending profiler split.
+Decision: open.
+
+## B3 — client-vs-engine streaming gap (resolved earlier, verify)
+
+ID/priority/status: B3 / closed for stage21.
+Stream-interval 4 aligned client rate with engine gen throughput in the
+corrected baseline (client 81.5 vs engine bursts 72-95 at 1k). Re-check after
+any detokenizer/stream change.
+
+## B4 — attention correctness repairs (closed)
+
+P0-A inverted live-row mask and P0-B chunk-merge normalization/base were
+fixed in stage21 with regression evidence; see `attention-regressions-*.json`
+and [patch notes](../patches/NOTES.md). All speeds above are corrected-path.
