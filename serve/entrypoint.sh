@@ -161,7 +161,7 @@ exec python3 -m sglang.launch_server \
   --disable-prefill-cuda-graph \
   "${graph_args[@]}" \
   "${qualification_args[@]}" \
-  --reasoning-parser qwen3 \
+  --stream-interval 4 --reasoning-parser qwen3 \
   --tool-call-parser qwen3_coder \
   --enable-metrics \
   --api-key "$api_key" \
