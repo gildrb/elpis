@@ -1,0 +1,78 @@
+diff --git a/python/sglang/srt/models/dflash.py b/python/sglang/srt/models/dflash.py
+--- a/python/sglang/srt/models/dflash.py
++++ b/python/sglang/srt/models/dflash.py
+@@ -990,7 +990,26 @@
+             torch.zeros(int(vocab_size), state_rank), requires_grad=False
+         )
+         self.hidden_projection = nn.Linear(hidden_size, state_rank, bias=False)
++        # Optional draft-vocab restriction (syv-ai draft-vocab tuning): a
++        # boolean [vocab] mask; tokens outside it can never be proposed, so
++        # every guaranteed-rejection miss disappears from the walk.
++        self.register_buffer(
++            "draft_vocab_mask",
++            torch.ones(int(vocab_size), dtype=torch.bool),
++            persistent=False,
++        )
++        self.draft_vocab_restricted = False
+ 
++    def load_draft_vocab(self, ids: torch.Tensor) -> None:
++        """Restrict proposals to the given token ids (counted over the
++        target's own outputs, e.g. syv-ai prepare/draft_vocab_ids.json)."""
++        mask = torch.zeros_like(self.draft_vocab_mask)
++        ids = ids.to(mask.device, torch.long).flatten()
++        keep = (ids >= 0) & (ids < mask.numel())
++        mask[ids[keep]] = True
++        self.draft_vocab_mask.copy_(mask)
++        self.draft_vocab_restricted = bool(mask.any().item())
++
+     def build_lattice(
+         self,
+         *,
+@@ -1131,12 +1150,14 @@
+             )
+         if get_parallel().tp_size == 1:
+             org = int(self.lm_head.org_vocab_size)
+-            vals, ids = _radix_topk(
+-                _project_candidate_logits(
+-                    hidden, self.lm_head, num_org=org, use_quant_head=use_quant_head
+-                ),
+-                k,
++            logits = _project_candidate_logits(
++                hidden, self.lm_head, num_org=org, use_quant_head=use_quant_head
+             )
++            if self.candidate_selector.draft_vocab_restricted:
++                logits = logits.float().masked_fill(
++                    ~self.candidate_selector.draft_vocab_mask[: logits.shape[-1]], float("-inf")
++                )
++            vals, ids = _radix_topk(logits, k)
+             return ids.long(), self._transform_unary_logits(vals)
+         shard = self.lm_head.shard_indices
+         vals, ids = _radix_topk(
+diff --git a/python/sglang/srt/speculative/dflash_worker_v2.py b/python/sglang/srt/speculative/dflash_worker_v2.py
+--- a/python/sglang/srt/speculative/dflash_worker_v2.py
++++ b/python/sglang/srt/speculative/dflash_worker_v2.py
+@@ -1,5 +1,7 @@
++import json
+ import logging
+ import math
++import os
+ from dataclasses import replace
+ from typing import List, Optional, Tuple
+ 
+@@ -320,6 +322,16 @@
+         self._draft_sampler = None
+         self.draft_model = bundle.draft_model
+         self.selector = self.draft_model.candidate_selector
++        # Draft-vocab restriction (syv-ai tuning): opt-in via a JSON list of
++        # token ids counted over the target's own outputs.
++        vocab_path = os.environ.get("QWEN_DRAFT_VOCAB_JSON", "")
++        if vocab_path:
++            with open(vocab_path) as fh:
++                ids = torch.tensor(json.load(fh), dtype=torch.long)
++            self.selector.load_draft_vocab(ids)
++            logger.info(
++                "DFlash draft vocab restricted to %d ids from %s", ids.numel(), vocab_path
++            )
+         draft_config = parse_dflash_draft_config(
+             draft_hf_config=self.draft_model_runner.model_config.hf_config
+         )
