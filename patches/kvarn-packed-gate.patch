@@ -1,0 +1,127 @@
+diff --git a/python/sglang/kernels/ops/kvarn/decode.py b/python/sglang/kernels/ops/kvarn/decode.py
+--- a/python/sglang/kernels/ops/kvarn/decode.py
++++ b/python/sglang/kernels/ops/kvarn/decode.py
+@@ -220,55 +220,73 @@
+                 valid = active & written[None, :] & page_ok
+                 missing = tl.sum((active & page_ok & ~written[None, :]).to(tl.int32)) > 0
+                 tl.atomic_or(Status, tl.where(missing, 1, 0))
+-                raw_cols = raw_ok & written
+-                keys_raw_t = tl.load(RawK + (safe_slot.to(tl.int64) * 128 + tok[None, :]) * H * D
+-                                     + kv_head * D + d[:, None],
+-                                     mask=raw_cols[None, :], other=0.0).to(tl.float16)
+-                values_raw = tl.load(RawV + (safe_slot.to(tl.int64) * 128 + tok[:, None]) * H * D
+-                                     + kv_head * D + d[None, :],
+-                                     mask=raw_cols[:, None], other=0.0).to(tl.float16)
+-                ks = tl.load(halves + K_SCALE // 2 + d, mask=page_ok, other=0.0).to(tl.float32)
+-                kz = tl.load(halves + K_ZERO // 2 + d, mask=page_ok, other=0.0).to(tl.float32)
+-                kt = tl.load(halves + K_TOKEN // 2 + tok, mask=page_ok, other=0.0).to(tl.float32)
+-                kbyte = tl.load(Packed + base + d[:, None] * 64 + tok[None, :] // 2,
+-                                mask=page_ok, other=0).to(tl.int32)
+-                keys_t = (((kbyte >> ((tok[None, :] % 2) * 4)) & 15).to(tl.float32) * ks[:, None]
+-                          + kz[:, None]) * kt[None, :]
+-                vc = tl.load(halves + V_CHANNEL // 2 + d, mask=page_ok, other=0.0).to(tl.float32)
+-                vs = tl.load(halves + V_SCALE // 2 + tok, mask=page_ok, other=0.0).to(tl.float32)
+-                vz = tl.load(halves + V_ZERO // 2 + tok, mask=page_ok, other=0.0).to(tl.float32)
+-                vbyte = tl.load(Packed + base + V_PACKED + tok[:, None] * (D // 4) + d[None, :] // 4,
+-                                mask=page_ok, other=0).to(tl.int32)
+-                values_packed = (((vbyte >> ((d[None, :] % 4) * 2)) & 3).to(tl.float32) * vs[:, None]
+-                                 + vz[:, None]) * vc[None, :]
+-                # Sequential domain passes with a two-step online softmax update.
+-                # Split alphas are exact: their product telescopes to
+-                # exp(m_old - m_new), and a zero alpha only ever scales
+-                # accumulators that are still zero.
+-                scores_raw = tl.dot(q16, keys_raw_t) * Scale
+-                scores_raw = tl.where(use_raw[:, None] & valid, scores_raw, -float("inf"))
+-                max_raw = tl.maximum(maximum, tl.max(scores_raw, 1))
+-                live_raw = max_raw > -float("inf")
+-                alpha_raw = tl.where(live_raw, tl.exp(maximum - max_raw), 0.0)
+-                p_raw = tl.where(live_raw[:, None] & (use_raw[:, None] & valid),
+-                                 tl.exp(scores_raw - max_raw[:, None]), 0.0)
+-                acc_raw = acc_raw * alpha_raw[:, None] \
+-                    + tl.dot(p_raw.to(tl.float16), values_raw)
+-                acc_rot = acc_rot * alpha_raw[:, None]
+-                denominator = denominator * alpha_raw + tl.sum(p_raw, 1)
+-                maximum = max_raw
+-                scores_packed = tl.dot(r16, keys_t.to(tl.float16)) * Scale
+-                scores_packed = tl.where(valid & ~use_raw[:, None], scores_packed, -float("inf"))
+-                max_packed = tl.maximum(maximum, tl.max(scores_packed, 1))
+-                live_packed = max_packed > -float("inf")
+-                alpha_packed = tl.where(live_packed, tl.exp(maximum - max_packed), 0.0)
+-                p_packed = tl.where(live_packed[:, None] & valid & ~use_raw[:, None],
+-                                    tl.exp(scores_packed - max_packed[:, None]), 0.0)
+-                acc_rot = acc_rot * alpha_packed[:, None] \
+-                    + tl.dot(p_packed.to(tl.float16), values_packed.to(tl.float16))
+-                acc_raw = acc_raw * alpha_packed[:, None]
+-                denominator = denominator * alpha_packed + tl.sum(p_packed, 1)
+-                maximum = max_packed
++                # P0-C representation gating: each pass runs only when at
++                # least one (row, token) lane of this block actually selects
++                # that representation. use_raw mirrors decode_head, so a lane
++                # selects packed only when a packed tile exists (sealed page
++                # with slot < 0, or preview_ready with the query passing the
++                # page). Raw-only pages (sink pages, the un-previewed
++                # incomplete tail) and packed-only pages (sealed history)
++                # therefore load and matmul exactly one operand set; an
++                # uninitialized packed tile can never reach a dot. Zero
++                # probabilities do not sanitize a NaN value operand: the old
++                # unconditional packed dot contaminated acc_rot with 0 * NaN
++                # on every raw-only page. A skipped pass is an exact no-op:
++                # all its scores were -inf, so alpha is 1 on live rows and 0
++                # only on rows whose accumulators are still exactly zero.
++                raw_sel = use_raw[:, None] & valid
++                if tl.sum(raw_sel.to(tl.int32)) > 0:
++                    raw_cols = raw_ok & written
++                    keys_raw_t = tl.load(RawK + (safe_slot.to(tl.int64) * 128 + tok[None, :]) * H * D
++                                         + kv_head * D + d[:, None],
++                                         mask=raw_cols[None, :], other=0.0).to(tl.float16)
++                    values_raw = tl.load(RawV + (safe_slot.to(tl.int64) * 128 + tok[:, None]) * H * D
++                                         + kv_head * D + d[None, :],
++                                         mask=raw_cols[:, None], other=0.0).to(tl.float16)
++                    # Sequential domain passes with a two-step online softmax update.
++                    # Split alphas are exact: their product telescopes to
++                    # exp(m_old - m_new), and a zero alpha only ever scales
++                    # accumulators that are still zero.
++                    scores_raw = tl.dot(q16, keys_raw_t) * Scale
++                    scores_raw = tl.where(use_raw[:, None] & valid, scores_raw, -float("inf"))
++                    max_raw = tl.maximum(maximum, tl.max(scores_raw, 1))
++                    live_raw = max_raw > -float("inf")
++                    alpha_raw = tl.where(live_raw, tl.exp(maximum - max_raw), 0.0)
++                    p_raw = tl.where(live_raw[:, None] & (use_raw[:, None] & valid),
++                                     tl.exp(scores_raw - max_raw[:, None]), 0.0)
++                    acc_raw = acc_raw * alpha_raw[:, None] \
++                        + tl.dot(p_raw.to(tl.float16), values_raw)
++                    acc_rot = acc_rot * alpha_raw[:, None]
++                    denominator = denominator * alpha_raw + tl.sum(p_raw, 1)
++                    maximum = max_raw
++                packed_sel = valid & ~use_raw[:, None]
++                if tl.sum(packed_sel.to(tl.int32)) > 0:
++                    ks = tl.load(halves + K_SCALE // 2 + d, mask=page_ok, other=0.0).to(tl.float32)
++                    kz = tl.load(halves + K_ZERO // 2 + d, mask=page_ok, other=0.0).to(tl.float32)
++                    kt = tl.load(halves + K_TOKEN // 2 + tok, mask=page_ok, other=0.0).to(tl.float32)
++                    kbyte = tl.load(Packed + base + d[:, None] * 64 + tok[None, :] // 2,
++                                    mask=page_ok, other=0).to(tl.int32)
++                    keys_t = (((kbyte >> ((tok[None, :] % 2) * 4)) & 15).to(tl.float32) * ks[:, None]
++                              + kz[:, None]) * kt[None, :]
++                    vc = tl.load(halves + V_CHANNEL // 2 + d, mask=page_ok, other=0.0).to(tl.float32)
++                    vs = tl.load(halves + V_SCALE // 2 + tok, mask=page_ok, other=0.0).to(tl.float32)
++                    vz = tl.load(halves + V_ZERO // 2 + tok, mask=page_ok, other=0.0).to(tl.float32)
++                    vbyte = tl.load(Packed + base + V_PACKED + tok[:, None] * (D // 4) + d[None, :] // 4,
++                                    mask=page_ok, other=0).to(tl.int32)
++                    values_packed = (((vbyte >> ((d[None, :] % 4) * 2)) & 3).to(tl.float32) * vs[:, None]
++                                     + vz[:, None]) * vc[None, :]
++                    scores_packed = tl.dot(r16, keys_t.to(tl.float16)) * Scale
++                    scores_packed = tl.where(valid & ~use_raw[:, None], scores_packed, -float("inf"))
++                    max_packed = tl.maximum(maximum, tl.max(scores_packed, 1))
++                    live_packed = max_packed > -float("inf")
++                    alpha_packed = tl.where(live_packed, tl.exp(maximum - max_packed), 0.0)
++                    p_packed = tl.where(live_packed[:, None] & valid & ~use_raw[:, None],
++                                        tl.exp(scores_packed - max_packed[:, None]), 0.0)
++                    acc_rot = acc_rot * alpha_packed[:, None] \
++                        + tl.dot(p_packed.to(tl.float16), values_packed.to(tl.float16))
++                    acc_raw = acc_raw * alpha_packed[:, None]
++                    denominator = denominator * alpha_packed + tl.sum(p_packed, 1)
++                    maximum = max_packed
+ 
+         inv = acc_rot
+         for bit in tl.static_range(0, 8 if D == 256 else 7):
+

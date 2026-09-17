@@ -300,3 +300,66 @@ rmse 4.9e-5; multi-chunk rmse 2.5e-4 within the FA gate of kernel tolerances
 plus one output bf16 ulp). Module identities recorded inside both reports.
 All earlier stage19j/20 speed and acceptance records remain historical and are
 not promotable; corrected measurements follow in the decode ledger.
+
+
+## Stage 22 (staged, uncommitted): B2 commit-tail capture + store B-spec
+
+**Base:** stage21 series (through dflash-draft-vocab). **Class:** performance.
+Behind `--kvarn-commit-graph` (default OFF; requires graph mode; eager
+fallback on capture failure, logged).
+
+**C4 (audit F4).** Free-slot pinned mirror (`refresh_free_slot_mirror` /
+`mirrored_tail_slots`, exact fallback on stale), device-only
+`mark_sink_pages_out`, allocator admission reads the mirror. Removes the 42
+scalar admission readbacks per check. Proof: 100 sync-free reads under
+sync-debug-error, exhaustion fails closed to 0, refresh converges exactly.
+
+**C2.** `begin/finish_status_mirror` (pinned D2H + event); draft check
+overlapped across verify-input prep; post-verify drain removed on the fast
+path; commit-tail + draft-append gated by ONE end-of-step check before
+on_publish/results (fail-closed contract unchanged).
+
+**C1.** `_KVarNCommitGraphRunner` captures the target commit loop +
+draft-append branch; static buffers = worker locs/positions + own
+commit_lens/hidden; neutral dummy-page warmup; dedicated graph mempool.
+
+**Store B-spec (audit F6).** `_prepare_write` validation lanes sized
+`B=next_power_of_2(count)` instead of fixed 128; GPU-qualified through the
+full R1 suite including capture/replay.
+
+**Qualification (overlays in `/tmp/b2impl`, fixtures + logs there):** R1
+capture/replay bit-identical (commit_lens 0..8, poisoned no-op); R2 3-step
+chain oracle bit-exact (accept 3/6/4); R3 shadow counter 200 trials, 0
+mismatches; C4 admission proof; full suite re-run green on the built image.
+Live validation found and fixed three integration bugs the fixtures cannot
+see: the worker predicates `_kvarn_commit_graph_enabled/_supported` were
+called but never defined; `mark_sink_pages_out` must stage CPU-resident
+sink indices onto the cache device during capture prep; pinned mirrors must
+be allocated outside `torch.inference_mode` (inference tensors reject
+out-of-mode inplace updates). A/B store-tail bench (16+5 layers, 50 steps,
+status 0 both arms): eager 8079/8164/8303 us/step vs captured
+1142/1068/1066 @8/64/230 pages (7.1-7.8x, depth-independent; serving-scaled
+~4.3 ms/step).
+
+**ON arm still blocked:** the first live speculative step raises
+`native KVarN transaction failed (status bits=1)` from the overlapped
+status mirror — the target-pool `commit_prefix` receives rows that were
+never staged provisional (the artifact kernel-war observed in bench
+warmup). Fixtures always staged provisional rows, so R1-R3 stay green
+while live serving trips. Needs a fixture case with non-provisional
+commit rows before `--kvarn-commit-graph` can default on. Deployed
+endpoint runs stage22 with the flag OFF.
+
+## Stage 22 (deployed): F1 packed-NaN gate + F6 store B-spec
+
+`kvarn-packed-gate.patch` gates packed loads and matmuls on representation
+validity (raw-only sink pages and incomplete pages never feed the packed
+operand); the deployed kernel's NaN contamination is reproduced by
+`qualification/packed-nan-regression` (CPU proof + GPU fixture with
+negative controls; deployed goes NaN where [5,7] is expected, gated fix is
+exact, and bit-identical on finite data). The gate also removes the
+redundant dual raw+packed computation: 984 vs 1810 us/launch at 230 pages.
+`kvarn-store-bspec.patch` sizes `_prepare_write` validation lanes to
+`next_power_of_2(count)` (audit F6). Measured 5-rep medians vs stage21:
+90.9 (+12.7%) @1k, 76.9 (+9.6%) @8k, 57.1 (+26.9%) @32k
+(`bench/results/decode-c1-stage22-off.json`).

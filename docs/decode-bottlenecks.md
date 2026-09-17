@@ -84,3 +84,48 @@ any detokenizer/stream change.
 P0-A inverted live-row mask and P0-B chunk-merge normalization/base were
 fixed in stage21 with regression evidence; see `attention-regressions-*.json`
 and [patch notes](../patches/NOTES.md). All speeds above are corrected-path.
+
+## Second-triage findings (user audit at 6652260; source-derived counts)
+
+Correctness outranks speed; measured ranking pending (`profile-triage`).
+
+| ID | prio | summary | status |
+|----|------|---------|--------|
+| F1 | P0 | uninitialized packed scales reach the packed matmul on raw-only/incomplete pages; 0 x NaN contaminates accumulator before the output mask | fix in flight (`p0-packed-nan`, /tmp/p0fix) |
+| F2 | P1 | 68 completion calls x 7 kernels = 476 launches/cycle even when no page seals | measure (`profile-triage`); interacts with B2 capture |
+| F3 | P1 | draft gather: 87,360 tiny programs/pass, success-path atomic_or(0) on shared status | masked-atomic fix in flight (`gather-atomic`, /tmp/gather) |
+| F4 | P1 | capacity admission: 42 scalar readbacks per check | C4 (B2) expected to cover; validation pending |
+| F5 | P1 | draft-vocab restriction still computes full output head then masks | measure then compact-head go/no-go |
+| F6 | P2 | 8-token writes use 128x128 validation pair-grid (CPU-verified fix) | queued after B2 bench (`kernel-war`) |
+| F7 | P1 | stochastic sampling probability prep serialized (.item() per row; vocab-wide scan per program) | stochastic-only, not greedy deficit; deferred |
+
+GPU window queue: kernel-war (B2) -> p0-packed-nan -> profile-triage /
+gather-atomic. Correctness (F1) outranks all perf work.
+
+## Stage 22 measured (deployed, commit-graph OFF)
+
+F1 (packed-NaN gate, `kvarn-packed-gate.patch`) + F6 (store B-spec) landed
+with B2 C1/C2/C4 staged behind `--kvarn-commit-graph` (default OFF). Full
+fixture suite green on the built image (R1/R2/R3/C4-proof + all three repo
+qualification suites; `attention-regressions-packed-nan-stage22.json`
+reproduces the deployed defect and proves the gate). 5-rep matrix
+(`decode-c1-stage22-off.json`), median vs stage21 baseline:
+
+| depth | stage21 | stage22-off | delta |
+|---:|---:|---:|---:|
+| 1076 | 80.7 | 90.9 | +12.7% |
+| 8244 | 70.2 | 76.9 | +9.6% |
+| 32821 | 45.0 | 57.1 | +26.9% |
+
+F1 also halves verify-attention kernel time at depth (microbench 984 vs
+1810 us/launch @230 pages): the gate removes the redundant dual raw+packed
+computation, not just the NaN hazard.
+
+**B2 ON arm blocked (live-only):** first real speculative step raises
+`status bits=1` in the overlapped status mirror (commit_prefix receiving
+rows never staged provisional — same artifact kernel-war observed in its
+A/B bench warmup). Three live-only integration bugs were fixed on the way
+(missing `_kvarn_commit_graph_enabled/_supported` predicates; sink-page
+device staging during capture; inference-mode pinned-mirror allocation).
+Fixtures cannot see this class — the staging contract needs a fixture with
+non-provisional commit rows before the flag can default on.
