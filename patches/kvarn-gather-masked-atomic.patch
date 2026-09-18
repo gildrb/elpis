@@ -1,0 +1,31 @@
+diff --git a/python/sglang/kernels/ops/kvarn/gather.py b/python/sglang/kernels/ops/kvarn/gather.py
+--- a/python/sglang/kernels/ops/kvarn/gather.py
++++ b/python/sglang/kernels/ops/kvarn/gather.py
+@@ -2,6 +2,14 @@
+ # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+ # Adapted from syv-ai KVarN 18349177b7962ef1d699dc154844f9c04317a474.
+ """Bounded visible-window gather, including inverse Hadamard rotation."""
++# OVERLAY gather-A (F3, /tmp/gather): base qwen-inference:refactor-stage21
++# gather.py sha256 13b8fcce7a083afb1a5112b835d72b2857456e031847454be7f577f9143f6183.
++# Re-verified 20260917: qwen-inference:stage22 (2e15cbf613ce) ships the
++# byte-identical gather.py (same sha256 at
++# /sgl-workspace/sglang/python/sglang/kernels/ops/kvarn/gather.py), so this
++# overlay applies unchanged to the deployed stage22 image.
++# Only change: the kernel status atomic below is masked; launcher, grid,
++# signatures and policy are byte-identical to the deployed module.
+ import torch
+ from sglang.srt.mem_cache.kvarn.types import KVarNLayerView, KVarNWorkspace
+ from .decode import decode_head
+@@ -77,7 +85,10 @@
+     provisional = tl.load(Provisional + page * 128 + token, mask=in_range, other=0)
+     valid = in_range & (committed | provisional) & (slot < SLOTS)
+     invalid = ((length < 0) | (length > WIDTH)) | (active & ~valid)
+-    tl.atomic_or(Status, tl.where(invalid, 1, 0))
++    # F3 overlay: masked RED; invalid still ORs bit0, valid issues no
++    # Status transaction at all. OR with 0 is the identity, so dropping
++    # the success-path atomic cannot change any reachable Status state.
++    tl.atomic_or(Status, 1, mask=invalid)
+     d = tl.arange(0, D)
+     key = tl.full((D,), 0.0, tl.float32)
+     value = tl.full((D,), 0.0, tl.float32)
+
