@@ -30,16 +30,18 @@ def parallel_sanity(xs: List(u24)) -> u24:
 # ============================================================
 
 # LAW: Decode throughput >= 170 tok/s at 1k context, RTX 3090 TP1.
+# PQ2_0 Bonsai 2: 7.2GB weights at 936 GB/s => ~130 tok/s base
+# + speculative decoding => >170 tok/s
 def throughput_1k() -> u24:
   return 170
 
-# LAW: Throughput >= 120 tok/s at 8k context.
+# LAW: Throughput >= 140 tok/s at 8k context.
 def throughput_8k() -> u24:
-  return 120
+  return 140
 
-# LAW: Throughput >= 80 tok/s at 32k context.
+# LAW: Throughput >= 100 tok/s at 32k context.
 def throughput_32k() -> u24:
-  return 80
+  return 100
 
 # ============================================================
 # INTEGRATION GATES (enforced by code review + CI)

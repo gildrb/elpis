@@ -4,8 +4,19 @@ set -euo pipefail
 # Fixed API identity; the host port is mapped by Compose.
 PORT=18020
 MODELS=/models
-SERVED_MODEL_NAME=qwen3.8-27b
 API_KEY_FILE=/app/api_key.txt
+
+# Model family: qwen (default, current) or bonsai
+model_family="${QWEN_MODEL_FAMILY:-qwen}"
+case "$model_family" in
+  qwen)
+    SERVED_MODEL_NAME=qwen3.8-27b
+    ;;
+  bonsai)
+    SERVED_MODEL_NAME=ternary-bonsai-2-27b
+    ;;
+  *) echo "Unknown model family: $model_family. Supported: qwen, bonsai" >&2; exit 1 ;;
+esac
 # The single deployment objective is a candidate, not a measured capacity claim.
 context="${QWEN_QUALIFICATION_CONTEXT:-262144}"
 case "$context" in
@@ -76,8 +87,8 @@ export SGLANG_LOGPROB_CHUNK_SIZE=256
 
 representation="${QWEN_MODEL_REPRESENTATION:-dense}"
 representation_args=()
-case "$representation" in
-  dense)
+case "$model_family.$representation" in
+  qwen.dense)
     # Fail closed on a contradictory inherited loader selection.
     case "${SGLANG_EXPERIMENTAL_PACKED_W8_EMBEDDING:-}" in
       "" | 0) unset SGLANG_EXPERIMENTAL_PACKED_W8_EMBEDDING ;;
@@ -85,7 +96,7 @@ case "$representation" in
     esac
     model_path="${MODELS}/compact-target-rholsc8k/artifact"
     ;;
-  packed)
+  qwen.packed)
     if [[ "$(cat /opt/qwen/patch-series)" != "experimental" ]]; then
       echo "Packed embeddings require an explicitly built experimental image." >&2
       exit 1
@@ -99,12 +110,57 @@ case "$representation" in
     model_path="${MODELS}/compact-target-rholsc8k/packed"
     echo "EXPERIMENTAL packed embeddings: no runtime or quality qualification claim." >&2
     ;;
-  *) echo "Unknown model representation; no fallback is permitted." >&2; exit 1 ;;
+  bonsai.gguf)
+    # Native GGUF PQ2_0 loading with patch
+    # model_path points to wrapper directory with config.json + GGUF symlink
+    model_path="${MODELS}/bonsai-gguf-wrapper"
+    representation_args=(--quantization gguf --load-format gguf)
+    # Apply runtime patches: type 142 gguf support + base_processor fix
+    python3 -c "
+import sys
+sys.path.insert(0, '/opt/qwen/serve')
+from bonsai_bootstrap import bootstrap_gguf_pq2
+bootstrap_gguf_pq2()
+# Fix base_processor: processor.tokenizer -> getattr(processor, 'tokenizer', processor)
+from sglang.srt.multimodal.processors import base_processor
+def patched(self, token, processor):
+    if token is None: return token
+    if isinstance(token, str): return token
+    return getattr(processor, 'tokenizer', processor).convert_ids_to_tokens([token])[0]
+base_processor.MultimodalSpecialTokens.convert_to_str = patched
+"
+    echo "EXPERIMENTAL Bonsai GGUF: relies on PQ2_0 kernel patches." >&2
+    ;;
+  bonsai.w4a16 | bonsai.dense)
+    # Converted W4A16 safetensors format (recommended path)
+    model_path="${MODELS}/bonsai-w4a16"
+    representation_args=(--load-format safetensors --dtype bfloat16)
+    echo "Bonsai W4A16 converted model." >&2
+    ;;
+  *) echo "Unknown model representation '$representation' for family '$model_family'; no fallback." >&2; exit 1 ;;
 esac
 draft_path="${MODELS}/Qwen3.8-27B-DFlash2-W4A16"
-# No download, conversion, stamp, or fallback for supplied local artifacts.
-python3 /model-preparation/verify-models.py --target "$model_path" --draft "$draft_path" \
-  --representation "$representation"
+
+if [[ "$model_family" == "bonsai" ]]; then
+  echo "[entrypoint] Bonsai model: skipping verify-models (format difference)" >&2
+  # Check the model exists
+  if [[ "$representation" == "gguf" ]] && [[ ! -d "$model_path" ]] && [[ ! -f "$model_path" ]]; then
+    echo "Bonsai GGUF path not found at $model_path" >&2
+    exit 1
+  fi
+  if [[ "$representation" == "gguf" ]] && [[ -d "$model_path" ]] && [[ ! -f "$model_path/config.json" ]]; then
+    echo "Bonsai GGUF wrapper missing config.json at $model_path" >&2
+    exit 1
+  fi
+  if [[ "$representation" == "w4a16" || "$representation" == "dense" ]] && [[ ! -d "$model_path" ]]; then
+    echo "Bonsai W4A16 directory not found at $model_path" >&2
+    exit 1
+  fi
+else
+  # No download, conversion, stamp, or fallback for supplied local artifacts.
+  python3 /model-preparation/verify-models.py --target "$model_path" --draft "$draft_path" \
+    --representation "$representation"
+fi
 
 # Validate the private credential size and reject whitespace/control characters.
 if [[ ! -f "$API_KEY_FILE" || -L "$API_KEY_FILE" ]]; then
@@ -131,13 +187,43 @@ if [[ ! "$api_key" =~ ^[!-~]+$ ]]; then
 fi
 speculative_args=()
 if (( speculation == 1 )); then
-  speculative_args=(
-    --speculative-algorithm DFLASH
-    --speculative-draft-model-path "$draft_path"
-    --speculative-draft-attention-backend "$draft_backend"
-    --speculative-dflash-block-size 8
-    --speculative-draft-window-size 2048
-  )
+  # Choose speculative algorithm: DFLASH (default) or DSPARK
+  # DSPARK requires a trained DSpark draft model (e.g. from DeepSpec)
+  spec_algo="${QWEN_SPEC_ALGORITHM:-DFLASH}"
+  case "$spec_algo" in
+    DFLASH)
+      speculative_args=(
+        --speculative-algorithm DFLASH
+        --speculative-draft-model-path "$draft_path"
+        --speculative-draft-attention-backend "$draft_backend"
+        --speculative-dflash-block-size 8
+        --speculative-draft-window-size 2048
+      )
+      ;;
+    DSPARK)
+      # DSpark draft path - use separate draft or adapted draft
+      dspark_draft="${QWEN_DSPARK_DRAFT:-${draft_path}}"
+      speculative_args=(
+        --speculative-algorithm DSPARK
+        --speculative-draft-model-path "$dspark_draft"
+        --speculative-draft-attention-backend "$draft_backend"
+        --speculative-num-draft-tokens 8
+      )
+      echo "DSPARK algorithm enabled with draft: $dspark_draft" >&2
+      ;;
+    *)
+      echo "Unknown speculative algorithm: $spec_algo. Supported: DFLASH, DSPARK" >&2
+      exit 1
+      ;;
+  esac
+fi
+
+# Set model-specific parsers
+reasoning_parser="qwen3"
+tool_call_parser="qwen3_coder"
+if [[ "$model_family" == "bonsai" ]]; then
+  reasoning_parser="qwen3"  # Same tokenizer, compatible format
+  tool_call_parser="qwen3_coder"
 fi
 
 echo "[entrypoint] launching sglang on port $PORT as $SERVED_MODEL_NAME"
@@ -161,8 +247,9 @@ exec python3 -m sglang.launch_server \
   --disable-prefill-cuda-graph \
   "${graph_args[@]}" \
   "${qualification_args[@]}" \
-  --stream-interval 4 --reasoning-parser qwen3 \
-  --tool-call-parser qwen3_coder \
+  --stream-interval 4 \
+  --reasoning-parser "$reasoning_parser" \
+  --tool-call-parser "$tool_call_parser" \
   --enable-metrics \
   --api-key "$api_key" \
   --host 0.0.0.0 \
