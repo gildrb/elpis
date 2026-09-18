@@ -549,7 +549,7 @@ diff --git a/python/sglang/srt/speculative/dflash_worker_v2.py b/python/sglang/s
                  return
  
              if cache_loc_2d is not None:
-@@ -1822,6 +2008,29 @@
+@@ -1822,6 +2008,44 @@
          if isinstance(draft_pool, KVarNTokenToKVPool) and draft_pool.native_enabled:
              draft_pool.check_native_status()
  
@@ -566,6 +566,21 @@ diff --git a/python/sglang/srt/speculative/dflash_worker_v2.py b/python/sglang/s
 +            pools.append(draft_pool)
 +        return tuple(pools)
 +
++    def _kvarn_commit_graph_probe_lens(self, bs: int) -> torch.Tensor:
++        return torch.zeros((bs,), dtype=torch.int32, device=self.device)
++
++    def _kvarn_commit_graph_probe_hidden(self, bs: int) -> torch.Tensor:
++        # The draft consumes concatenated target-layer context features
++        # ([N, num_context_features * hidden_size]), not the raw target
++        # hidden; the probe must mirror the real replay input width.
++        draft = self.draft_worker.model_runner.model
++        width = int(draft.num_context_features) * int(draft.config.hidden_size)
++        dtype = next(draft.parameters()).dtype
++        return torch.zeros(
++            (bs * int(self.block_size), width),
++            dtype=dtype, device=self.device,
++        )
++
 +    def _begin_kvarn_status_mirror(self) -> None:
 +        """Arm the overlapped sticky-status read on every native pool."""
 +        for pool in self._kvarn_pools():
@@ -579,7 +594,7 @@ diff --git a/python/sglang/srt/speculative/dflash_worker_v2.py b/python/sglang/s
      def forward_batch_generation(
          self,
          batch: ScheduleBatch,
-@@ -1950,6 +2159,13 @@
+@@ -1950,6 +2174,37 @@
  
          block_size = int(self.block_size)
          self._ensure_draft_block_buffers(bs)
@@ -590,10 +605,34 @@ diff --git a/python/sglang/srt/speculative/dflash_worker_v2.py b/python/sglang/s
 +            and self._kvarn_commit_graph_supported(bs)
 +        ):
 +            self._kvarn_commit_graph = _KVarNCommitGraphRunner(self)
++        if (
++            self._kvarn_commit_graph is not None
++            and self._kvarn_commit_graph.needs_capture
++        ):
++            # Capture BEFORE any pool mutation of this step: the warmup pass
++            # inside ensure_capture executes discard_provisional pool-wide, so
++            # running it after the verify graph staged this step's rows would
++            # wipe that staging and the subsequent commit would correctly
++            # fail closed (the stage22 first-step status=1 blocker). At this
++            # point the pools hold only committed state (the previous step
++            # discarded its provisional rows), which the warmup leaves
++            # untouched.
++            try:
++                self._kvarn_commit_graph.ensure_capture(
++                    commit_lens=self._kvarn_commit_graph_probe_lens(bs),
++                    hidden=self._kvarn_commit_graph_probe_hidden(bs),
++                )
++            except Exception as capture_error:  # noqa: BLE001
++                logger.warning(
++                    "KVarN commit-graph capture failed; staying eager: %s",
++                    capture_error,
++                )
++                self._kvarn_commit_graph_failed = True
++                self._kvarn_commit_graph = None
          assert self._draft_block_ids_buf is not None
          assert self._draft_block_positions_buf is not None
          assert self._draft_block_tokens_buf is not None
-@@ -2089,7 +2305,13 @@
+@@ -2089,7 +2344,13 @@
  
          with torch.inference_mode():
              draft_out = self.draft_model_runner.forward(forward_batch)
@@ -608,7 +647,7 @@ diff --git a/python/sglang/srt/speculative/dflash_worker_v2.py b/python/sglang/s
          draft_logits_output = draft_out.logits_output
  
          folded = self._draft_sampler is not None and draft_out.can_run_graph
-@@ -2167,13 +2389,22 @@
+@@ -2167,13 +2428,22 @@
          batch.seq_lens_cpu = seq_lens_cpu_backup
          batch.seq_lens_sum = seq_lens_sum_backup
  
@@ -632,7 +671,7 @@ diff --git a/python/sglang/srt/speculative/dflash_worker_v2.py b/python/sglang/s
          logits_output = target_out.logits_output
          can_run_cuda_graph = target_out.can_run_cuda_graph
  
-@@ -2259,42 +2490,86 @@
+@@ -2259,42 +2529,81 @@
                  commit_lens=commit_lens,
              )
  
@@ -650,6 +689,7 @@ diff --git a/python/sglang/srt/speculative/dflash_worker_v2.py b/python/sglang/s
 +            batch.seq_lens_cpu is None or int(batch.seq_lens_cpu.min()) == 0
 +        )
 +
++        commit_graph_replayed = False
          target_pool = self.model_runner.token_to_kv_pool
          if isinstance(target_pool, HybridLinearKVPool):
              packed_target_pool = target_pool.full_kv_pool
@@ -666,25 +706,14 @@ diff --git a/python/sglang/srt/speculative/dflash_worker_v2.py b/python/sglang/s
 +                    and commit_graph.matches(commit_lens=commit_lens, hidden=hidden_flat)
 +                ):
 +                    commit_graph.replay(commit_lens=commit_lens, hidden=hidden_flat)
++                    commit_graph_replayed = True
 +                else:
-+                    if (
-+                        commit_graph is not None
-+                        and commit_graph.needs_capture
-+                    ):
-+                        try:
-+                            commit_graph.ensure_capture(
-+                                commit_lens=commit_lens, hidden=hidden_flat
-+                            )
-+                        except Exception as capture_error:  # noqa: BLE001
-+                            # Capture is best-effort: a capture-illegal host
-+                            # op inside the region permanently reverts this
-+                            # deployment to the eager tail, never aborts it.
-+                            logger.warning(
-+                                "KVarN commit-graph capture failed; staying eager: %s",
-+                                capture_error,
-+                            )
-+                            self._kvarn_commit_graph_failed = True
-+                            self._kvarn_commit_graph = None
++                    # No tail-time capture: ensure_capture's warmup executes a
++                    # pool-wide discard_provisional which would wipe this
++                    # step's verify staging. Capture happens once, early in
++                    # the decode branch, before any staging exists; if it
++                    # failed there this runner is already None and the tail
++                    # stays eager.
 +                    for layer_id in packed_target_pool.layout.layer_ids:
 +                        packed_target_pool.commit_prefix(
 +                            layer_id, verify_out_cache_loc_2d, commit_lens
@@ -708,18 +737,28 @@ diff --git a/python/sglang/srt/speculative/dflash_worker_v2.py b/python/sglang/s
 -        if hidden is None:
 -            raise RuntimeError(
 -                "DFLASH verify requires target hidden states, but got None."
--            )
++        if not commit_graph_replayed:
++            # The commit-graph replay already materialized the draft append;
++            # re-running it eagerly would begin_write rows the replay just
++            # committed and correctly trip the immutable guard (the stage22
++            # 'after replay' status bits=1 blocker).
++            self._append_target_hidden_to_draft_kv_by_loc(
++                target_hidden=hidden_flat,
++                cache_loc=verify_out_cache_loc,
++                cache_loc_2d=verify_out_cache_loc_2d,
++                positions=positions,
++                commit_lens=commit_lens,
++                may_have_pos0=may_have_pos0,
+             )
 -        hidden = hidden.view(bs, int(self.block_size), -1)
 -
-         self._append_target_hidden_to_draft_kv_by_loc(
+-        self._append_target_hidden_to_draft_kv_by_loc(
 -            target_hidden=hidden.reshape(-1, hidden.shape[-1]),
-+            target_hidden=hidden_flat,
-             cache_loc=verify_out_cache_loc,
-             cache_loc_2d=verify_out_cache_loc_2d,
-             positions=positions,
-             commit_lens=commit_lens,
-+            may_have_pos0=may_have_pos0,
-         )
+-            cache_loc=verify_out_cache_loc,
+-            cache_loc_2d=verify_out_cache_loc_2d,
+-            positions=positions,
+-            commit_lens=commit_lens,
+-        )
  
          # Avoid copying large hidden-state buffers to CPU in overlap scheduling.
          logits_output.hidden_states = None

@@ -111,11 +111,16 @@ qualification suites; `attention-regressions-packed-nan-stage22.json`
 reproduces the deployed defect and proves the gate). 5-rep matrix
 (`decode-c1-stage22-off.json`), median vs stage21 baseline:
 
-| depth | stage21 | stage22-off | delta |
-|---:|---:|---:|---:|
-| 1076 | 80.7 | 90.9 | +12.7% |
-| 8244 | 70.2 | 76.9 | +9.6% |
-| 32821 | 45.0 | 57.1 | +26.9% |
+| depth | stage21 | stage22-off | stage22-on (B2) | on-vs-stage21 |
+|---:|---:|---:|---:|---:|
+| 1076 | 80.7 | 90.9 | 115.5 | +43.1% |
+| 8244 | 70.2 | 76.9 | 91.7 | +30.6% |
+| 32821 | 45.0 | 57.1 | 66.6 | +48.0% |
+
+The 100 tok/s primary-workload floor is met at 1k (115.5) and in reach at
+8k (91.7). ON-arm evidence: `decode-c1-stage22-on.json` (5 reps, no
+capture fallback, zero scheduler exceptions, memory stable at 23.4 GiB
+through the 12-minute matrix).
 
 F1 also halves verify-attention kernel time at depth (microbench 984 vs
 1810 us/launch @230 pages): the gate removes the redundant dual raw+packed

@@ -341,14 +341,19 @@ status 0 both arms): eager 8079/8164/8303 us/step vs captured
 1142/1068/1066 @8/64/230 pages (7.1-7.8x, depth-independent; serving-scaled
 ~4.3 ms/step).
 
-**ON arm still blocked:** the first live speculative step raises
-`native KVarN transaction failed (status bits=1)` from the overlapped
-status mirror — the target-pool `commit_prefix` receives rows that were
-never staged provisional (the artifact kernel-war observed in bench
-warmup). Fixtures always staged provisional rows, so R1-R3 stay green
-while live serving trips. Needs a fixture case with non-provisional
-commit rows before `--kvarn-commit-graph` can default on. Deployed
-endpoint runs stage22 with the flag OFF.
+**ON arm unblocked (two live-only root causes, both fixture-pinned):**
+(1) ensure_capture's warmup ran `discard_provisional` pool-wide AFTER the
+verify graph staged the step, wiping it; capture now happens once at
+decode-branch start, before any pool mutation (probe hidden sized to the
+draft's concatenated context-feature width, not raw hidden). (2) the worker
+tail appended target-hidden to draft KV UNCONDITIONALLY after replay —
+the replay already contains that append, and re-appending committed rows
+sets sticky bit 1; the tail now skips the eager append on replayed steps
+(`commit_graph_replayed`). `qualification/kvarn-commit-graph-blocker.py`
+pins both: A (warmup-wipe repro, must fail), B bit-1 fail-closed,
+C neutral, D bit-4 independent, E fixed order, F real-tail repro
+(detector), G gated-append fix; suite exit 0 on the built image.
+Deployed endpoint runs stage22 with the flag ON.
 
 ## Stage 22 (deployed): F1 packed-NaN gate + F6 store B-spec
 
