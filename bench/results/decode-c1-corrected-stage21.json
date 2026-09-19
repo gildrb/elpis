@@ -1,0 +1,414 @@
+{
+ "schema_version": 1,
+ "classification": "C1_DECODE_DEPTH_MATRIX_STAGE21_CORRECTED",
+ "identity": {
+  "image_sha256": "sha256:3329f59417ce7f7dfcb9c053eaea51f2a6b24c9877b1d7ba78eae1708a8e788b",
+  "engine_base_commit": "0bcd822377da7b5718e674eaf9c870d349424dd1",
+  "ordered_patch_sha256": [
+   "2e8d0383b78d8138f4ca08982b523b21c4d56beab20c78d5ea07644d9722a6ae",
+   "608b85fa5c9da8885360e4dfe4cb9201389c220d08c2b719e23f3a15a1bd63aa",
+   "eec8df29e6bf90134f879dad7c90669a1a8b7842e85813c6539b5c4b0fecbab4",
+   "67ae617ed91b27f604a3b389bd545112b323f8d99716378fb6eef9d4640b0226",
+   "f4d820cc7e883cb92008f3b6d209025f2b546877df42c6a3f997b0e8021eca77",
+   "c32b1f55c2ef0fb3e7201586d499a878e7b1dcd0b052ee6920a4c21839cc23bc",
+   "5c4f82472f19688a450273681e002287c9385cb320d3380db1428056c3ae4b8d",
+   "1d0ebc94080e1b3d1ec0e18435be3f95d456eb852bb2a0a2bf37ef1cede2f79f",
+   "e7ea328bbb5619f916d65023179e990b59a1d5deacf7aeb90be1a1053b7db630",
+   "212373bdaa7870dc4fc8b6994c7896fd56a33c64707c6ec276ce94d1609e52f2",
+   "59d84c2c580328d0e9369c801d9de5c45ff2354bdc5f991e9cb654b222626328",
+   "f9a8fcf93b49fbf70fd3d5302d74d258ef669d22ff3f5a0a44d1804c56c444b6",
+   "9a4dff09a8fce3cf95eeb09e23baf1c934c23870b07d3b2bc315974c3bbd0ef5",
+   "f8e9e8c158a0aefcc9a13520d000474a4e7eec48f460341a874fd22cfd883233",
+   "0a2ceb37ffd22db360255e2be3c390d03f66d79e7f76cac8b86c2739b5321ee3",
+   "b398a385df2cfe1894799109301ffb92b40b088abc5aeab3f40a10bb190de343"
+  ],
+  "container_env": [
+   "QWEN_ALLOW_UNQUALIFIED=1",
+   "QWEN_DRAFT_VOCAB_JSON=/state/draft_vocab_ids.json",
+   "QWEN_MEM_FRACTION_STATIC=0.98",
+   "QWEN_MODEL_REPRESENTATION=packed",
+   "QWEN_QUALIFICATION=speculative",
+   "QWEN_QUALIFICATION_CONTEXT=245760",
+   "QWEN_QUALIFICATION_EXECUTION=eager",
+   "QWEN_QUALIFICATION_KV=kvarn"
+  ]
+ },
+ "rows": [
+  {
+   "prompt_tokens": 1076,
+   "completion_tokens": 1024,
+   "finish_reason": "length",
+   "ttft_s": 1.286,
+   "elapsed_seconds": 12.61675391099925,
+   "decode_window_s": 11.33,
+   "committed_tok_s": 90.38,
+   "spec_accept_length_before": 3.55,
+   "spec_accept_length_after": 2.925,
+   "power": {
+    "watts_samples": 25.0,
+    "watts_min": 28.29,
+    "watts_p50": 267.42,
+    "watts_p90": 270.26,
+    "watts_max": 270.97
+   },
+   "depth_target": 1024,
+   "repetition": 0
+  },
+  {
+   "prompt_tokens": 1076,
+   "completion_tokens": 1024,
+   "finish_reason": "length",
+   "ttft_s": 1.247,
+   "elapsed_seconds": 12.990325611999651,
+   "decode_window_s": 11.743,
+   "committed_tok_s": 87.2,
+   "spec_accept_length_before": 2.925,
+   "spec_accept_length_after": 4.85,
+   "power": {
+    "watts_samples": 25.0,
+    "watts_min": 234.78,
+    "watts_p50": 268.5,
+    "watts_p90": 270.3,
+    "watts_max": 271.63
+   },
+   "depth_target": 1024,
+   "repetition": 1
+  },
+  {
+   "prompt_tokens": 1076,
+   "completion_tokens": 1024,
+   "finish_reason": "length",
+   "ttft_s": 1.254,
+   "elapsed_seconds": 14.212173705000168,
+   "decode_window_s": 12.958,
+   "committed_tok_s": 79.02,
+   "spec_accept_length_before": 4.85,
+   "spec_accept_length_after": 2.4,
+   "power": {
+    "watts_samples": 28.0,
+    "watts_min": 248.13,
+    "watts_p50": 268.07,
+    "watts_p90": 271.07,
+    "watts_max": 273.93
+   },
+   "depth_target": 1024,
+   "repetition": 2
+  },
+  {
+   "prompt_tokens": 1076,
+   "completion_tokens": 1024,
+   "finish_reason": "length",
+   "ttft_s": 1.255,
+   "elapsed_seconds": 13.947968331999618,
+   "decode_window_s": 12.693,
+   "committed_tok_s": 80.67,
+   "spec_accept_length_before": 2.4,
+   "spec_accept_length_after": 3.15,
+   "power": {
+    "watts_samples": 27.0,
+    "watts_min": 254.77,
+    "watts_p50": 268.18,
+    "watts_p90": 270.17,
+    "watts_max": 271.67
+   },
+   "depth_target": 1024,
+   "repetition": 3
+  },
+  {
+   "prompt_tokens": 1076,
+   "completion_tokens": 1024,
+   "finish_reason": "length",
+   "ttft_s": 1.252,
+   "elapsed_seconds": 14.245269730000473,
+   "decode_window_s": 12.993,
+   "committed_tok_s": 78.81,
+   "spec_accept_length_before": 3.15,
+   "spec_accept_length_after": 2.85,
+   "power": {
+    "watts_samples": 28.0,
+    "watts_min": 245.52,
+    "watts_p50": 267.52,
+    "watts_p90": 270.45,
+    "watts_max": 271.17
+   },
+   "depth_target": 1024,
+   "repetition": 4
+  },
+  {
+   "prompt_tokens": 8244,
+   "completion_tokens": 1024,
+   "finish_reason": "length",
+   "ttft_s": 9.194,
+   "elapsed_seconds": 24.503492959999676,
+   "decode_window_s": 15.31,
+   "committed_tok_s": 66.89,
+   "spec_accept_length_before": 2.85,
+   "spec_accept_length_after": 3.075,
+   "power": {
+    "watts_samples": 48.0,
+    "watts_min": 238.41,
+    "watts_p50": 270.19,
+    "watts_p90": 276.17,
+    "watts_max": 277.04
+   },
+   "depth_target": 8192,
+   "repetition": 0
+  },
+  {
+   "prompt_tokens": 8244,
+   "completion_tokens": 1024,
+   "finish_reason": "length",
+   "ttft_s": 9.19,
+   "elapsed_seconds": 22.607059619999745,
+   "decode_window_s": 13.417,
+   "committed_tok_s": 76.32,
+   "spec_accept_length_before": 3.075,
+   "spec_accept_length_after": 4.625,
+   "power": {
+    "watts_samples": 44.0,
+    "watts_min": 239.24,
+    "watts_p50": 270.42,
+    "watts_p90": 276.09,
+    "watts_max": 276.59
+   },
+   "depth_target": 8192,
+   "repetition": 1
+  },
+  {
+   "prompt_tokens": 8244,
+   "completion_tokens": 1024,
+   "finish_reason": "length",
+   "ttft_s": 9.196,
+   "elapsed_seconds": 22.790997307999532,
+   "decode_window_s": 13.595,
+   "committed_tok_s": 75.32,
+   "spec_accept_length_before": 4.625,
+   "spec_accept_length_after": 5.475,
+   "power": {
+    "watts_samples": 44.0,
+    "watts_min": 241.29,
+    "watts_p50": 270.11,
+    "watts_p90": 275.73,
+    "watts_max": 276.46
+   },
+   "depth_target": 8192,
+   "repetition": 2
+  },
+  {
+   "prompt_tokens": 8244,
+   "completion_tokens": 1024,
+   "finish_reason": "length",
+   "ttft_s": 9.219,
+   "elapsed_seconds": 24.066655929000262,
+   "decode_window_s": 14.847,
+   "committed_tok_s": 68.97,
+   "spec_accept_length_before": 5.475,
+   "spec_accept_length_after": 4.05,
+   "power": {
+    "watts_samples": 47.0,
+    "watts_min": 242.0,
+    "watts_p50": 270.2,
+    "watts_p90": 275.3,
+    "watts_max": 278.45
+   },
+   "depth_target": 8192,
+   "repetition": 3
+  },
+  {
+   "prompt_tokens": 8244,
+   "completion_tokens": 1024,
+   "finish_reason": "length",
+   "ttft_s": 9.215,
+   "elapsed_seconds": 23.803416978000314,
+   "decode_window_s": 14.588,
+   "committed_tok_s": 70.19,
+   "spec_accept_length_before": 4.05,
+   "spec_accept_length_after": 3.475,
+   "power": {
+    "watts_samples": 46.0,
+    "watts_min": 243.01,
+    "watts_p50": 270.01,
+    "watts_p90": 275.73,
+    "watts_max": 276.6
+   },
+   "depth_target": 8192,
+   "repetition": 4
+  },
+  {
+   "prompt_tokens": 32821,
+   "completion_tokens": 1024,
+   "finish_reason": "length",
+   "ttft_s": 40.702,
+   "elapsed_seconds": 64.15393827800017,
+   "decode_window_s": 23.452,
+   "committed_tok_s": 43.66,
+   "spec_accept_length_before": 3.475,
+   "spec_accept_length_after": 3.55,
+   "power": {
+    "watts_samples": 124.0,
+    "watts_min": 183.85,
+    "watts_p50": 274.96,
+    "watts_p90": 276.18,
+    "watts_max": 278.43
+   },
+   "depth_target": 32768,
+   "repetition": 0
+  },
+  {
+   "prompt_tokens": 32821,
+   "completion_tokens": 1024,
+   "finish_reason": "length",
+   "ttft_s": 40.735,
+   "elapsed_seconds": 62.992372136000085,
+   "decode_window_s": 22.257,
+   "committed_tok_s": 46.01,
+   "spec_accept_length_before": 3.55,
+   "spec_accept_length_after": 2.725,
+   "power": {
+    "watts_samples": 122.0,
+    "watts_min": 193.93,
+    "watts_p50": 274.98,
+    "watts_p90": 276.13,
+    "watts_max": 277.78
+   },
+   "depth_target": 32768,
+   "repetition": 1
+  },
+  {
+   "prompt_tokens": 32821,
+   "completion_tokens": 1024,
+   "finish_reason": "length",
+   "ttft_s": 40.811,
+   "elapsed_seconds": 63.555786719000025,
+   "decode_window_s": 22.745,
+   "committed_tok_s": 45.02,
+   "spec_accept_length_before": 2.725,
+   "spec_accept_length_after": 3.275,
+   "power": {
+    "watts_samples": 123.0,
+    "watts_min": 183.1,
+    "watts_p50": 274.8,
+    "watts_p90": 276.15,
+    "watts_max": 276.99
+   },
+   "depth_target": 32768,
+   "repetition": 2
+  },
+  {
+   "prompt_tokens": 32821,
+   "completion_tokens": 1024,
+   "finish_reason": "length",
+   "ttft_s": 40.771,
+   "elapsed_seconds": 62.17034612000043,
+   "decode_window_s": 21.4,
+   "committed_tok_s": 47.85,
+   "spec_accept_length_before": 3.275,
+   "spec_accept_length_after": 3.175,
+   "power": {
+    "watts_samples": 120.0,
+    "watts_min": 185.57,
+    "watts_p50": 274.61,
+    "watts_p90": 275.98,
+    "watts_max": 277.76
+   },
+   "depth_target": 32768,
+   "repetition": 3
+  },
+  {
+   "prompt_tokens": 32821,
+   "completion_tokens": 1024,
+   "finish_reason": "length",
+   "ttft_s": 40.883,
+   "elapsed_seconds": 64.40347809300056,
+   "decode_window_s": 23.52,
+   "committed_tok_s": 43.54,
+   "spec_accept_length_before": 3.175,
+   "spec_accept_length_after": 3.075,
+   "power": {
+    "watts_samples": 124.0,
+    "watts_min": 227.57,
+    "watts_p50": 274.86,
+    "watts_p90": 276.55,
+    "watts_max": 277.54
+   },
+   "depth_target": 32768,
+   "repetition": 4
+  }
+ ],
+ "committed_tok_s_min": 43.54,
+ "committed_tok_s_max": 90.38,
+ "depth_summary": {
+  "1024": {
+   "reps": 5,
+   "prompt_tokens": 1076,
+   "completion_tokens": 1024,
+   "decode_tok_s": [
+    90.38,
+    87.2,
+    79.02,
+    80.67,
+    78.81
+   ],
+   "decode_tok_s_median": 80.67,
+   "decode_tok_s_min": 78.81,
+   "decode_tok_s_max": 90.38,
+   "accept_gauge_after": [
+    2.925,
+    4.85,
+    2.4,
+    3.15,
+    2.85
+   ],
+   "ttft_s_median": 1.25,
+   "watts_p50_median": 268.1
+  },
+  "8192": {
+   "reps": 5,
+   "prompt_tokens": 8244,
+   "completion_tokens": 1024,
+   "decode_tok_s": [
+    66.89,
+    76.32,
+    75.32,
+    68.97,
+    70.19
+   ],
+   "decode_tok_s_median": 70.19,
+   "decode_tok_s_min": 66.89,
+   "decode_tok_s_max": 76.32,
+   "accept_gauge_after": [
+    3.075,
+    4.625,
+    5.475,
+    4.05,
+    3.475
+   ],
+   "ttft_s_median": 9.2,
+   "watts_p50_median": 270.2
+  },
+  "32768": {
+   "reps": 5,
+   "prompt_tokens": 32821,
+   "completion_tokens": 1024,
+   "decode_tok_s": [
+    43.66,
+    46.01,
+    45.02,
+    47.85,
+    43.54
+   ],
+   "decode_tok_s_median": 45.02,
+   "decode_tok_s_min": 43.54,
+   "decode_tok_s_max": 47.85,
+   "accept_gauge_after": [
+    3.55,
+    2.725,
+    3.275,
+    3.175,
+    3.075
+   ],
+   "ttft_s_median": 40.77,
+   "watts_p50_median": 274.9
+  }
+ }
+}

@@ -254,3 +254,117 @@ stage16). Marlin measured at the fp16 ceiling (61-63 TFLOPs; cuBLAS 69;
 torch._int_mm int8 44-50 TOPS, slower); the only lever beyond this is the
 vLLM marlin-int8 W4A8 transplant. Benches unchanged.
 
+
+
+## Stage 21: attention correctness repairs (P0-A/P0-B)
+
+**Base:** stage20 series (through dflash-draft-vocab). **Class:** correctness
+repair of two source defects introduced by earlier stages; both invalidated the
+speed records measured on top of them.
+
+**P0-A — inverted live-row mask in `packed_attention_out_nosync`.** Stage19j
+(5da6aba) replaced the correct `output[empty] = 0` zeroing with
+`output.mul_(torch.logical_not(row_live)...)` while removing host syncs for
+CUDA-graph capture. The polarity is inverted: LIVE verify rows were multiplied
+by zero and dead/padded rows were kept. The mask ran on every eight-token
+target-verify step, so stage19j/19/20 generations came from a model whose
+full-attention layers contributed zero attention output; the live endpoint
+emitted incoherent text and the 26.5-155 tok/s records were measured on that
+corrupted path. Stage19g parity (rmse-identical, `output[empty] = 0`) was
+never re-run after the stage19j rewrite. Fix: `output.masked_fill_(~row_live,
+0)` — assignment semantics (a stale NaN workspace cannot leak through
+multiplication by zero), device-side only, CUDA-graph safe.
+
+**P0-B — un-normalized, wrong-base chunk merge in `packed_attention_flash`.**
+Since stage18 (09940c8), multi-chunk prefill (>64 pages = >8192 tokens)
+combined FlashInfer-normalized chunk outputs as `a*O1 + b*O2` without dividing
+by the merged softmax mass `a+b`, and computed weights with `torch.exp`
+although FlashInfer returns log2-domain LSE (`ptx_log2` in the kernel). Every
+context deeper than 8192 tokens was served with attention outputs scaled by up
+to the chunk count. The stage18 oracle check ran only at 8192 tokens (exactly
+one chunk), so the merge was never covered. Fix: exp2 weights, divide by
+`a+b` (zero-mass rows stay 0/-inf), log2-domain LSE bookkeeping.
+
+**Qualification:** `qualification/kvarn-attention-regressions.py` (exclusive
+GPU, inside the candidate image). P0-A: mixed live/dead rows, graph-padding
+geometry (n<queries), all-dead, the production all-live eight-token verify
+block, NaN-poisoned workspace, and a negative control that re-applies the
+inverted mask and must be detected. P0-B: 130-page (three-chunk, uneven, raw
+tail) FA parity against the unchanged PyTorch oracle, a single-chunk control,
+an empirical FlashInfer LSE-base probe (measured ratio to natural log 1.4427 =
+1/ln2), and the equal-mass merge spec (outputs 2 and 4 must merge to 3).
+Evidence: `../bench/results/attention-regressions-stage20-pre-fix.json`
+(FAIL: live rows erased; multi-chunk rmse 1.1e-2) and
+`../bench/results/attention-regressions-stage21-post-fix.json` (PASS: live-row
+rmse 4.9e-5; multi-chunk rmse 2.5e-4 within the FA gate of kernel tolerances
+plus one output bf16 ulp). Module identities recorded inside both reports.
+All earlier stage19j/20 speed and acceptance records remain historical and are
+not promotable; corrected measurements follow in the decode ledger.
+
+
+## Stage 22 (staged, uncommitted): B2 commit-tail capture + store B-spec
+
+**Base:** stage21 series (through dflash-draft-vocab). **Class:** performance.
+Behind `--kvarn-commit-graph` (default OFF; requires graph mode; eager
+fallback on capture failure, logged).
+
+**C4 (audit F4).** Free-slot pinned mirror (`refresh_free_slot_mirror` /
+`mirrored_tail_slots`, exact fallback on stale), device-only
+`mark_sink_pages_out`, allocator admission reads the mirror. Removes the 42
+scalar admission readbacks per check. Proof: 100 sync-free reads under
+sync-debug-error, exhaustion fails closed to 0, refresh converges exactly.
+
+**C2.** `begin/finish_status_mirror` (pinned D2H + event); draft check
+overlapped across verify-input prep; post-verify drain removed on the fast
+path; commit-tail + draft-append gated by ONE end-of-step check before
+on_publish/results (fail-closed contract unchanged).
+
+**C1.** `_KVarNCommitGraphRunner` captures the target commit loop +
+draft-append branch; static buffers = worker locs/positions + own
+commit_lens/hidden; neutral dummy-page warmup; dedicated graph mempool.
+
+**Store B-spec (audit F6).** `_prepare_write` validation lanes sized
+`B=next_power_of_2(count)` instead of fixed 128; GPU-qualified through the
+full R1 suite including capture/replay.
+
+**Qualification (overlays in `/tmp/b2impl`, fixtures + logs there):** R1
+capture/replay bit-identical (commit_lens 0..8, poisoned no-op); R2 3-step
+chain oracle bit-exact (accept 3/6/4); R3 shadow counter 200 trials, 0
+mismatches; C4 admission proof; full suite re-run green on the built image.
+Live validation found and fixed three integration bugs the fixtures cannot
+see: the worker predicates `_kvarn_commit_graph_enabled/_supported` were
+called but never defined; `mark_sink_pages_out` must stage CPU-resident
+sink indices onto the cache device during capture prep; pinned mirrors must
+be allocated outside `torch.inference_mode` (inference tensors reject
+out-of-mode inplace updates). A/B store-tail bench (16+5 layers, 50 steps,
+status 0 both arms): eager 8079/8164/8303 us/step vs captured
+1142/1068/1066 @8/64/230 pages (7.1-7.8x, depth-independent; serving-scaled
+~4.3 ms/step).
+
+**ON arm unblocked (two live-only root causes, both fixture-pinned):**
+(1) ensure_capture's warmup ran `discard_provisional` pool-wide AFTER the
+verify graph staged the step, wiping it; capture now happens once at
+decode-branch start, before any pool mutation (probe hidden sized to the
+draft's concatenated context-feature width, not raw hidden). (2) the worker
+tail appended target-hidden to draft KV UNCONDITIONALLY after replay —
+the replay already contains that append, and re-appending committed rows
+sets sticky bit 1; the tail now skips the eager append on replayed steps
+(`commit_graph_replayed`). `qualification/kvarn-commit-graph-blocker.py`
+pins both: A (warmup-wipe repro, must fail), B bit-1 fail-closed,
+C neutral, D bit-4 independent, E fixed order, F real-tail repro
+(detector), G gated-append fix; suite exit 0 on the built image.
+Deployed endpoint runs stage22 with the flag ON.
+
+## Stage 22 (deployed): F1 packed-NaN gate + F6 store B-spec
+
+`kvarn-packed-gate.patch` gates packed loads and matmuls on representation
+validity (raw-only sink pages and incomplete pages never feed the packed
+operand); the deployed kernel's NaN contamination is reproduced by
+`qualification/packed-nan-regression` (CPU proof + GPU fixture with
+negative controls; deployed goes NaN where [5,7] is expected, gated fix is
+exact, and bit-identical on finite data). The gate also removes the
+redundant dual raw+packed computation: 984 vs 1810 us/launch at 230 pages.
+`kvarn-store-bspec.patch` sizes `_prepare_write` validation lanes to
+`next_power_of_2(count)` (audit F6). Measured 5-rep medians vs stage21:
+90.9 (+12.7%) @1k, 76.9 (+9.6%) @8k, 57.1 (+26.9%) @32k
+(`bench/results/decode-c1-stage22-off.json`).

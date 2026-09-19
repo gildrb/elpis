@@ -1,0 +1,17 @@
+diff --git a/python/sglang/kernels/ops/kvarn/store.py b/python/sglang/kernels/ops/kvarn/store.py
+--- a/python/sglang/kernels/ops/kvarn/store.py
++++ b/python/sglang/kernels/ops/kvarn/store.py
+@@ -452,7 +452,11 @@
+     _prepare_write[(1,)](locations, view.page_to_tail_slot, view.tail_to_page,
+                          view.committed_mask, view.provisional_mask, view.valid_lengths,
+                          view.preview_ready, status, N=count, PAGES=view.packed.shape[0],
+-                         SLOTS=view.raw_keys.shape[0], B=128,
++                         SLOTS=view.raw_keys.shape[0],
++                         # Size the validation lanes to the actual write width
++                         # (the same specialization commit_prefix_out already
++                         # uses); dead lanes beyond N contribute nothing.
++                         B=triton.next_power_of_2(count),
+                          S=triton.next_power_of_2(view.raw_keys.shape[0]),
+                          IS_PROVISIONAL=provisional, num_warps=4, num_stages=1)
+     _scatter_write[(count, view.layout.kv_heads)](
+
