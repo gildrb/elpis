@@ -1,0 +1,430 @@
+diff --git a/python/sglang/srt/layers/linear.py b/python/sglang/srt/layers/linear.py
+index d84019f..80e8318 100644
+--- a/python/sglang/srt/layers/linear.py
++++ b/python/sglang/srt/layers/linear.py
+@@ -591,6 +591,25 @@ class MergedColumnParallelLinear(ColumnParallelLinear):
+         if isinstance(loaded_shard_id, tuple):
+             if hasattr(param, "load_merged_column_weight"):
+                 return self.weight_loader_v2(param, loaded_weight, loaded_shard_id)
++            if getattr(param, "is_gguf_weight_type", False):
++                # One GGUF tensor backs several merged shards: record the same
++                # quantization type for every shard id it covers.
++                for idx in loaded_shard_id:
++                    param.data[idx].copy_(loaded_weight)
++                    param.shard_weight_type[idx] = loaded_weight.item()
++                return
++            if getattr(param, "is_gguf_weight", False):
++                # One GGUF tensor backs several merged shards (e.g. in_proj_qkv
++                # covering q/k/v): split rows by output size and load each
++                # slice through the integer-shard data-container flow.
++                offset = 0
++                for idx in loaded_shard_id:
++                    size = self.output_sizes[idx]
++                    self.weight_loader(
++                        param, loaded_weight.narrow(0, offset, size), idx
++                    )
++                    offset += size
++                return
+             raise NotImplementedError(
+                 "Shard id with multiple indices is not supported in weight_loader, "
+                 "please use weight_loader_v2 instead."
+diff --git a/python/sglang/srt/model_loader/gguf_name_maps.py b/python/sglang/srt/model_loader/gguf_name_maps.py
+index 434f337..4f21959 100644
+--- a/python/sglang/srt/model_loader/gguf_name_maps.py
++++ b/python/sglang/srt/model_loader/gguf_name_maps.py
+@@ -67,6 +67,81 @@ def build_muse_glimmer_name_map(config: PretrainedConfig) -> Dict[str, str]:
+ # Keyed by HF ``config.model_type`` (loader.py looks it up with that), which is
+ # not the GGUF ``general.architecture`` that GGUF_NATIVE_CONFIG_BUILDERS uses:
+ # llama.cpp spells the arch "muse-glimmer" while the HF config says "muse_glimmer".
++# Qwen3.5 (hybrid gated-delta-net + gated full attention) packed by PrismML
++# llama.cpp as arch "qwen35" (HF model_type "qwen3_5"). Layer kinds alternate
++# with the same (i + 1) % full_attention_interval convention llama.cpp uses:
++# a layer is linear/GDN unless it is the last of each interval block.
++_QWEN35_GLOBAL_TENSORS = {
++    "token_embd": "model.embed_tokens",
++    "output_norm": "model.norm",
++    "output": "lm_head",
++}
++
++_QWEN35_LINEAR_TENSORS = {
++    "attn_qkv": "linear_attn.in_proj_qkv",
++    "attn_gate": "linear_attn.in_proj_z",
++    "ssm_conv1d": "linear_attn.conv1d",
++    "ssm_out": "linear_attn.out_proj",
++    "ssm_norm": "linear_attn.norm",
++}
++
++# In-projections that the checkpoint stores fused but HF splits; shard routing
++# (shard ids (0, 1, 2) / 0 / 1) is Qwen3_5ForCausalLM.load_weights' job.
++_QWEN35_SSM_PROJECTIONS = {
++    "ssm_beta": "linear_attn.in_proj_b",
++    "ssm_alpha": "linear_attn.in_proj_a",
++}
++
++_QWEN35_FULL_TENSORS = {
++    # PrismML names the fused per-head [query, gate] projection attn_q on full
++    # attention layers; this matches the HF q_proj layout (24 heads x
++    # [256 query, 256 gate]) that routes to the "q" shard of qkv_proj.
++    "attn_q": "self_attn.q_proj",
++    "attn_k": "self_attn.k_proj",
++    "attn_v": "self_attn.v_proj",
++    "attn_q_norm": "self_attn.q_norm",
++    "attn_k_norm": "self_attn.k_norm",
++    "attn_output": "self_attn.o_proj",
++}
++
++_QWEN35_SCALAR_TENSORS = {
++    "ssm_dt.bias": "linear_attn.dt_bias",
++    "ssm_a": "linear_attn.A_log",
++}
++
++
++def build_qwen35_name_map(config: PretrainedConfig) -> Dict[str, str]:
++    interval = getattr(config, "full_attention_interval", 4) or 4
++    num_layers = config.num_hidden_layers
++    name_map = {
++        f"{gguf}.weight": f"{hf}.weight"
++        for gguf, hf in _QWEN35_GLOBAL_TENSORS.items()
++    }
++    for layer in range(num_layers):
++        prefix = f"model.layers.{layer}."
++        block = f"blk.{layer}."
++        is_linear = (layer + 1) % interval != 0
++        table = _QWEN35_LINEAR_TENSORS if is_linear else _QWEN35_FULL_TENSORS
++        for gguf, hf in table.items():
++            name_map[f"{block}{gguf}.weight"] = f"{prefix}{hf}.weight"
++        if is_linear:
++            for gguf, hf in _QWEN35_SSM_PROJECTIONS.items():
++                name_map[f"{block}{gguf}.weight"] = f"{prefix}{hf}.weight"
++            for gguf, hf in _QWEN35_SCALAR_TENSORS.items():
++                name_map[f"{block}{gguf}"] = f"{prefix}{hf}"
++        name_map[f"{block}attn_norm.weight"] = f"{prefix}input_layernorm.weight"
++        name_map[f"{block}post_attention_norm.weight"] = (
++            f"{prefix}post_attention_layernorm.weight"
++        )
++        name_map[f"{block}ffn_gate.weight"] = f"{prefix}mlp.gate_proj.weight"
++        name_map[f"{block}ffn_up.weight"] = f"{prefix}mlp.up_proj.weight"
++        name_map[f"{block}ffn_down.weight"] = f"{prefix}mlp.down_proj.weight"
++    return name_map
++
++
+ GGUF_HF_NAME_MAP_BUILDERS: Dict[str, Callable[[PretrainedConfig], Dict[str, str]]] = {
+     "muse_glimmer": build_muse_glimmer_name_map,
++    "qwen3_5": build_qwen35_name_map,
++    # The text-only serving wrapper uses the Qwen3_5TextConfig model_type.
++    "qwen3_5_text": build_qwen35_name_map,
+ }
+diff --git a/python/sglang/srt/model_loader/loader.py b/python/sglang/srt/model_loader/loader.py
+index 3211f0c..a87896d 100644
+--- a/python/sglang/srt/model_loader/loader.py
++++ b/python/sglang/srt/model_loader/loader.py
+@@ -814,6 +814,31 @@ class DefaultModelLoader(BaseModelLoader):
+                 ):
+                     continue
+                 quant_method.process_weights_after_loading(module)
++        import os as _os
++        if _os.environ.get("SGLANG_PQ2_DEBUG"):
++            from torch.nn.parameter import UninitializedParameter
++            for name, param in model.named_parameters():
++                if name.endswith("qweight") and (
++                    "layers.0." in name or "embed_tokens" in name or "lm_head" in name):
++                    if isinstance(param, UninitializedParameter):
++                        print(f"[pq2dbg-norm] {name} UNINITIALIZED-AFTER-PROCESS", flush=True)
++                        continue
++                    norm = param.float().norm().item()
++                    nz = (param != 0).float().mean().item()
++                    print(f"[pq2dbg-norm] {name} shape={tuple(param.shape)} norm={norm:.4e} nonzero_frac={nz:.4f}", flush=True)
++            layer0 = model.model.layers[0]
++            handles = []
++            def _mk(tag):
++                def hook(_m, _inp, out):
++                    t = out[0] if isinstance(out, tuple) else out
++                    if torch.is_tensor(t):
++                        print(f"[pq2dbg-fwd] {tag}: shape={tuple(t.shape)} absmean={t.float().abs().mean().item():.6f} norm={t.float().norm().item():.4f}", flush=True)
++                return hook
++            handles.append(model.model.embed_tokens.register_forward_hook(_mk("embed")))
++            handles.append(layer0.register_forward_hook(_mk("layer0-out")))
++            handles.append(model.model.layers[1].register_forward_hook(_mk("layer1-out")))
++            handles.append(model.model.layers[63].register_forward_hook(_mk("layer63-out")))
++            handles.append(model.model.norm.register_forward_hook(_mk("final-norm")))
+         return model.eval()
+ 
+     def commit_model_weights(
+@@ -3133,10 +3158,26 @@ class GGUFModelLoader(BaseModelLoader):
+             )
+ 
+     def _prepare_weights(self, model_name_or_path: str):
++        """Resolve the GGUF payload path.
++
++        Accepts either the .gguf file itself or a serving directory that
++        contains the model config/tokenizer plus exactly one .gguf payload
++        (the artifact-wrapper layout used by the one production path).
++        """
+         if os.path.isfile(model_name_or_path):
+             return model_name_or_path
+-        else:
+-            raise ValueError(f"{model_name_or_path} is not a file.")
++        if os.path.isdir(model_name_or_path):
++            gguf_files = sorted(
++                entry for entry in os.listdir(model_name_or_path)
++                if entry.endswith(".gguf")
++            )
++            if len(gguf_files) == 1:
++                return os.path.join(model_name_or_path, gguf_files[0])
++            raise ValueError(
++                f"{model_name_or_path} must contain exactly one .gguf payload, "
++                f"found {gguf_files}"
++            )
++        raise ValueError(f"{model_name_or_path} is not a file or a serving directory.")
+ 
+     def _get_gguf_weights_map(self, model_config: ModelConfig):
+         """
+@@ -3208,6 +3249,10 @@ class GGUFModelLoader(BaseModelLoader):
+ 
+         local_model_path = self._prepare_weights(model_config.model_path)
+         gguf_weights_map = self._get_gguf_weights_map(model_config)
++        # The PQ2_0 artifact contract (prism.hadamard metadata + fold coverage)
++        # must be validated and armed before any weight is applied.
++        from sglang.srt.layers.quantization.pq2_ops import init_pq2_contract
++        init_pq2_contract(local_model_path, gguf_weights_map)
+         # we can only know if tie word embeddings after mapping weights
+         if "lm_head.weight" in get_gguf_extra_tensor_names(
+             local_model_path, gguf_weights_map
+@@ -3222,6 +3267,71 @@ class GGUFModelLoader(BaseModelLoader):
+             model.load_weights(
+                 self._get_weights_iterator(local_model_path, gguf_weights_map)
+             )
++            import os as _os
++            if _os.environ.get("SGLANG_PQ2_DEBUG"):
++                from torch.nn.parameter import UninitializedParameter
++                for name, param in model.named_parameters():
++                    if name.endswith("qweight") and (
++                        "layers.0." in name or "embed_tokens" in name or "lm_head" in name):
++                        if isinstance(param, UninitializedParameter):
++                            print(f"[pq2dbg-norm] {name} UNINITIALIZED-AFTER-PROCESS", flush=True)
++                            continue
++                        norm = param.float().norm().item()
++                        nz = (param != 0).float().mean().item()
++                        print(f"[pq2dbg-norm] {name} shape={tuple(param.shape)} norm={norm:.4e} nonzero_frac={nz:.4f}", flush=True)
++                l0 = model.model.layers[0]
++                for sub in ("linear_attn.in_proj_qkvz", "linear_attn.in_proj_ba", "mlp.gate_up_proj"):
++                    mod = dict(l0.named_modules()).get(sub)
++                    if mod is None:
++                        print(f"[pq2dbg-sub] {sub}: MISSING", flush=True)
++                        continue
++                    qwt = getattr(mod, "qweight_type", None)
++                    qw = getattr(mod, "qweight", None)
++                    from torch.nn.parameter import UninitializedParameter as _UP
++                    print(f"[pq2dbg-sub] {sub}: qweight={'UNINIT' if isinstance(qw, _UP) else tuple(qw.shape)} "
++                          f"shard_id={getattr(qw, 'shard_id', None)} "
++                          f"container={len(getattr(qw, 'data_container', []) or [])} "
++                          f"wtype={getattr(qwt, 'weight_type', None)} swt={getattr(qwt, 'shard_weight_type', None)}", flush=True)
++                def _mk_hook(tag, dump_first=False):
++                    _dump_dir = _os.environ.get("SGLANG_PQ2_DEBUG_DUMP")
++                    _calls = {"n": 0}
++                    def hook(_m, _inp, out):
++                        t = out[0] if isinstance(out, tuple) else out
++                        if torch.is_tensor(t):
++                            _calls["n"] += 1
++                            if _dump_dir and _calls["n"] <= 64:
++                                inp = _inp[0] if _inp else None
++                                torch.save({
++                                    "out": t.detach().float().cpu(),
++                                    "in": inp.detach().float().cpu() if torch.is_tensor(inp) else None,
++                                }, f"{_dump_dir}/{tag}.{_calls['n']}.pt")
++                                ids_head = _inp[0].reshape(-1)[:8].tolist() if torch.is_tensor(inp) else None
++                                print(f"[pq2dbg-dump] {tag} call={_calls['n']} input_ids={ids_head}", flush=True)
++                            extra = ""
++                            if dump_first and t.dim() == 2:
++                                extra = " first8=" + str([round(v, 6) for v in t[0, :8].float().tolist()])
++                                inp = _inp[0] if _inp else None
++                                if torch.is_tensor(inp):
++                                    extra += " input_ids=" + str(inp.reshape(-1)[:8].tolist())
++                            print(f"[pq2dbg-fwd] {tag}: shape={tuple(t.shape)} absmean={t.float().abs().mean().item():.6f} norm={t.float().norm().item():.4f}{extra}", flush=True)
++                    return hook
++                model.model.embed_tokens.register_forward_hook(_mk_hook("embed", dump_first=True))
++                for _li in (0, 1, 2, 3, 63):
++                    model.model.layers[_li].register_forward_hook(_mk_hook(f"layer{_li}-out", dump_first=True))
++                _l0gdn = dict(model.model.layers[0].named_modules())["linear_attn"]
++                _l0gdn.in_proj_qkvz.register_forward_hook(_mk_hook("l0-inproj-qkvz", dump_first=True))
++                _l0gdn.in_proj_ba.register_forward_hook(_mk_hook("l0-inproj-ba", dump_first=True))
++                _l0gdn.out_proj.register_forward_hook(_mk_hook("l0-outproj", dump_first=True))
++                _l0gdn.register_forward_hook(_mk_hook("l0-gdn", dump_first=True))
++                _l0gdn.attn.register_forward_hook(_mk_hook("l0-gdn-attn", dump_first=True))
++                _l0gdn.norm.register_forward_hook(_mk_hook("l0-gdn-norm", dump_first=True))
++                _l0mlp = dict(model.model.layers[0].named_modules())["mlp"]
++                _l0mlp.gate_up_proj.register_forward_hook(_mk_hook("l0-gateup", dump_first=True))
++                model.model.layers[3].qkv_proj.register_forward_hook(_mk_hook("l3-qkv", dump_first=True))
++                model.model.layers[1].register_forward_hook(_mk_hook("layer1-out"))
++                model.model.layers[63].register_forward_hook(_mk_hook("layer63-out"))
++                model.model.norm.register_forward_hook(_mk_hook("final-norm"))
++                print("[pq2dbg] hooks registered", flush=True)
+ 
+             for _, module in model.named_modules():
+                 quant_method = getattr(module, "quant_method", None)
+diff --git a/python/sglang/srt/model_loader/weight_utils.py b/python/sglang/srt/model_loader/weight_utils.py
+index 965123f..365e3d1 100644
+--- a/python/sglang/srt/model_loader/weight_utils.py
++++ b/python/sglang/srt/model_loader/weight_utils.py
+@@ -1371,6 +1371,98 @@ def get_gguf_extra_tensor_names(
+     return [gguf_to_hf_name_map[key] for key in extra_keys]
+ 
+ 
++def _gdn_v_head_index() -> "torch.Tensor":
++    """Source index for the GGML rep-major v-head order -> SGLang k-group-major."""
++    import numpy as _np
++    idx = _np.empty(48, dtype=_np.int64)
++    for h_f in range(48):
++        g, r = h_f // 3, h_f % 3
++        idx[h_f] = r * 16 + g
++    return torch.from_numpy(idx)
++
++
++def _apply_gguf_value_transform(
++    hf_name: str, weight_type, weight
++) -> torch.Tensor:
++    """Value-level fixes for GGUF checkpoints that store derived forms.
++
++    The PrismML qwen35 GGUF stores the decoded GDN decay ``ssm_a`` (always
++    negative) where HF carries ``A_log``; and conv1d as a 2-D
++    [conv_dim, kernel] matrix where the SGLang parameter is pre-unsqueezed
++    to [conv_dim, 1, kernel]. Everything else passes through unchanged.
++    """
++    if weight_type.name == "BF16":
++        # gguf-py hands BF16 tensors over as raw little-endian bytes; the
++        # values must be bit-reinterpreted, never numerically cast. BF16
++        # tensors still need the GDN v-head reorder below (in_proj_b/a).
++        raw = torch.tensor(weight)
++        if raw.shape[-1] % 2 != 0:
++            raise ValueError(f"GGUF {hf_name}: odd BF16 byte count")
++        tensor = raw.view(torch.bfloat16)
++    else:
++        tensor = torch.tensor(weight)
++    # Quantized tensors are renamed to .qweight before this call; match on
++    # the logical parameter name so PQ2 rows get the same fixes as F32.
++    match_name = hf_name.replace(".qweight", ".weight")
++    if match_name.endswith("linear_attn.A_log"):
++        values = tensor.to(torch.float32)
++        if bool((values >= 0).any()):
++            raise ValueError(
++                f"GGUF {hf_name}: ssm_a must be negative decay values, "
++                f"min={values.min().item()}"
++            )
++        return torch.log(-values)
++    # GDN v-head reordering: the GGUF stores the 48 v-heads in the llama.cpp
++    # tiling (head = rep*16 + k_group, i.e. rep-major), while SGLang's GDN
++    # groups v-heads k-group-major (head = k_group*3 + rep). Verified against
++    # the retained checkpoint for the conv channels, z rows and per-head
++    # vectors; without the reorder the delta rule mixes head groups.
++    _GDN_V_PERM_SUFFIXES = (
++        "linear_attn.in_proj_z.weight",
++        "linear_attn.in_proj_b.weight",
++        "linear_attn.in_proj_a.weight",
++        "linear_attn.conv1d.weight",
++        "linear_attn.dt_bias",
++    )
++    if match_name.endswith("linear_attn.in_proj_qkv.weight"):
++        q_part = tensor[:2048]
++        k_part = tensor[2048:4096]
++        v_part = tensor[4096:].reshape(48, 128, *tensor.shape[1:])[_gdn_v_head_index()]
++        return torch.cat([q_part, k_part, v_part.reshape(6144, *tensor.shape[1:])], dim=0)
++    if any(match_name.endswith(s) for s in _GDN_V_PERM_SUFFIXES):
++        if match_name.endswith("linear_attn.conv1d.weight"):
++            # tensor arrives as [conv_dim, kernel]; the serving parameter is
++            # [conv_dim, 1, kernel].
++            head_view = tensor.reshape(80, 128, tensor.shape[-1])
++            head_view = torch.cat([head_view[:32], head_view[32:][_gdn_v_head_index()]], dim=0)
++            return head_view.reshape(tensor.shape[0], 1, tensor.shape[1])
++        if match_name.endswith("linear_attn.in_proj_z.weight"):
++            return tensor.reshape(48, 128, *tensor.shape[1:])[_gdn_v_head_index()].reshape(6144, *tensor.shape[1:])
++        return tensor[_gdn_v_head_index()]
++    # The PrismML GGUF stores Gemma-style RMSNorm weights pre-offset by 1
++    # (llama.cpp convention: the graph computes x/rms * w_gguf, the HF model
++    # computes x/rms * (1 + w_hf)); SGLang's RMSNorm is x/rms * w, so the
++    # offset must be removed. The GDN ssm_norm is stored verbatim (verified
++    # against the retained checkpoint) and must not be touched.
++    _GEMMA_OFFSET_NORM_SUFFIXES = (
++        "input_layernorm.weight",
++        "post_attention_layernorm.weight",
++        "self_attn.q_norm.weight",
++        "self_attn.k_norm.weight",
++    )
++    if match_name == "model.norm.weight" or any(
++        match_name.endswith(suffix) for suffix in _GEMMA_OFFSET_NORM_SUFFIXES
++    ):
++        return tensor.to(torch.float32) - 1.0
++    if (
++        match_name.endswith("linear_attn.conv1d.weight")
++        and tensor.ndim == 2
++        and weight_type.name == "F32"
++    ):
++        return tensor.reshape(tensor.shape[0], 1, tensor.shape[1])
++    return tensor
++
++
+ def gguf_quant_weights_iterator(
+     gguf_file: str, gguf_to_hf_name_map: Dict[str, str]
+ ) -> Generator[Tuple[str, torch.Tensor], None, None]:
+@@ -1436,6 +1527,9 @@ def gguf_quant_weights_iterator(
+         is_moe_weight = any(
+             pattern in tensor_name for pattern in MOE_WEIGHT_PATTERNS.keys()
+         )
++        _gguf_hf_name = (
++            gguf_to_hf_name_map.get(tensor_name) if not is_moe_weight else None
++        )
+ 
+         if is_moe_weight:
+             # MoE weights: split packed format into individual expert weights
+@@ -1465,7 +1559,7 @@ def gguf_quant_weights_iterator(
+ 
+             if weight_type.name != "F32":
+                 name = name.replace("weight", "qweight")
+-            param = torch.tensor(weight)
++            param = _apply_gguf_value_transform(name, weight_type, weight)
+             yield name, param
+ 
+ 
+diff --git a/python/sglang/srt/models/qwen3_5.py b/python/sglang/srt/models/qwen3_5.py
+index ff145c4..5cbc7f1 100644
+--- a/python/sglang/srt/models/qwen3_5.py
++++ b/python/sglang/srt/models/qwen3_5.py
+@@ -1644,6 +1644,10 @@ class Qwen3_5ForCausalLM(nn.Module):
+                 config.hidden_size,
+                 org_num_embeddings=config.vocab_size,
+                 enable_tp=not is_dp_attention_enabled(),
++                # GGUF targets carry a packed (PQ2_0) latent embedding table;
++                # without the quant config the module would build a dense
++                # zero-initialized weight and silently drop the checkpoint.
++                quant_config=quant_config,
+             )
+         else:
+             self.embed_tokens = PPMissingLayer()
+diff --git a/python/sglang/srt/models/qwen3_5_text.py b/python/sglang/srt/models/qwen3_5_text.py
+index 95a2d08..5fbd721 100644
+--- a/python/sglang/srt/models/qwen3_5_text.py
++++ b/python/sglang/srt/models/qwen3_5_text.py
+@@ -198,17 +198,20 @@ class Qwen3_5ForCausalLM(nn.Module):
+             for name, loaded_weight in weights:
+                 if name.startswith(_MODEL_PREFIX):
+                     yield name[len(_MODEL_PREFIX) :], loaded_weight
+-                elif name == "lm_head.weight":
++                elif name == "lm_head.weight" or name.startswith("lm_head."):
++                    # GGUF checkpoints yield the quantized head as
++                    # lm_head.qweight plus lm_head.qweight_type; route every
++                    # lm_head-prefixed parameter to the serving head module.
+                     if self.config.tie_word_embeddings:
+                         continue
+-                    if "lm_head.weight" not in params_dict:
++                    if name not in params_dict:
+                         continue
+-                    param = params_dict["lm_head.weight"]
++                    param = params_dict[name]
+                     weight_loader = getattr(
+                         param, "weight_loader", default_weight_loader
+                     )
+                     weight_loader(param, loaded_weight)
+-                    loaded_params.add("lm_head.weight")
++                    loaded_params.add(name)
+ 
+         body_loaded = self.model.load_weights(body_weights())
+         loaded_params.update(f"{_MODEL_PREFIX}{n}" for n in body_loaded)
