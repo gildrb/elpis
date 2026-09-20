@@ -1,5 +1,5 @@
 # Qualification/startup CPU executable. IO.print adds the sole final newline;
-# inference consumes the retained table without launching a token-path process.
+# enumeration reaches the same scalar decide7 leaf called by the GPU wrapper.
 import Base
 import ./speculation.bend as Speculation
 import ./speculation_spec.bend as Spec

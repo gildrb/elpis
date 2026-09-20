@@ -10,15 +10,15 @@ from __future__ import annotations
 import argparse
 import hashlib
 import importlib.util
-from collections.abc import Callable, Mapping
 import inspect
 import json
 import math
 import os
-from pathlib import Path
 import subprocess
 import sys
 import traceback
+from collections.abc import Callable, Mapping
+from pathlib import Path
 from types import ModuleType
 from typing import TYPE_CHECKING, NoReturn, TypedDict
 
@@ -113,9 +113,9 @@ def runtime_components() -> dict[str, object]:
     import importlib.util
     import os
     import platform
-    from pathlib import Path
     import subprocess
     import sys
+    from pathlib import Path
 
     def sha(path: Path) -> str:
         with path.open("rb") as stream:
@@ -387,12 +387,11 @@ def _greedy_observations(record: Recorder) -> None:
     import torch
     from sglang.kernels.ops.speculative.dflash import (
         selector_walk_triton,
-        _compute_dflash_accept_bonus_triton_unchecked,
     )
-    from bend.adapter import checked_speculation
 
-    policy = checked_speculation(Path("/opt/qwen/bend"))
-    policy_rows = torch.tensor(policy.decisions, dtype=torch.int32, device="cuda")
+    from bend.native import AcceptanceKernel
+
+    acceptance = AcceptanceKernel(Path("/opt/qwen/bend"), torch.device("cuda"))
     # Seven proposal slots, four lattice choices, three score regimes.
     ids = (
         torch.arange(3 * 7 * 4, device="cuda", dtype=torch.int64).reshape(3, 7, 4) + 10
@@ -458,20 +457,22 @@ def _greedy_observations(record: Recorder) -> None:
     for row in range(7):
         target[row, row] = 2000 + row
     prefix = torch.arange(8, device="cuda", dtype=torch.int32) + 262120
-    outputs = [torch.empty(8, device="cuda", dtype=torch.int32) for _ in range(2)]
-    outputs.append(torch.empty(8, device="cuda", dtype=torch.int64))
+    outputs = (
+        torch.empty(8, device="cuda", dtype=torch.int32),
+        torch.empty(8, device="cuda", dtype=torch.int32),
+        torch.empty(8, device="cuda", dtype=torch.int64),
+    )
     emitted = torch.empty_like(candidates)
     new_lengths = torch.empty_like(prefix)
 
     def accept() -> None:
-        _compute_dflash_accept_bonus_triton_unchecked(
+        acceptance.launch(
             candidates,
             target,
             *outputs,
             emitted,
             prefix,
             new_lengths,
-            bend_policy=policy_rows,
         )
 
     for mode in ("eager", "graph"):
@@ -503,6 +504,7 @@ def _greedy_observations(record: Recorder) -> None:
     # Check the real request stop-token boundary on the kernel's committed prefix.
     # This is not scheduler reclamation or EOS-to-cache lifetime evidence.
     from array import array
+
     from sglang.srt.managers.schedule_batch import Req
     from sglang.srt.sampling.sampling_params import SamplingParams
 
@@ -563,8 +565,8 @@ def _embedding_observations(
     The immutable CPU producer and convert-embedding oracle remain unmodified.
     This is their CUDA observation counterpart, not new embedding arithmetic.
     """
-    import torch
     import numpy as np
+    import torch
     from safetensors import safe_open
     from sglang.srt.layers.packed_w8_embedding import PackedW8Embedding
 

@@ -19,15 +19,28 @@ law first_mismatch:
   {Impl.decide(List.append(&2, Bool, List.replicate(Bool, accepted, True{}),
     False{} <> suffix)) == Impl.decision(accepted) : Spec.Decision}
 
+# Direct refinement of the executed scalar leaf to the independent ordered
+# comparison semantics, including every decision field and bonus provenance.
+law seven_refinement:
+  for +m0: Bool
+  for +m1: Bool
+  for +m2: Bool
+  for +m3: Bool
+  for +m4: Bool
+  for +m5: Bool
+  for +m6: Bool
+  {Impl.decide7(m0, m1, m2, m3, m4, m5, m6) ==
+    Spec.decide([m0, m1, m2, m3, m4, m5, m6]) : Spec.Decision}
+
 law seven_bound:
-  for b0: Bool
-  for b1: Bool
-  for b2: Bool
-  for b3: Bool
-  for b4: Bool
-  for b5: Bool
-  for b6: Bool
-  {Nat.is_le(Spec.accepted_count(Impl.decide([b0, b1, b2, b3, b4, b5, b6])), 7n) == True{} : Bool}
+  for +b0: Bool
+  for +b1: Bool
+  for +b2: Bool
+  for +b3: Bool
+  for +b4: Bool
+  for +b5: Bool
+  for +b6: Bool
+  {Nat.is_le(Spec.accepted_count(Impl.decide7(b0, b1, b2, b3, b4, b5, b6)), 7n) == True{} : Bool}
 
 law native_bound:
   for +mask: Nat

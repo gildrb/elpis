@@ -51,6 +51,9 @@ SOURCE_NAMES = (
     "bend/speculation_proof.bend",
     "bend/SPECULATE.bend",
     "bend/adapter.py",
+    "bend/native_build.py",
+    "bend/native.py",
+    "bend/native.cu",
 )
 OFFSET_NAMES = (
     "k_packed",
@@ -479,14 +482,16 @@ def source_closure(root: Path, base_root: Path) -> tuple[set[str], set[str]]:
             previous = token
 
     visit(root / "PROOF.bend", base=False)
-    if local != set(SOURCE_NAMES[:-1]):
+    if local != {name for name in SOURCE_NAMES if name.endswith(".bend")}:
         fail(
             "Root PROOF must retain exactly the required PLAN/SELECT/SPECULATE dependency closure"
         )
     if "base.bend" not in trusted:
         fail("Generated programs must use the installed Base IO boundary")
-    _ = local_file(root, root / "bend/adapter.py")
-    local.add("bend/adapter.py")
+    for name in SOURCE_NAMES:
+        if not name.endswith(".bend"):
+            _ = local_file(root, root / name)
+            local.add(name)
     return local, trusted
 
 
@@ -643,10 +648,13 @@ def source_identity(directory: Path) -> dict[str, object]:
         directory / "compiler"
     ):
         fail("Retained source/compiler file set changed")
-    if identity.get("sources") is None or digest(
-        directory / "sources/bend/adapter.py"
-    ) != digest(Path(__file__).resolve()):
-        fail("Running adapter differs from the proof-bound adapter")
+    for name in SOURCE_NAMES:
+        if not name.endswith(".bend") and digest(
+            directory / "sources" / name
+        ) != digest(Path(__file__).resolve().parent.parent / name):
+            fail(
+                f"Running native/adapter source differs from proof-bound source: {name}"
+            )
     local, trusted = source_closure(directory / "sources", directory / "compiler/bend2")
     check_release_compiler(identity.get("compiler"))
     if sources != local or compiler != COMPILER_FILES | {

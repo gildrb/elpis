@@ -1,4 +1,4 @@
-# Live structural evidence for the accumulator and the complete finite wire.
+# Structural evidence connects the scalar leaf and complete finite wire.
 # No unsafe definitions, axioms, foreign proof code, or answer-table literals.
 import Base
 import ../LAWS.bend as Laws
@@ -94,6 +94,40 @@ def Laws.greedy_acceptance(flags):
       Speculation.scan(bits, 0n), Spec.prefix(bits), scan_zero(bits)),
     SemanticLaws.decision_refinement(Spec.prefix(bits)))
 
+# Eight ordered prefix cases suffice: no branch inspects any flag after its
+# first false. The general accumulator refinement is reused at each leaf,
+# binding its independent semantics to the function actually executed.
+def SemanticLaws.seven_refinement(m0, m1, m2, m3, m4, m5, m6):
+  match m0:
+    case False{}:
+      Laws.greedy_acceptance([False{}, m1, m2, m3, m4, m5, m6])
+    case True{}:
+      match m1:
+        case False{}:
+          Laws.greedy_acceptance([True{}, False{}, m2, m3, m4, m5, m6])
+        case True{}:
+          match m2:
+            case False{}:
+              Laws.greedy_acceptance([True{}, True{}, False{}, m3, m4, m5, m6])
+            case True{}:
+              match m3:
+                case False{}:
+                  Laws.greedy_acceptance([True{}, True{}, True{}, False{}, m4, m5, m6])
+                case True{}:
+                  match m4:
+                    case False{}:
+                      Laws.greedy_acceptance([True{}, True{}, True{}, True{}, False{}, m5, m6])
+                    case True{}:
+                      match m5:
+                        case False{}:
+                          Laws.greedy_acceptance([True{}, True{}, True{}, True{}, True{}, False{}, m6])
+                        case True{}:
+                          match m6:
+                            case False{}:
+                              Laws.greedy_acceptance([True{}, True{}, True{}, True{}, True{}, True{}, False{}])
+                            case True{}:
+                              Laws.greedy_acceptance([True{}, True{}, True{}, True{}, True{}, True{}, True{}])
+
 def prefix_bound(+flags: List<&2, Bool>)
   -> {Nat.is_le(Spec.prefix(flags), List.length(&2, Bool, flags)) == True{} : Bool}:
   match flags:
@@ -134,7 +168,11 @@ def SemanticLaws.first_mismatch(accepted, suffix):
         False{} <> suffix)), repeat_stop(accepted, suffix)))
 
 def SemanticLaws.seven_bound(b0, b1, b2, b3, b4, b5, b6):
-  SemanticLaws.prefix_bound([b0, b1, b2, b3, b4, b5, b6])
+  %Equal.sym(Spec.Decision, Speculation.decide7(b0, b1, b2, b3, b4, b5, b6),
+    Spec.decide([b0, b1, b2, b3, b4, b5, b6]),
+    SemanticLaws.seven_refinement(b0, b1, b2, b3, b4, b5, b6)) :
+    {Nat.is_le(Spec.accepted_count(_), 7n) == True{} : Bool}
+  prefix_bound([b0, b1, b2, b3, b4, b5, b6])
 
 def flags_length(width: Nat, mask: Nat)
   -> {List.length(&2, Bool, Spec.flags(width, mask)) == width : Nat}:
@@ -239,25 +277,33 @@ def append_equal(-left: List<&2, Spec.Decision>,
 # This intermediate tree uses the independent decision semantics. It is not
 # the wire specification: arithmetic decoding and ascending enumeration are
 # related to this tree separately below.
-def reference_table(+depth: Nat, +suffix: List<&2, Bool>) -> List<&2, Spec.Decision>:
+def reference_table(+depth: Nat, +m0: Bool, +m1: Bool, +m2: Bool, +m3: Bool,
+    +m4: Bool, +m5: Bool, +m6: Bool) -> List<&2, Spec.Decision>:
   match depth:
     case 0n:
-      [Spec.decide(suffix)]
+      [Spec.decide([m0, m1, m2, m3, m4, m5, m6])]
     case 1n+p:
       List.append(&2, Spec.Decision,
-        reference_table(p, False{} <> suffix), reference_table(p, True{} <> suffix))
+        reference_table(p, False{}, m0, m1, m2, m3, m4, m5),
+        reference_table(p, True{}, m0, m1, m2, m3, m4, m5))
 
-def table_reference(+depth: Nat, +suffix: List<&2, Bool>)
-  -> {Speculation.table(depth, suffix) == reference_table(depth, suffix) : List<&2, Spec.Decision>}:
+def table_reference(+depth: Nat, +m0: Bool, +m1: Bool, +m2: Bool, +m3: Bool,
+    +m4: Bool, +m5: Bool, +m6: Bool)
+  -> {Speculation.table(depth, m0, m1, m2, m3, m4, m5, m6) ==
+    reference_table(depth, m0, m1, m2, m3, m4, m5, m6) : List<&2, Spec.Decision>}:
   match depth:
     case 0n:
       Equal.cong(Spec.Decision, List<&2, Spec.Decision>, value => [value],
-        Speculation.decide(suffix), Spec.decide(suffix), Laws.greedy_acceptance(suffix))
+        Speculation.decide7(m0, m1, m2, m3, m4, m5, m6),
+        Spec.decide([m0, m1, m2, m3, m4, m5, m6]),
+        SemanticLaws.seven_refinement(m0, m1, m2, m3, m4, m5, m6))
     case 1n+p:
-      append_equal(Speculation.table(p, False{} <> suffix),
-        reference_table(p, False{} <> suffix),
-        Speculation.table(p, True{} <> suffix), reference_table(p, True{} <> suffix),
-        table_reference(p, False{} <> suffix), table_reference(p, True{} <> suffix))
+      append_equal(Speculation.table(p, False{}, m0, m1, m2, m3, m4, m5),
+        reference_table(p, False{}, m0, m1, m2, m3, m4, m5),
+        Speculation.table(p, True{}, m0, m1, m2, m3, m4, m5),
+        reference_table(p, True{}, m0, m1, m2, m3, m4, m5),
+        table_reference(p, False{}, m0, m1, m2, m3, m4, m5),
+        table_reference(p, True{}, m0, m1, m2, m3, m4, m5))
 
 # The independent wire's loop, with rendering delayed until after the proof.
 def reference_decisions(count: Nat, +index: Nat) -> List<&2, Spec.Decision>:
@@ -289,20 +335,21 @@ def decisions_split(+count: Nat, +tail_count: Nat, +index: Nat)
       {==}
 
 # A branch requires evidence for BOTH ordered halves; no row can be omitted.
-def decode_branch(+depth: Nat, +suffix: List<&2, Bool>, +index: Nat,
-    left: {reference_table(depth, False{} <> suffix) ==
+def decode_branch(+depth: Nat, +m0: Bool, +m1: Bool, +m2: Bool, +m3: Bool,
+    +m4: Bool, +m5: Bool, +m6: Bool, +index: Nat,
+    left: {reference_table(depth, False{}, m0, m1, m2, m3, m4, m5) ==
       reference_decisions(Range.width(depth), index) : List<&2, Spec.Decision>},
-    right: {reference_table(depth, True{} <> suffix) ==
+    right: {reference_table(depth, True{}, m0, m1, m2, m3, m4, m5) ==
       reference_decisions(Range.width(depth), Nat.add(Range.width(depth), index)) : List<&2, Spec.Decision>})
-  -> {reference_table(1n+depth, suffix) ==
+  -> {reference_table(1n+depth, m0, m1, m2, m3, m4, m5, m6) ==
     reference_decisions(Range.width(1n+depth), index) : List<&2, Spec.Decision>}:
-  Equal.trans(List<&2, Spec.Decision>, reference_table(1n+depth, suffix),
+  Equal.trans(List<&2, Spec.Decision>, reference_table(1n+depth, m0, m1, m2, m3, m4, m5, m6),
     List.append(&2, Spec.Decision, reference_decisions(Range.width(depth), index),
       reference_decisions(Range.width(depth), Nat.add(Range.width(depth), index))),
     reference_decisions(Range.width(1n+depth), index),
-    append_equal(reference_table(depth, False{} <> suffix),
+    append_equal(reference_table(depth, False{}, m0, m1, m2, m3, m4, m5),
       reference_decisions(Range.width(depth), index),
-      reference_table(depth, True{} <> suffix),
+      reference_table(depth, True{}, m0, m1, m2, m3, m4, m5),
       reference_decisions(Range.width(depth), Nat.add(Range.width(depth), index)),
       left, right),
     decisions_split(Range.width(depth), Range.width(depth), index))
@@ -312,14 +359,15 @@ def decode_branch(+depth: Nat, +suffix: List<&2, Bool>, +index: Nat,
 # branch theorem composes all 128 rows without normalizing the full table.
 # This finite protocol check does not bound greedy_acceptance/table_reference.
 def decode_table()
-  -> {reference_table(7n, Nil{}) == reference_decisions(128n, 0n) : List<&2, Spec.Decision>}:
-  decode_branch(6n, Nil{}, 0n,
-    decode_branch(5n, [False{}], 0n,
-      decode_branch(4n, [False{}, False{}], 0n, {==}, {==}),
-      decode_branch(4n, [True{}, False{}], 32n, {==}, {==})),
-    decode_branch(5n, [True{}], 64n,
-      decode_branch(4n, [False{}, True{}], 64n, {==}, {==}),
-      decode_branch(4n, [True{}, True{}], 96n, {==}, {==})))
+  -> {reference_table(7n, False{}, False{}, False{}, False{}, False{}, False{}, False{}) ==
+    reference_decisions(128n, 0n) : List<&2, Spec.Decision>}:
+  decode_branch(6n, False{}, False{}, False{}, False{}, False{}, False{}, False{}, 0n,
+    decode_branch(5n, False{}, False{}, False{}, False{}, False{}, False{}, False{}, 0n,
+      decode_branch(4n, False{}, False{}, False{}, False{}, False{}, False{}, False{}, 0n, {==}, {==}),
+      decode_branch(4n, True{}, False{}, False{}, False{}, False{}, False{}, False{}, 32n, {==}, {==})),
+    decode_branch(5n, True{}, False{}, False{}, False{}, False{}, False{}, False{}, 64n,
+      decode_branch(4n, False{}, True{}, False{}, False{}, False{}, False{}, False{}, 64n, {==}, {==}),
+      decode_branch(4n, True{}, True{}, False{}, False{}, False{}, False{}, False{}, 96n, {==}, {==})))
 
 def row_reference(value: Spec.Decision)
   -> {Wire.row(value) == Spec.render(value) : String}:
@@ -365,5 +413,7 @@ def Laws.greedy_speculation_wire():
   protocol_rows(Wire.rows(Speculation.decisions()), Spec.rows(128n, 0n),
     wire_rows(Speculation.decisions(), 128n, 0n,
       Equal.trans(List<&2, Spec.Decision>, Speculation.decisions(),
-        reference_table(7n, Nil{}), reference_decisions(128n, 0n),
-        table_reference(7n, Nil{}), decode_table())))
+        reference_table(7n, False{}, False{}, False{}, False{}, False{}, False{}, False{}),
+        reference_decisions(128n, 0n),
+        table_reference(7n, False{}, False{}, False{}, False{}, False{}, False{}, False{}),
+        decode_table())))

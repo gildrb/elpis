@@ -1,0 +1,742 @@
+--- a/python/sglang/kernels/ops/speculative/dflash.py
++++ b/python/sglang/kernels/ops/speculative/dflash.py
+@@ -1,63 +1,6 @@
+ import torch
+ import triton
+ import triton.language as tl
+-
+-
+-@triton.jit
+-def _dflash_accept_bonus_contig_kernel(
+-    candidates_ptr,
+-    target_top1_ptr,
+-    accept_lens_out_ptr,
+-    commit_lens_out_ptr,
+-    bonus_ids_out_ptr,
+-    out_tokens_ptr,
+-    prefix_lens_ptr,
+-    new_seq_lens_out_ptr,
+-    bend_policy_ptr,
+-    candidates_row_stride,
+-    target_row_stride,
+-    accept_stride,
+-    commit_stride,
+-    bonus_stride,
+-    out_tokens_row_stride,
+-    prefix_lens_stride,
+-    new_seq_lens_stride,
+-    block_size,
+-    BLOCK_SIZE: tl.constexpr,
+-):
+-    row = tl.program_id(0)
+-    cols = tl.arange(0, BLOCK_SIZE)
+-    row_mask = cols < block_size
+-    draft_mask = cols < (block_size - 1)
+-
+-    candidate_row_ptr = candidates_ptr + row * candidates_row_stride
+-    target_row_ptr = target_top1_ptr + row * target_row_stride
+-    candidate_tail = tl.load(candidate_row_ptr + cols + 1, mask=draft_mask, other=0)
+-
+-    # Observe all seven comparisons in parallel; only Bend decides what commits.
+-    # Bit j compares candidate j+1 against target j (candidate 0 is the anchor).
+-    target_head = tl.load(target_row_ptr + cols, mask=draft_mask, other=0)
+-    equality_mask = tl.sum(
+-        tl.where(draft_mask & (candidate_tail == target_head), 1 << cols, 0), 0
+-    )
+-    policy_row = bend_policy_ptr + equality_mask * 4
+-    accept_len = tl.load(policy_row)
+-    commit_len = tl.load(policy_row + 1)
+-    bonus_index = tl.load(policy_row + 2)
+-    position_delta = tl.load(policy_row + 3)
+-    bonus_id = tl.load(target_row_ptr + bonus_index)
+-    new_seq_len = tl.load(prefix_lens_ptr + row * prefix_lens_stride) + position_delta
+-
+-    tl.store(accept_lens_out_ptr + row * accept_stride, accept_len)
+-    tl.store(commit_lens_out_ptr + row * commit_stride, commit_len)
+-    tl.store(bonus_ids_out_ptr + row * bonus_stride, bonus_id)
+-    tl.store(new_seq_lens_out_ptr + row * new_seq_lens_stride, new_seq_len)
+-
+-    out_val = tl.where(draft_mask, candidate_tail, 0)
+-    out_val = tl.where(cols == accept_len, bonus_id, out_val)
+-    tl.store(
+-        out_tokens_ptr + row * out_tokens_row_stride + cols, out_val, mask=row_mask
+-    )
+ 
+ 
+ def _pick_num_warps(block_size: int) -> int:
+@@ -72,92 +15,6 @@
+ 
+ def _is_row_major_contiguous_2d(x: torch.Tensor) -> bool:
+     return x.ndim == 2 and x.is_contiguous()
+-
+-
+-def _compute_dflash_accept_bonus_triton_unchecked(
+-    candidates: torch.Tensor,
+-    target_top1: torch.Tensor,
+-    accept_lens_out: torch.Tensor,
+-    commit_lens_out: torch.Tensor,
+-    bonus_ids_out: torch.Tensor,
+-    out_tokens_out: torch.Tensor,
+-    prefix_lens: torch.Tensor,
+-    new_seq_lens_out: torch.Tensor,
+-    *,
+-    bend_policy: torch.Tensor,
+-) -> None:
+-    if candidates.ndim != 2 or candidates.shape[1] != 8:
+-        raise ValueError("Bend DFLASH requires one anchor and seven proposals.")
+-    batch_size, block_size = candidates.shape
+-    if target_top1.shape != candidates.shape or out_tokens_out.shape != candidates.shape:
+-        raise ValueError("Bend DFLASH token tensors must share the block8 shape.")
+-    if (bend_policy.shape != (128, 4)
+-            or bend_policy.dtype != torch.int32
+-            or not bend_policy.is_contiguous()
+-            or not bend_policy.is_cuda
+-            or bend_policy.device != candidates.device):
+-        raise ValueError("Bend DFLASH requires contiguous device-local int32[128,4].")
+-    for tensor in (target_top1, accept_lens_out, commit_lens_out, bonus_ids_out,
+-                   out_tokens_out, prefix_lens, new_seq_lens_out):
+-        if tensor.device != bend_policy.device:
+-            raise ValueError("Bend DFLASH tensors must share the policy CUDA device.")
+-    for tensor in (accept_lens_out, commit_lens_out, bonus_ids_out,
+-                   prefix_lens, new_seq_lens_out):
+-        if tensor.shape != (batch_size,):
+-            raise ValueError("Bend DFLASH length and bonus tensors must match the batch.")
+-
+-    if not _is_row_major_contiguous_2d(candidates):
+-        raise ValueError("DFLASH Triton accept_bonus requires contiguous candidates.")
+-    if not _is_row_major_contiguous_2d(target_top1):
+-        raise ValueError("DFLASH Triton accept_bonus requires contiguous target_top1.")
+-    if not _is_row_major_contiguous_2d(out_tokens_out):
+-        raise ValueError(
+-            "DFLASH Triton accept_bonus requires contiguous out_tokens_out."
+-        )
+-    if not accept_lens_out.is_contiguous():
+-        raise ValueError(
+-            "DFLASH Triton accept_bonus requires contiguous accept_lens_out."
+-        )
+-    if not commit_lens_out.is_contiguous():
+-        raise ValueError(
+-            "DFLASH Triton accept_bonus requires contiguous commit_lens_out."
+-        )
+-    if not bonus_ids_out.is_contiguous():
+-        raise ValueError(
+-            "DFLASH Triton accept_bonus requires contiguous bonus_ids_out."
+-        )
+-    if prefix_lens.ndim != 1:
+-        raise ValueError("DFLASH Triton accept_bonus requires 1D prefix_lens.")
+-    if not new_seq_lens_out.is_contiguous():
+-        raise ValueError(
+-            "DFLASH Triton accept_bonus requires contiguous new_seq_lens_out."
+-        )
+-
+-    if batch_size == 0:
+-        return
+-
+-    _dflash_accept_bonus_contig_kernel[(batch_size,)](
+-        candidates,
+-        target_top1,
+-        accept_lens_out,
+-        commit_lens_out,
+-        bonus_ids_out,
+-        out_tokens_out,
+-        prefix_lens,
+-        new_seq_lens_out,
+-        bend_policy,
+-        candidates.stride(0),
+-        target_top1.stride(0),
+-        accept_lens_out.stride(0),
+-        commit_lens_out.stride(0),
+-        bonus_ids_out.stride(0),
+-        out_tokens_out.stride(0),
+-        prefix_lens.stride(0),
+-        new_seq_lens_out.stride(0),
+-        block_size,
+-        BLOCK_SIZE=8,
+-        num_warps=1,
+-    )
+ 
+ 
+ @triton.jit
+--- a/python/sglang/srt/mem_cache/kvarn_bend_plan.py
++++ b/python/sglang/srt/mem_cache/kvarn_bend_plan.py
+@@ -5,6 +5,7 @@
+ launch. Here the engine independently checks its allocation ABI and retains only
+ immutable typed values. No environment override or missing-file fallback exists.
+ """
++
+ from __future__ import annotations
+ 
+ from dataclasses import dataclass
+@@ -17,16 +18,40 @@
+     from bend.adapter import SpeculationPolicy
+ 
+ 
++BEND_ARTIFACT_DIRECTORY = Path("/opt/qwen/bend")
++
+ _OFFSET_NAMES = (
+-    "k_packed", "k_scale", "k_zero", "k_token", "v_packed", "v_channel",
+-    "v_scale", "v_zero", "end",
++    "k_packed",
++    "k_scale",
++    "k_zero",
++    "k_token",
++    "v_packed",
++    "v_channel",
++    "v_scale",
++    "v_zero",
++    "end",
+ )
+ _FIELDS = (
+-    "context", "headroom", "pool", "page_size", "pages", "tail_slots",
+-    "write_tokens", "query_tokens", "commit_tokens", "write_span_pages",
+-    "admission_free_slots", "target_visible", "draft_window", "draft_visible",
+-    "target_dim", "target_kv_heads", "target_layers", "draft_dim",
+-    "draft_kv_heads", "draft_layers",
++    "context",
++    "headroom",
++    "pool",
++    "page_size",
++    "pages",
++    "tail_slots",
++    "write_tokens",
++    "query_tokens",
++    "commit_tokens",
++    "write_span_pages",
++    "admission_free_slots",
++    "target_visible",
++    "draft_window",
++    "draft_visible",
++    "target_dim",
++    "target_kv_heads",
++    "target_layers",
++    "draft_dim",
++    "draft_kv_heads",
++    "draft_layers",
+ ) + tuple(f"{role}_{name}" for role in ("target", "draft") for name in _OFFSET_NAMES)
+ 
+ 
+@@ -64,7 +89,9 @@
+ 
+     def require_request(self, context: int, pool: int, page_size: int) -> None:
+         if any(type(value) is not int for value in (context, pool, page_size)):
+-            raise ValueError("KVarN native request geometry must contain exact integers")
++            raise ValueError(
++                "KVarN native request geometry must contain exact integers"
++            )
+         if (context, pool, page_size) != (self.context, self.pool, self.page_size):
+             raise ValueError("KVarN native request differs from the compiled Bend plan")
+ 
+@@ -80,7 +107,7 @@
+     """Admit one immutable plan/speculation closure before allocation or capture."""
+     from bend.adapter import checked_plan, checked_speculation
+ 
+-    directory = Path("/opt/qwen/bend")
++    directory = BEND_ARTIFACT_DIRECTORY
+     decoded = checked_plan(directory, 262144, 263168, 128)
+     speculation = checked_speculation(directory)
+     if set(decoded) != {*_FIELDS, "schema", "free_pages"}:
+@@ -88,11 +115,18 @@
+     if _integer(decoded["schema"], "schema") != 2:
+         raise ValueError("KVarN requires the Bend 2 schema2 allocation plan")
+     values = {name: _integer(decoded[name], name) for name in _FIELDS}
+-    if (values["context"], values["headroom"], values["page_size"]) != (262144, 1024, 128):
++    if (values["context"], values["headroom"], values["page_size"]) != (
++        262144,
++        1024,
++        128,
++    ):
+         raise ValueError("KVarN Bend plan is not the native262144 deployment")
+     pool, page_size, pages = values["pool"], values["page_size"], values["pages"]
+-    if (pool != values["context"] + values["headroom"]
+-            or pool % page_size or pages != pool // page_size + 1):
++    if (
++        pool != values["context"] + values["headroom"]
++        or pool % page_size
++        or pages != pool // page_size + 1
++    ):
+         raise ValueError("KVarN Bend plan violates reserved-zero page geometry")
+     # IDs include the reserved zero page: last physical token is 263295,
+     # NOT pool-1 (263167). Kernels encode physical addresses in signed int32.
+@@ -100,42 +134,82 @@
+         raise ValueError("KVarN Bend physical token addresses exceed int32")
+     page_list: object = decoded["free_pages"]
+     if not isinstance(page_list, list) or len(page_list) != pages - 1:
+-        raise ValueError("KVarN Bend free pages must contain every nonzero page exactly in order")
++        raise ValueError(
++            "KVarN Bend free pages must contain every nonzero page exactly in order"
++        )
+     free_pages = tuple(_integer(page, "free_pages") for page in page_list)
+     if any(page != index for index, page in enumerate(free_pages, 1)):
+-        raise ValueError("KVarN Bend free pages must contain every nonzero page exactly in order")
+-    if (values["tail_slots"], values["write_tokens"], values["query_tokens"],
+-            values["commit_tokens"]) != (8, 128, 32, 8):
++        raise ValueError(
++            "KVarN Bend free pages must contain every nonzero page exactly in order"
++        )
++    if (
++        values["tail_slots"],
++        values["write_tokens"],
++        values["query_tokens"],
++        values["commit_tokens"],
++    ) != (8, 128, 32, 8):
+         raise ValueError("KVarN Bend plan changes the bounded native workspace")
+-    if (values["write_span_pages"] != 2
+-            or values["admission_free_slots"] != values["write_span_pages"] + 2):
++    if (
++        values["write_span_pages"] != 2
++        or values["admission_free_slots"] != values["write_span_pages"] + 2
++    ):
+         raise ValueError("KVarN Bend plan changes write/sink/COW admission bounds")
+-    if (values["target_visible"] != page_size
+-            or values["draft_window"] != 2048 + page_size + values["commit_tokens"]
+-            or values["draft_visible"] != -(-values["draft_window"] // page_size) * page_size):
++    if (
++        values["target_visible"] != page_size
++        or values["draft_window"] != 2048 + page_size + values["commit_tokens"]
++        or values["draft_visible"]
++        != -(-values["draft_window"] // page_size) * page_size
++    ):
+         raise ValueError("KVarN Bend plan changes target or draft visible bounds")
+     layouts: list[BendPoolLayout] = []
+     for role, dim, heads, layers in (("target", 256, 4, 16), ("draft", 128, 8, 5)):
+-        if (values[f"{role}_dim"], values[f"{role}_kv_heads"],
+-                values[f"{role}_layers"]) != (dim, heads, layers):
++        if (
++            values[f"{role}_dim"],
++            values[f"{role}_kv_heads"],
++            values[f"{role}_layers"],
++        ) != (dim, heads, layers):
+             raise ValueError(f"KVarN Bend plan changes reviewed {role} model geometry")
+         offsets = tuple(values[f"{role}_{name}"] for name in _OFFSET_NAMES)
+-        sizes = (dim * page_size // 2, 2 * dim, 2 * dim, 2 * page_size,
+-                 dim * page_size // 4, 2 * dim, 2 * page_size, 2 * page_size)
+-        if (offsets[0] != 0
+-                or tuple(b - a for a, b in pairwise(offsets)) != sizes
+-                or offsets[-1] != dim * page_size * 3 // 4 + 6 * (dim + page_size)):
++        sizes = (
++            dim * page_size // 2,
++            2 * dim,
++            2 * dim,
++            2 * page_size,
++            dim * page_size // 4,
++            2 * dim,
++            2 * page_size,
++            2 * page_size,
++        )
++        if (
++            offsets[0] != 0
++            or tuple(b - a for a, b in pairwise(offsets)) != sizes
++            or offsets[-1] != dim * page_size * 3 // 4 + 6 * (dim + page_size)
++        ):
+             raise ValueError(f"KVarN Bend plan changes the packed {role} byte layout")
+-        layouts.append(BendPoolLayout(
+-            values[f"{role}_dim"], values[f"{role}_kv_heads"],
+-            values[f"{role}_layers"], values[f"{role}_visible"], offsets,
+-        ))
++        layouts.append(
++            BendPoolLayout(
++                values[f"{role}_dim"],
++                values[f"{role}_kv_heads"],
++                values[f"{role}_layers"],
++                values[f"{role}_visible"],
++                offsets,
++            )
++        )
+     return KVarNBendPlan(
+-        context=values["context"], headroom=values["headroom"], pool=pool,
+-        page_size=page_size, pages=pages, tail_slots=values["tail_slots"],
+-        write_tokens=values["write_tokens"], query_tokens=values["query_tokens"],
+-        commit_tokens=values["commit_tokens"], write_span_pages=values["write_span_pages"],
+-        admission_free_slots=values["admission_free_slots"], draft_window=values["draft_window"],
+-        target=layouts[0], draft=layouts[1], free_pages=free_pages,
++        context=values["context"],
++        headroom=values["headroom"],
++        pool=pool,
++        page_size=page_size,
++        pages=pages,
++        tail_slots=values["tail_slots"],
++        write_tokens=values["write_tokens"],
++        query_tokens=values["query_tokens"],
++        commit_tokens=values["commit_tokens"],
++        write_span_pages=values["write_span_pages"],
++        admission_free_slots=values["admission_free_slots"],
++        draft_window=values["draft_window"],
++        target=layouts[0],
++        draft=layouts[1],
++        free_pages=free_pages,
+         speculation=speculation,
+     )
+--- a/python/sglang/srt/speculative/dflash_worker_v2.py
++++ b/python/sglang/srt/speculative/dflash_worker_v2.py
+@@ -10,13 +10,13 @@
+ from typing import List, Optional, Tuple
+ 
+ import torch
++from bend.native import AcceptanceKernel
+ 
+ from sglang.kernels.ops.speculative.cache_locs import (
+     assign_extend_cache_locs_func,
+     rebuild_compact_draft_req_to_token_func,
+ )
+ from sglang.kernels.ops.speculative.dflash import (
+-    _compute_dflash_accept_bonus_triton_unchecked,
+     _prepare_dflash_draft_block_unchecked,
+ )
+ from sglang.kernels.ops.speculative.dspark.dspark_accept import (
+@@ -34,7 +34,10 @@
+ from sglang.srt.managers.scheduler import GenerationBatchResult
+ from sglang.srt.managers.tp_worker import TpModelWorker
+ from sglang.srt.mem_cache.kvarn.pool import KVarNTokenToKVPool
+-from sglang.srt.mem_cache.kvarn_bend_plan import native_bend_plan
++from sglang.srt.mem_cache.kvarn_bend_plan import (
++    BEND_ARTIFACT_DIRECTORY,
++    native_bend_plan,
++)
+ from sglang.srt.mem_cache.memory_pool import HybridLinearKVPool
+ from sglang.srt.model_executor.cuda_graph_config import Backend
+ from sglang.srt.model_executor.forward_batch_info import (
+@@ -139,12 +142,20 @@
+         raise ValueError("Native DFLASH requires the pinned 40960 ordered token IDs")
+     ids: list[int] = []
+     for token in decoded:
+-        if not isinstance(token, int) or isinstance(token, bool) or not 0 <= token < 248320:
+-            raise ValueError("Native DFLASH vocabulary IDs must be valid target integers")
++        if (
++            not isinstance(token, int)
++            or isinstance(token, bool)
++            or not 0 <= token < 248320
++        ):
++            raise ValueError(
++                "Native DFLASH vocabulary IDs must be valid target integers"
++            )
+         ids.append(token)
+     ordered_sha256 = hashlib.sha256(struct.pack("<40960q", *ids)).hexdigest()
+     if ordered_sha256 != _NATIVE_VOCAB_ORDERED_SHA256:
+-        raise ValueError("Native DFLASH ordered vocabulary differs from the pinned input")
++        raise ValueError(
++            "Native DFLASH ordered vocabulary differs from the pinned input"
++        )
+     return torch.tensor(ids, dtype=torch.long, device="cpu"), {
+         "schema_version": 1,
+         "acceptance_simulated": False,
+@@ -420,7 +431,9 @@
+         """True when this step's geometry agrees with the captured graph."""
+         if self.graph is None:
+             return False
+-        if hidden.dtype != self.hidden_dtype or int(hidden.shape[-1]) != int(self.hidden_dim):
++        if hidden.dtype != self.hidden_dtype or int(hidden.shape[-1]) != int(
++            self.hidden_dim
++        ):
+             return False
+         return int(commit_lens.numel()) == 1
+ 
+@@ -450,7 +463,9 @@
+                 commit_lens=self.commit_lens_buf,
+             )
+ 
+-    def ensure_capture(self, *, commit_lens: torch.Tensor, hidden: torch.Tensor) -> None:
++    def ensure_capture(
++        self, *, commit_lens: torch.Tensor, hidden: torch.Tensor
++    ) -> None:
+         """Warm up and capture the commit tail once, on neutral dummy inputs."""
+         if self.graph is not None:
+             return
+@@ -467,14 +482,18 @@
+         dummy_pages = self._graph_dummy_pages()
+         dummy_page = next(iter(dummy_pages))
+         dummy_locs = torch.arange(
+-            dummy_page * 128, dummy_page * 128 + self._block,
+-            dtype=torch.int64, device=self._device,
++            dummy_page * 128,
++            dummy_page * 128 + self._block,
++            dtype=torch.int64,
++            device=self._device,
+         )
+         free_before, _total = torch.cuda.mem_get_info(self._device)
+         try:
+             self.loc_2d.copy_(dummy_locs.view(1, self._block))
+             self.positions.copy_(
+-                torch.arange(self._block, dtype=self.positions.dtype, device=self._device)
++                torch.arange(
++                    self._block, dtype=self.positions.dtype, device=self._device
++                )
+             )
+             self.commit_lens_buf.zero_()
+             self.hidden_buf.zero_()
+@@ -504,7 +523,10 @@
+             for pool in self._worker._kvarn_pools():
+                 for layer_id in pool.layout.layer_ids:
+                     pool.reset_graph_dummy_pages(
+-                        layer_id, torch.tensor(sorted(dummy_pages), dtype=torch.int64, device=self._device)
++                        layer_id,
++                        torch.tensor(
++                            sorted(dummy_pages), dtype=torch.int64, device=self._device
++                        ),
+                     )
+             torch.cuda.synchronize(self._device)
+         free_after, _total = torch.cuda.mem_get_info(self._device)
+@@ -534,7 +556,10 @@
+         target_worker: TpModelWorker,
+     ):
+         super().__init__()
+-        native_qualification = server_args.kvarn_qualification_mode in ("native", "graph")
++        native_qualification = server_args.kvarn_qualification_mode in (
++            "native",
++            "graph",
++        )
+         if native_qualification:
+             # Check the value actually imported by the verification path, too:
+             # later environment mutation must not hide an enabled override.
+@@ -589,14 +614,18 @@
+                 self.draft_model_runner.model_config.model_path,
+             )
+             if self.selector.draft_vocab_mask.shape != (248320,):
+-                raise ValueError("Native DFLASH selector vocabulary differs from its input")
++                raise ValueError(
++                    "Native DFLASH selector vocabulary differs from its input"
++                )
+             self.selector.load_draft_vocab(ids)
+         elif vocab_path:
+             with open(vocab_path) as fh:
+                 ids = torch.tensor(json.load(fh), dtype=torch.long)
+             self.selector.load_draft_vocab(ids)
+             logger.info(
+-                "DFlash draft vocab restricted to %d ids from %s", ids.numel(), vocab_path
++                "DFlash draft vocab restricted to %d ids from %s",
++                ids.numel(),
++                vocab_path,
+             )
+         draft_config = parse_dflash_draft_config(
+             draft_hf_config=self.draft_model_runner.model_config.hf_config
+@@ -632,7 +661,9 @@
+             # visual modules and multimodal axis bounds are outside this guard.
+             text_model = getattr(target_model, "model", None)
+             if not isinstance(text_model, torch.nn.Module):
+-                raise ValueError("Native DFLASH target lacks its declared text backbone")
++                raise ValueError(
++                    "Native DFLASH target lacks its declared text backbone"
++                )
+             context_length = self.model_runner.model_config.context_len
+             target_rows, target_modules = _native_text_rope_backing(
+                 text_model, context_length, self.block_size
+@@ -651,7 +682,8 @@
+                 draft_rope_modules=draft_modules,
+             )
+             logger.info(
+-                "DFLASH_NATIVE_ADMISSION %s", json.dumps(native_identity, sort_keys=True)
++                "DFLASH_NATIVE_ADMISSION %s",
++                json.dumps(native_identity, sort_keys=True),
+             )
+         self._noise_embed_scale = (
+             float(target_model.get_dflash_noise_embedding_scale())
+@@ -707,9 +739,8 @@
+         # Packed draft storage must receive committed hidden-state KV through
+         # its transactional writer. The fused helper writes dense buffers directly.
+         self._use_fused_kv_materialize = (
+-            (is_cuda() or is_hip())
+-            and bundle.resolved_attention_backend != "kvarn_draft"
+-        )
++            is_cuda() or is_hip()
++        ) and bundle.resolved_attention_backend != "kvarn_draft"
+         self._fused_kv_helper: Optional[object] = None
+         if self._use_fused_kv_materialize:
+             self._init_fused_kv_helper()
+@@ -730,10 +761,10 @@
+         # C1: replayable post-verify commit tail (behind --kvarn-commit-graph).
+         self._kvarn_commit_graph: Optional[_KVarNCommitGraphRunner] = None
+         self._kvarn_commit_graph_failed = False
+-        self._bend_speculation_required = get_exec().kernel.kvarn_qualification_mode in (
+-            "native", "graph"
+-        )
+-        self._bend_speculation_rows: Optional[torch.Tensor] = None
++        self._bend_speculation_required = (
++            get_exec().kernel.kvarn_qualification_mode in ("native", "graph")
++        )
++        self._bend_acceptance_kernel: Optional[AcceptanceKernel] = None
+         if self._bend_speculation_required:
+             if not is_cuda() or self.block_size != 8:
+                 raise ValueError("Native Bend DFLASH requires CUDA and block8.")
+@@ -741,7 +772,9 @@
+                 raise ValueError("Native Bend DFLASH forbids simulated acceptance.")
+             policy = native_bend_plan().speculation
+             if policy.block_size != self.block_size:
+-                raise ValueError("Native DFLASH block size differs from the Bend policy.")
++                raise ValueError(
++                    "Native DFLASH block size differs from the Bend policy."
++                )
+ 
+     def _kvarn_commit_graph_enabled(self) -> bool:
+         # C1 is opt-in via --kvarn-commit-graph. The runner itself stays
+@@ -792,20 +825,22 @@
+             plan = native_bend_plan()
+             target_pool = self.model_runner.token_to_kv_pool
+             draft_pool = self.draft_model_runner.token_to_kv_pool
+-            if (not isinstance(target_pool, HybridLinearKVPool)
+-                    or not isinstance(target_pool.full_kv_pool, KVarNTokenToKVPool)
+-                    or not isinstance(draft_pool, KVarNTokenToKVPool)
+-                    or target_pool.full_kv_pool.bend_plan is not plan
+-                    or draft_pool.bend_plan is not plan):
+-                raise ValueError("Native DFLASH pools must share the admitted Bend plan.")
++            if (
++                not isinstance(target_pool, HybridLinearKVPool)
++                or not isinstance(target_pool.full_kv_pool, KVarNTokenToKVPool)
++                or not isinstance(draft_pool, KVarNTokenToKVPool)
++                or target_pool.full_kv_pool.bend_plan is not plan
++                or draft_pool.bend_plan is not plan
++            ):
++                raise ValueError(
++                    "Native DFLASH pools must share the admitted Bend plan."
++                )
+             # Both pools now exist and share the admitted policy. Scheduler
+             # initializes all attention backends and captures graphs only later.
+-            # Keep this private table immutable and its address live for replay.
+-            if self._bend_speculation_rows is None:
+-                self._bend_speculation_rows = torch.tensor(
+-                    plan.speculation.decisions,
+-                    dtype=torch.int32,
+-                    device=torch.device("cuda", self.gpu_id),
++            # Load the checked Bend leaf before capture; no policy tensor is uploaded.
++            if self._bend_acceptance_kernel is None:
++                self._bend_acceptance_kernel = AcceptanceKernel(
++                    BEND_ARTIFACT_DIRECTORY, torch.device("cuda", self.gpu_id)
+                 )
+ 
+     def init_attention_backends(self):
+@@ -1772,7 +1807,9 @@
+             packed_pool = self.draft_model_runner.token_to_kv_pool
+             if isinstance(packed_pool, KVarNTokenToKVPool):
+                 if cache_loc_2d is not None and tuple(cache_loc_2d.shape) != (1, 8):
+-                    raise ValueError("KVarN committed draft prefix requires one eight-token block")
++                    raise ValueError(
++                        "KVarN committed draft prefix requires one eight-token block"
++                    )
+                 if cache_loc_2d is not None:
+                     if commit_lens is None:
+                         raise ValueError("KVarN committed prefix lengths are missing")
+@@ -1796,8 +1833,10 @@
+                         attn = layer.self_attn
+                         layer_id = attn.attn.layer_id
+                         packed_pool.discard_provisional(layer_id)
+-                        layer_ctx_hidden = self.draft_model.prepare_context_hidden_for_kv(
+-                            layer, ctx_hidden
++                        layer_ctx_hidden = (
++                            self.draft_model.prepare_context_hidden_for_kv(
++                                layer, ctx_hidden
++                            )
+                         )
+                         k, v = attn.kv_proj_only(layer_ctx_hidden)
+                         k = attn.apply_k_norm(k)
+@@ -1808,8 +1847,11 @@
+                         for start in range(0, num_tokens, 128):
+                             stop = min(start + 128, num_tokens)
+                             packed_pool.begin_write(
+-                                layer_id, cache_loc[start:stop], k[start:stop],
+-                                v[start:stop], provisional=False,
++                                layer_id,
++                                cache_loc[start:stop],
++                                k[start:stop],
++                                v[start:stop],
++                                provisional=False,
+                             )
+                             packed_pool.finish_attention(layer_id)
+                 # The end-of-step overlapped status gate owns validation for
+@@ -2043,7 +2085,9 @@
+         ]
+         self._accept_bonus_buffer_cap = new_cap
+ 
+-    def _next_accept_bonus_buffers(self, bs: int) -> tuple[
++    def _next_accept_bonus_buffers(
++        self, bs: int
++    ) -> tuple[
+         torch.Tensor,
+         torch.Tensor,
+         torch.Tensor,
+@@ -2075,8 +2119,10 @@
+         new_seq_lens = None
+         target_predict = None
+         if self._bend_speculation_required:
+-            if self._bend_speculation_rows is None:
+-                raise RuntimeError("Native Bend DFLASH policy was not admitted at startup.")
++            if self._bend_acceptance_kernel is None:
++                raise RuntimeError(
++                    "Native Bend DFLASH kernel was not admitted at startup."
++                )
+             if not _is_all_greedy(sampling_info):
+                 raise ValueError("Native Bend DFLASH supports greedy acceptance only.")
+             target_predict = torch.argmax(next_token_logits, dim=-1).view(bs, 8)
+@@ -2090,7 +2136,7 @@
+             ) = self._next_accept_bonus_buffers(bs)
+             # No eager fallback: Bend's device values drive KV/Mamba commits,
+             # the emitted-token boundary and the next draft's position.
+-            _compute_dflash_accept_bonus_triton_unchecked(
++            self._bend_acceptance_kernel.launch(
+                 candidates=candidates,
+                 target_top1=target_predict,
+                 accept_lens_out=accept_len,
+@@ -2099,7 +2145,6 @@
+                 out_tokens_out=out_tokens,
+                 prefix_lens=prefix_lens,
+                 new_seq_lens_out=new_seq_lens,
+-                bend_policy=self._bend_speculation_rows,
+             )
+         elif self._selector_sample is not None:
+             selector_candidate_ids, selector_q_rows = self._selector_sample
+@@ -2144,8 +2189,10 @@
+     def _validate_phase1_sampling_support(self, batch: ScheduleBatch) -> None:
+         sampling_info = batch.sampling_info
+         if self._bend_speculation_required:
+-            if self._bend_speculation_rows is None:
+-                raise RuntimeError("Native Bend DFLASH policy was not admitted at startup.")
++            if self._bend_acceptance_kernel is None:
++                raise RuntimeError(
++                    "Native Bend DFLASH kernel was not admitted at startup."
++                )
+             if not _is_all_greedy(sampling_info):
+                 raise ValueError("Native Bend DFLASH supports greedy acceptance only.")
+         # A selector draft carries its own q and verifies through accept_sampling, so
+@@ -2189,7 +2236,10 @@
+         target_pool = self.model_runner.token_to_kv_pool
+         if isinstance(target_pool, HybridLinearKVPool):
+             packed_target = target_pool.full_kv_pool
+-            if isinstance(packed_target, KVarNTokenToKVPool) and packed_target.native_enabled:
++            if (
++                isinstance(packed_target, KVarNTokenToKVPool)
++                and packed_target.native_enabled
++            ):
+                 packed_target.check_native_status()
+         draft_pool = self.draft_model_runner.token_to_kv_pool
+         if isinstance(draft_pool, KVarNTokenToKVPool) and draft_pool.native_enabled:
+@@ -2201,7 +2251,10 @@
+         target_pool = self.model_runner.token_to_kv_pool
+         if isinstance(target_pool, HybridLinearKVPool):
+             packed_target = target_pool.full_kv_pool
+-            if isinstance(packed_target, KVarNTokenToKVPool) and packed_target.native_enabled:
++            if (
++                isinstance(packed_target, KVarNTokenToKVPool)
++                and packed_target.native_enabled
++            ):
+                 pools.append(packed_target)
+         draft_pool = self.draft_model_runner.token_to_kv_pool
+         if isinstance(draft_pool, KVarNTokenToKVPool) and draft_pool.native_enabled:
+@@ -2220,7 +2273,8 @@
+         dtype = next(draft.parameters()).dtype
+         return torch.zeros(
+             (bs * int(self.block_size), width),
+-            dtype=dtype, device=self.device,
++            dtype=dtype,
++            device=self.device,
+         )
+ 
+     def _begin_kvarn_status_mirror(self) -> None:
+@@ -2753,9 +2807,8 @@
+                 # Accept only verified input rows. Rejects must not seal a page.
+                 # Keep the existing Mamba prefix-state commit above unchanged.
+                 commit_graph = self._kvarn_commit_graph
+-                if (
+-                    commit_graph is not None
+-                    and commit_graph.matches(commit_lens=commit_lens, hidden=hidden_flat)
++                if commit_graph is not None and commit_graph.matches(
++                    commit_lens=commit_lens, hidden=hidden_flat
+                 ):
+                     commit_graph.replay(commit_lens=commit_lens, hidden=hidden_flat)
+                     commit_graph_replayed = True

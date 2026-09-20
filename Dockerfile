@@ -36,8 +36,11 @@ COPY LAWS.bend PROOF.bend /opt/qwen/source/
 RUN python3 /opt/qwen/source/bend/adapter.py generate \
       --output /opt/qwen/bend --bend /opt/bend-tools/bin/bend && \
     python3 /opt/qwen/source/bend/adapter.py compile --directory /opt/qwen/bend --cc /usr/bin/clang-19 && \
-    python3 /opt/qwen/source/bend/adapter.py verify --directory /opt/qwen/bend
-COPY bend/adapter.py /opt/qwen/bend/adapter.py
+    python3 /opt/qwen/source/bend/adapter.py verify --directory /opt/qwen/bend && \
+    PYTHONPATH=/opt/qwen/source python3 -m bend.native_build \
+      --directory /opt/qwen/bend --cc /usr/bin/clang-19 \
+      --nvrtc /usr/local/cuda/lib64/libnvrtc.so
+COPY bend/adapter.py bend/native.py bend/native_build.py bend/native.cu /opt/qwen/bend/
 
 FROM lmsysorg/sglang:v0.5.19@sha256:d6e7288627be8b02be88e4bba38e73f6d50e2826869f753c13a4c4385ab3eda9
 COPY --from=bend-build /opt/qwen/bend/ /opt/qwen/bend/

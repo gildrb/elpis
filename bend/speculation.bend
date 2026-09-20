@@ -1,5 +1,5 @@
 # Greedy DFLASH decisions are computed, not stored as an answer table. The
-# structurally decreasing list leads the accumulator so every call terminates.
+# native leaf consumes seven scalar comparisons without a heap collection.
 import Base
 import ./speculation_spec.bend as Spec
 
@@ -22,17 +22,53 @@ def decision(+accepted: Nat) -> Spec.Decision:
 def decide(flags: List<&2, Bool>) -> Spec.Decision:
   decision(scan(flags, 0n))
 
-# Each level chooses the next most significant bit. Prepending reverses that
-# choice order, so each leaf receives the comparison flags least significant
-# bit first. False-before-true traversal emits ascending masks. Both forks have
-# exactly 2^p leaves, and decisions are evaluated inside those parallel calls.
-def table(+depth: Nat, +suffix: List<&2, Bool>) -> List<&2, Spec.Decision>:
+# Ordered comparisons candidate[j+1] == target_top1[j]. Each mismatch
+# discards the remaining scalar flags; only the uninterrupted prefix counts.
+# Reuse the checked constructor so all four fields retain the same meaning.
+def decide7(m0: Bool, m1: Bool, m2: Bool, m3: Bool, m4: Bool, m5: Bool,
+    m6: Bool) -> Spec.Decision:
+  match m0:
+    case False{}:
+      decision(0n)
+    case True{}:
+      match m1:
+        case False{}:
+          decision(1n)
+        case True{}:
+          match m2:
+            case False{}:
+              decision(2n)
+            case True{}:
+              match m3:
+                case False{}:
+                  decision(3n)
+                case True{}:
+                  match m4:
+                    case False{}:
+                      decision(4n)
+                    case True{}:
+                      match m5:
+                        case False{}:
+                          decision(5n)
+                        case True{}:
+                          match m6:
+                            case False{}:
+                              decision(6n)
+                            case True{}:
+                              decision(7n)
+
+# Choose the most significant bit first, shifting it through seven scalar
+# registers. False-before-true traversal emits ascending masks; the leaf's
+# first argument is the least significant bit. Both parallel forks retain
+# exactly 2^p leaves. Only the CPU wire output itself is a list.
+def table(+depth: Nat, +m0: Bool, +m1: Bool, +m2: Bool, +m3: Bool,
+    +m4: Bool, +m5: Bool, +m6: Bool) -> List<&2, Spec.Decision>:
   match depth:
     case 0n:
-      [decide(suffix)]
+      [decide7(m0, m1, m2, m3, m4, m5, m6)]
     case 1n+p:
-      left right = table(p, False{} <> suffix) table(p, True{} <> suffix)
+      left right = table(p, False{}, m0, m1, m2, m3, m4, m5) table(p, True{}, m0, m1, m2, m3, m4, m5)
       List.append(&2, Spec.Decision, left, right)
 
 def decisions() -> List<&2, Spec.Decision>:
-  table(7n, Nil{})
+  table(7n, False{}, False{}, False{}, False{}, False{}, False{}, False{})
