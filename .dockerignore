@@ -18,6 +18,7 @@
 !prepare/embedding-validation.json
 !bend/
 !bend/adapter.py
+!bend/build_toolchain.py
 !bend/*.bend
 !LAWS.bend
 !PROOF.bend

@@ -7,6 +7,73 @@ import Base
 type Decision is Data:
   Decision{accepted: Nat, committed: Nat, bonus: Nat, advance: Nat}
 
+# Provenance distinguishes an emitted target bonus from a materialized input,
+# even when their token IDs happen to be equal.
+type Source is Data:
+  Input{slot: Nat}
+  Bonus{target_slot: Nat}
+
+def proposals(count: Nat, +start: Nat) -> List<&2, Source>:
+  match count:
+    case 0n:
+      Nil{}
+    case 1n+p:
+      Input{start} <> proposals(p, 1n+start)
+
+def length(xs: List<&2, Source>) -> Nat:
+  match xs:
+    case Nil{}:
+      0n
+    case h <> t:
+      1n+length(t)
+
+def committed(accepted: Nat) -> List<&2, Source>:
+  Input{0n} <> proposals(accepted, 1n)
+
+def emitted(+accepted: Nat) -> List<&2, Source>:
+  List.append(&2, Source, proposals(accepted, 1n), [Bonus{accepted}])
+
+def inputs_only(xs: List<&2, Source>) -> Bool:
+  match xs:
+    case Nil{}:
+      True{}
+    case h <> t:
+      match h:
+        case Input{slot}:
+          inputs_only(t)
+        case Bonus{target_slot}:
+          False{}
+
+def take(count: Nat, xs: List<&2, Source>) -> List<&2, Source>:
+  match count:
+    case 0n:
+      Nil{}
+    case 1n+p:
+      match xs:
+        case Nil{}:
+          Nil{}
+        case h <> t:
+          h <> take(p, t)
+
+def materialized(+accepted: Nat, rejected: List<&2, Source>) -> List<&2, Source>:
+  Input{0n} <> List.append(&2, Source, proposals(accepted, 1n), rejected)
+
+def accepted_count(value: Decision) -> Nat:
+  Decision{naccepted, ncommitted, nbonus, nadvance} = value
+  naccepted
+
+def commit_count(value: Decision) -> Nat:
+  Decision{naccepted, ncommitted, nbonus, nadvance} = value
+  ncommitted
+
+def bonus_index(value: Decision) -> Nat:
+  Decision{naccepted, ncommitted, nbonus, nadvance} = value
+  nbonus
+
+def advance_count(value: Decision) -> Nat:
+  Decision{naccepted, ncommitted, nbonus, nadvance} = value
+  nadvance
+
 # Stop at the first mismatch, even if later proposed tokens match again.
 def prefix(flags: List<&2, Bool>) -> Nat:
   match flags:
@@ -20,7 +87,8 @@ def prefix(flags: List<&2, Bool>) -> Nat:
 # The anchor and accepted proposals are materialized. The target bonus is
 # emitted at slot a, but is not materialized as an input in this step.
 def decision(+accepted: Nat) -> Decision:
-  Decision{accepted, 1n+accepted, accepted, 1n+accepted}
+  Decision{accepted, length(committed(accepted)),
+    length(proposals(accepted, 1n)), length(emitted(accepted))}
 
 def decide(flags: List<&2, Bool>) -> Decision:
   decision(prefix(flags))
@@ -36,9 +104,9 @@ def flags(width: Nat, +mask: Nat) -> List<&2, Bool>:
 
 def render(value: Decision) -> String:
   match value:
-    case Decision{accepted, committed, bonus, advance}:
-      Nat.show(accepted) ++ "\n" ++ Nat.show(committed) ++ "\n" ++
-        Nat.show(bonus) ++ "\n" ++ Nat.show(advance) ++ "\n"
+    case Decision{naccepted, ncommitted, nbonus, nadvance}:
+      Nat.show(naccepted) ++ "\n" ++ Nat.show(ncommitted) ++ "\n" ++
+        Nat.show(nbonus) ++ "\n" ++ Nat.show(nadvance) ++ "\n"
 
 # Simple forward enumeration defines the external row order independently
 # of the optimized, balanced parallel table generator.

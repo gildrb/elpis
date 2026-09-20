@@ -7,8 +7,6 @@ import ./bend/control.bend as Control
 import ./bend/spec.bend as Spec
 import ./bend/PLAN.bend as Wire
 import ./bend/selection_proof.bend as SelectionProof
-import ./bend/acceptance_proof.bend as AcceptanceProof
-import ./bend/commit_proof.bend as CommitProof
 import ./bend/speculation_proof.bend as SpeculationProof
 
 def add_succ(n: Nat, -i: Nat) -> {Nat.add(n, 1n+i) == 1n+Nat.add(n, i) : Nat}:

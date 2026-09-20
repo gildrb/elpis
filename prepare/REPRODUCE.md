@@ -131,11 +131,13 @@ result closes the current-tool byte-reproduction gap, not runtime memory,
 end-to-end quality or final-profile qualification. Every future reproduction
 must still pass all exact hashes and proof checks.
 
-## Explicit packed representation for qualification
+## Packed target preparation for the fixed serving path
 
-The reproduced `source/` directory is also the exact packed-embedding target.
-An approved isolated candidate can use it **without** the compact conversion.
-The default verifier remains dense; select packed explicitly:
+The reproduced `source/` directory is the exact packed-embedding target required
+by the canonical serving recipe; it does not need the compact conversion.
+Dense reconstruction remains available for offline proofs and numerical
+references/oracles. The offline verifier still defaults to dense, so select
+packed explicitly when verifying the serving inputs:
 
 ```sh
 python3 "$REPO/prepare/verify-models.py" --target "$ATTEMPT/source" --draft "$ATTEMPT/draft" --representation packed
@@ -151,9 +153,15 @@ exact historical proof field, not silently corrected.
 
 The original all-row proof binds packed source to dense output. Packed embeddings
 save exactly 1,251,532,784 tensor bytes (about 1.166 GiB), but this does not prove a
-runtime memory fit or packed-kernel correctness. The serving candidate needs its
-separate reviewed patch, explicit path/representation, and runtime qualification.
-No original files or serving defaults are changed by this preparation option.
+runtime memory fit or packed-kernel correctness. The serving launcher fixes
+`/models/compact-target-rholsc8k/packed` and
+`/models/Qwen3.8-27B-DFlash2-W4A16`, requires the experimental patched image,
+and rejects nonempty `QWEN_MODEL_REPRESENTATION` rather than selecting a runtime
+representation. Supply the verified packed files at the canonical path using
+the [Docker setup](../docs/docker.md); there is no startup conversion or dense
+fallback. Preparation alone neither deploys files nor establishes runtime
+qualification. The offline dense verification path and historical proofs remain
+unchanged.
 [representation-validation.json](representation-validation.json) records separate
 full dense and packed verifier passes with the final extended verifier's SHA256.
 Both branches authenticated all 17 target and 2 draft files. Scoped verifier

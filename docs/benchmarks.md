@@ -1,8 +1,11 @@
 # Measurement protocol
 
-**Status:** the matrix is frozen planning, not a measured optimization result.
-The new FP8 trial allocated only 68004 pool tokens and stopped before readiness.
-No refactored recipe has passed the full capacity and quality gates.
+**Status:** the frozen matrix contains candidate comparisons and partial historical
+measurements, not a qualified optimization result. The historical FP8 startup
+trial allocated only 68004 pool tokens and stopped before readiness; that failed
+trial is not the fixed packed KVarN recipe's current capacity verdict.
+Individual native smoke/measurement successes do not satisfy the full capacity
+and quality gates.
 See [qualification](qualification.md) and [machine-readable matrix](../bench/matrix.json).
 
 ## 1. Freeze the comparison
@@ -32,10 +35,10 @@ that revision, verify its listed SHA256 and size, and mount it read-only at
 SHA256 verified during this refactor; the raw fixture remains outside Git. Do not allow an implicit
 upstream download or replacement when the local fixture is missing.
 
-For explicit packed mode, use tokenizer path
-`/models/compact-target-rholsc8k/packed` instead of the dense path shown below.
-The verified tokenizer bytes are identical; the chosen path must exist in the
-actual candidate container. Do not fall back to a Hub tokenizer.
+Use the fixed serving tokenizer path `/models/compact-target-rholsc8k/packed`.
+The verified tokenizer bytes match the offline dense artifact, but that dense
+directory is not required by the canonical container. Do not select a different
+runtime representation or fall back to a Hub tokenizer.
 
 After verifying that fixture, create a new private output directory under
 `/cache/bench-RUN` in the candidate container. Replace `RUN` with a unique run ID.
@@ -51,7 +54,7 @@ docker exec "$CONTAINER" bash -c '
 ' benchmark \
   --backend sglang --base-url http://127.0.0.1:18020 \
   --model qwen3.8-27b \
-  --tokenizer /models/compact-target-rholsc8k/artifact \
+  --tokenizer /models/compact-target-rholsc8k/packed \
   --dataset-name random --dataset-path /bench-fixtures/sharegpt.json \
   --tokenize-prompt --seed 20260913 --random-range-ratio 1 \
   --random-input-len 1024 --random-output-len 1024 \
@@ -104,23 +107,32 @@ bundle instead of assigning a gain to one patch.
 | F | KVarN off/on versus applicable upstream compression | Same experimental image: active sampler repairs must not confound the KV comparison |
 | G | Recurrent-state precision | BF16/FP16 only if actually supported; preserve restore correctness |
 | H | Block size, draft window, prefill chunk | Change one variable; current KVarN admits only its strict block8/window2048/chunk1024 envelope |
-| I | CUDA graphs and attention execution | Current eager control also disables overlap/autotune; not a graph-only attribution |
+| I | CUDA graphs and attention execution | FP8/BF16 eager also disables overlap/autotune; KVarN disables both in either mode; eager requires commit graphs off |
 | J | Final power policy | Same qualified recipe/workload; choose efficiency without hiding latency or throttling |
 
-`bench/matrix.json` lists candidate values, not supported configurations.
+`bench/matrix.json` lists candidate questions, not supported configurations.
+The current launcher fixes packed Qwen + DFlash2 at context 262144 and requires
+the experimental image. Target-only, dense serving, smaller context rungs and
+zero-patch serving are not admitted controls; preserve their historical evidence
+without presenting them as current launch options. Dense offline numerical
+references/oracles remain valid. FP8/BF16 controls require
+`QWEN_COMMIT_GRAPH=0`; eager KVarN requires that setting too.
+The launcher requires explicit `QWEN_ALLOW_UNQUALIFIED=1` for diagnostic
+operation; this is not qualification or promotion.
 Ampere lacks native NVFP4. Portable `fp4_mx_block16` is a distinct path with
-whole-layer BF16 materialization; evaluate only if the pinned runtime admits it.
-KVarN target-only is blocked by missing generic worker sticky-status propagation.
-Do not relax that guard to manufacture an off/on comparison. C2/C4 are optional
-regression points and may be unsupported by the C1-only KVarN implementation.
+whole-layer BF16 materialization and is not exposed by the launcher.
+Do not relax guards to manufacture an off/on comparison. C2/C4 remain optional
+regression questions, not supported settings of the fixed C1 launcher.
 
 ## 4. Depth and cache
 
 Throughput depths are 1024, 8192, 32768, 65536, 131072, 196608, 245760 and
 261118 input tokens with 1024 outputs plus two engine-reserve tokens at the
 262144 objective. Attempt only a measured usable capacity; do not silently lower
-an input to make it pass. Separately apply all six total-context rungs in
-[capacity](capacity.md), whose diagnostic reserves 128 outputs plus two tokens.
+an input to make it pass. The historical six-rung total-context ladder in
+[capacity](capacity.md) is not a current runtime context selector; the launcher
+admits only 262144. Keep the capacity diagnostic's 128-output-plus-two-token
+reserve distinct from the throughput budget above.
 
 At each admitted depth report cold and warm TTFT, prefill/decode throughput,
 output length, VRAM and failures. Use official `generated-shared-prefix` options

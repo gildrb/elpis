@@ -5,7 +5,7 @@
 FROM lmsysorg/sglang:v0.5.19@sha256:d6e7288627be8b02be88e4bba38e73f6d50e2826869f753c13a4c4385ab3eda9 AS bend-toolchain
 ENV BEND_NO_TELEMETRY=1
 RUN apt-get update && \
-    apt-get install -y --no-install-recommends clang-19 && \
+    apt-get install -y --no-install-recommends clang-19 util-linux && \
     rm -rf /var/lib/apt/lists/*
 COPY bend/build_toolchain.py /tmp/bend-toolchain/
 RUN curl --proto '=https' --tlsv1.2 -fsSL \

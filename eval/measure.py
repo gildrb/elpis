@@ -106,12 +106,19 @@ def observe_episode(value: object, ordinal: int) -> EpisodeObservation:
             parts.append({"score": score, "weight": weight, "value": weighted})
             values.append(weighted)
         components.append(parts)
-        rewards.append(number(math.fsum(values)) if parts and len(parts) == len(values) else None)
+        rewards.append(
+            number(math.fsum(values)) if parts and len(parts) == len(values) else None
+        )
         calls = [mapping(call) for call in sequence(trace.get("calls", []))]
         completed_calls = [call for call in calls if call.get("error") is None]
         truncated |= trace.get("stop_condition") in (
-            "max_turns", "max_input_tokens", "max_output_tokens", "max_total_tokens"
-        ) or bool(completed_calls and completed_calls[-1].get("finish_reason") == "length")
+            "max_turns",
+            "max_input_tokens",
+            "max_output_tokens",
+            "max_total_tokens",
+        ) or bool(
+            completed_calls and completed_calls[-1].get("finish_reason") == "length"
+        )
         try:
             timing = mapping(trace.get("timing"))
             start = number(timing.get("start"))
@@ -153,7 +160,9 @@ def observe_episode(value: object, ordinal: int) -> EpisodeObservation:
     )
 
 
-def load_episodes(root: Path) -> tuple[list[EpisodeObservation], dict[str, object], bool]:
+def load_episodes(
+    root: Path,
+) -> tuple[list[EpisodeObservation], dict[str, object], bool]:
     """Consume only one fresh native run, counting malformed/torn records."""
     paths = sorted(root.glob("*/traces.jsonl"))
     episodes: list[EpisodeObservation] = []
@@ -193,7 +202,11 @@ def load_episodes(root: Path) -> tuple[list[EpisodeObservation], dict[str, objec
         if serve is not None:
             server = mapping(serve)
             pool = mapping(server.get("pool"))
-            c1 = c1 and server.get("max_concurrent") == 1 and pool.get("num_workers") == 1
+            c1 = (
+                c1
+                and server.get("max_concurrent") == 1
+                and pool.get("num_workers") == 1
+            )
     except (OSError, ValueError, UnicodeError):
         failures.append("resolved_concurrency_unavailable")
     return episodes, evidence, c1
@@ -214,7 +227,9 @@ def efficiency_report(
     interval = mapping(power["interval"])
     offset = start["unix_time_ns"] - start["monotonic_ns"]
     offsets = [end["unix_time_ns"] - end["monotonic_ns"]]
-    offsets.extend(sample.unix_time_ns - sample.monotonic_ns for sample in sampler.samples)
+    offsets.extend(
+        sample.unix_time_ns - sample.monotonic_ns for sample in sampler.samples
+    )
     drift = max((abs(value - offset) for value in offsets), default=0)
     clock_stable = drift <= CLOCK_TOLERANCE_NS
     spans: list[tuple[int, int]] = []
@@ -237,13 +252,19 @@ def efficiency_report(
         elif overlap:
             reason = "overlapping_trace_envelopes"
         task_interval = None
-        if reason is None and episode.start_unix_ns is not None and episode.end_unix_ns is not None:
+        if (
+            reason is None
+            and episode.start_unix_ns is not None
+            and episode.end_unix_ns is not None
+        ):
             lo = episode.start_unix_ns - offset
             hi = episode.end_unix_ns - offset
             if lo < start["monotonic_ns"] or hi > end["monotonic_ns"] or hi <= lo:
                 reason = "trace_envelope_outside_measured_run"
             else:
-                task_interval = integrate_power(sampler.samples, lo, hi, sampler.max_gap_ns)
+                task_interval = integrate_power(
+                    sampler.samples, lo, hi, sampler.max_gap_ns
+                )
                 attributed_ns += hi - lo
                 observed = task_interval["observed_joules"]
                 if observed is not None:
@@ -268,7 +289,11 @@ def efficiency_report(
     unknown_success = sum(episode.full_reward_success is None for episode in episodes)
     denominator_complete = not trace_evidence["failures"] and not unknown_success
     ratio_valid = denominator_complete and successes > 0 and native_exit_code == 0
-    rewards = [episode.weighted_reward for episode in episodes if episode.weighted_reward is not None]
+    rewards = [
+        episode.weighted_reward
+        for episode in episodes
+        if episode.weighted_reward is not None
+    ]
     joules = interval["joules"]
     wall = number(interval["wall_seconds"])
     ratio_reasons: list[str] = []
@@ -294,7 +319,9 @@ def efficiency_report(
         "recorded_task_rollouts": len(episodes),
         "operational_completions": sum(episode.operational_ok for episode in episodes),
         "operational_failures": sum(not episode.operational_ok for episode in episodes),
-        "episodes_with_recorded_errors": sum(episode.recorded_error_count > 0 for episode in episodes),
+        "episodes_with_recorded_errors": sum(
+            episode.recorded_error_count > 0 for episode in episodes
+        ),
         "truncated_task_rollouts": sum(episode.truncated for episode in episodes),
         "fractional_reward_task_rollouts": sum(0 < value < 1 for value in rewards),
         "reward_observations": len(rewards),
@@ -303,8 +330,12 @@ def efficiency_report(
         "total_wall_seconds": wall,
         "total_joules": joules,
         "observed_joules": interval["observed_joules"],
-        "seconds_per_successful_task_rollout": wall / successes if ratio_valid else None,
-        "joules_per_successful_task_rollout": number(joules) / successes if ratio_valid and joules is not None else None,
+        "seconds_per_successful_task_rollout": wall / successes
+        if ratio_valid
+        else None,
+        "joules_per_successful_task_rollout": number(joules) / successes
+        if ratio_valid and joules is not None
+        else None,
         "time_ratio_available": ratio_valid,
         "energy_ratio_available": ratio_valid and joules is not None,
         "ratio_unavailable_reasons": ratio_reasons,
@@ -314,14 +345,18 @@ def efficiency_report(
             "method": "host_unix_to_monotonic_offset_at_cli_start",
             "max_observed_drift_ns": drift,
             "tolerance_ns": CLOCK_TOLERANCE_NS,
-            "boundary_uncertainty_ns": max(start["uncertainty_ns"], end["uncertainty_ns"]),
+            "boundary_uncertainty_ns": max(
+                start["uncertainty_ns"], end["uncertainty_ns"]
+            ),
             "stable": clock_stable,
         },
         "trace_attribution": {
             "scope": "persisted_trace_envelopes_only_not_discarded_retries_or_full_episodes",
             "attributed_wall_seconds": attributed_ns / NANOSECONDS,
             "unattributed_wall_seconds": wall - attributed_ns / NANOSECONDS,
-            "attributed_observed_joules": attributed_joules if observed_intervals else None,
+            "attributed_observed_joules": attributed_joules
+            if observed_intervals
+            else None,
             "timing_failures": timing_failures,
         },
         "trace_evidence": trace_evidence,
@@ -389,7 +424,9 @@ def main() -> int:
     if not command or re.fullmatch(r"[a-z0-9-]+", args.environment) is None:
         parser.error("A native command and a safe environment label are required")
     try:
-        sampler = PowerSampler(args.gpu, args.interval_seconds, args.max_seconds, args.max_samples)
+        sampler = PowerSampler(
+            args.gpu, args.interval_seconds, args.max_seconds, args.max_samples
+        )
     except ValueError as error:
         parser.error(str(error))
     os.umask(0o077)
@@ -398,22 +435,34 @@ def main() -> int:
     evidence_dir = root / "measurement"
     evidence_dir.mkdir()  # Fresh invocation only; do not mix resumed attempt costs.
     interruption = Interruption()
-    previous = {sig: signal.signal(sig, interruption.request) for sig in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP)}
+    previous = {
+        sig: signal.signal(sig, interruption.request)
+        for sig in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP)
+    }
     code = 127
     launch_failure = None
     try:
         with sampler:
             start = clock_anchor()
             try:
-                with subprocess.Popen(command, cwd=args.working_directory, start_new_session=True) as child:
+                with subprocess.Popen(
+                    command, cwd=args.working_directory, start_new_session=True
+                ) as child:
                     termination_deadline = None
                     killed = False
                     try:
                         while True:
-                            if interruption.signum is not None and termination_deadline is None:
+                            if (
+                                interruption.signum is not None
+                                and termination_deadline is None
+                            ):
                                 interruption.forward(child.pid, interruption.signum)
                                 termination_deadline = time.monotonic() + 10
-                            if termination_deadline is not None and time.monotonic() >= termination_deadline and not killed:
+                            if (
+                                termination_deadline is not None
+                                and time.monotonic() >= termination_deadline
+                                and not killed
+                            ):
                                 interruption.forward(child.pid, signal.SIGKILL)
                                 killed = True
                             try:
@@ -431,13 +480,16 @@ def main() -> int:
             finally:
                 end = clock_anchor()
         # Persist collection first, even if native trace parsing later fails.
-        save_json(evidence_dir / "power-samples.json", {
-            "schema_version": 1,
-            "gpu": sampler.gpu,
-            "start": start,
-            "end": end,
-            "samples": sampler.records(),
-        })
+        save_json(
+            evidence_dir / "power-samples.json",
+            {
+                "schema_version": 1,
+                "gpu": sampler.gpu,
+                "start": start,
+                "end": end,
+                "samples": sampler.records(),
+            },
+        )
         summary, details = efficiency_report(
             root, args.environment, sampler, start, end, code, interruption.signum
         )
@@ -445,11 +497,24 @@ def main() -> int:
         summary["signal_delivery_races"] = interruption.delivery_races
         save_json(evidence_dir / "task-intervals.json", details)
         save_json(evidence_dir / "efficiency.json", summary)
-        if summary["total_joules"] is None or sampler.limit_reached or any(sample.error for sample in sampler.samples):
-            print("Power measurement incomplete; inspect measurement/efficiency.json (native rewards unchanged).", file=sys.stderr)
+        if (
+            summary["total_joules"] is None
+            or sampler.limit_reached
+            or any(sample.error for sample in sampler.samples)
+        ):
+            print(
+                "Power measurement incomplete; inspect measurement/efficiency.json (native rewards unchanged).",
+                file=sys.stderr,
+            )
         if not summary["success_denominator_complete"]:
-            print("Task-success denominator incomplete; inspect native trace evidence (native rewards unchanged).", file=sys.stderr)
-        print(f"Per-environment efficiency evidence: {evidence_dir / 'efficiency.json'}", file=sys.stderr)
+            print(
+                "Task-success denominator incomplete; inspect native trace evidence (native rewards unchanged).",
+                file=sys.stderr,
+            )
+        print(
+            f"Per-environment efficiency evidence: {evidence_dir / 'efficiency.json'}",
+            file=sys.stderr,
+        )
     finally:
         for sig, handler in previous.items():
             signal.signal(sig, handler)

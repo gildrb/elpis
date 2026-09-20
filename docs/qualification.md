@@ -1,9 +1,143 @@
 # Qualification status and promotion gates
 
 **The native-context recipe is not qualified.** The objective is 262144 total
-tokens with DFlash2 on one RTX 3090. No completed near-native full-model run or
-Prime Envs quality comparison is recorded. The authenticated Qwen FP8 fallback
-serves 65536 tokens; it is recovery capacity, not a native-context qualification.
+tokens with DFlash2 on one RTX 3090. The first sampled tiny-math/C1 measurement
+and one full-size **262014-input + 128-output** native request have completed;
+the [sanitized baseline ledger](../bench/results/bend20-native-baseline-20260920.json)
+records their limited scope. The earlier interrupted capacity attempt remains
+inconclusive. FP8 65536-token service is recovery capacity, not native-context
+qualification; no permanent native deployment or full-profile promotion is claimed.
+
+## Canonical tiny math baseline: not promotion
+
+`bash autoresearch.sh` is the finite measurement entrypoint, not a deployment or
+capacity command. It uses the existing native `tiny` AIME25 profile: three
+seed-0 shuffled tasks, one rollout each, greedy sampling, the unchanged 32768
+output budget and original upstream graders. It then runs C1 at
+1024/8192/32768 content-token depths, five repetitions per depth and a 1024-token
+output budget. There is no retry, task reduction, substituted scorer or new
+capacity ladder in this baseline.
+
+The operator must already own the maintenance window and recovery. Before **each**
+run, Main explicitly rebuilds/deploys the intended candidate, prepares its armed
+window and a fresh output path, then atomically installs a **new** descriptor at
+`/run/user/1000/litos-autoresearch-operator.json`. This is the only operator input;
+there is no legacy environment fallback. Its exact JSON schema is:
+
+```json
+{
+  "schema_version": 1,
+  "container_id": "<full 64-hex candidate container ID>",
+  "api_key_file": "/private/api-key",
+  "maintenance_directory": "/private/existing-armed-maintenance",
+  "output_directory": "/private/parent/new-autoresearch"
+}
+```
+
+Replace the placeholders with explicitly selected private values, never committed
+credentials or transient IDs. Create a private temporary regular file beside the
+descriptor, write and close the complete JSON with mode 0600 and owner uid1000,
+then atomically rename it to the fixed path before invoking:
+
+```console
+bash autoresearch.sh
+```
+
+Missing/extra/duplicate keys, non-integer schema versions, foreign ownership,
+non-0600 mode, symlinks and malformed paths are rejected. The container ID must
+be full lowercase 64-hex. Paths must be canonical and absolute; the key is a
+private regular file (0400/0600), the maintenance directory is an existing armed
+schema-1 window, and output must not exist. The harness never changes the
+descriptor or overwrites prior results. Keep it unchanged until the run exits:
+the supervisor binds its private file identity and exact bytes, passes the
+identity/SHA256 binding to the worker over its private stdin pipe, and records
+the identity and digest in `benchmark.json`. Both processes recheck it through
+the existing ownership guard. A replacement, mutation or stale window/output
+fails closed; the harness never selects or recovers another candidate.
+
+Prepared offline `eval/.venv`, pinned Prime/Verifiers and AIME25 data, sandbox
+images/caches, Docker access and `nvidia-smi` are prerequisites. The shell uses
+the prepared Python for its stdlib supervisor, explicitly selects rootless Docker
+at `unix:///run/user/1000/docker.sock`, and clears Docker context/TLS overrides.
+The supervised worker launches with
+`nix develop --offline --no-write-lock-file -c <prepared-python> -m bench.autoresearch --worker`.
+GPU/runtime variables are not changed. The healthy owned service must be native
+262144 at `http://127.0.0.1:18020`, RTX 3090/280 W, using Bend 2.0.20. The command
+does not install dependencies, start a service, change power policy or recover it.
+
+The whole-command deadline is the earlier of 2400 seconds from start and the
+guardian deadline minus 120 seconds; a 20-second termination reserve is inside
+that bound. Offline Nix entry, capture, math, C1, raw-evidence admission and
+PID-owned process cleanup all share this deadline.
+Ownership loss, incomplete evidence, producer failure or deadline expiry rejects
+the measurement rather than selecting successful rows or printing partial metrics.
+
+The primary `model_call_output_tok_s` pools completion usage over **all** native
+math model calls divided by the sum of their full model-call wall intervals.
+Those native Unix wall intervals run from request send through the fully received
+response and include prefill, decode and HTTP; they are neither decode-only nor
+monotonic/GPU timing. Completion usage already includes reasoning tokens, which
+are not added again. Legitimately graded incorrect or length-truncated answers
+remain included; operationally failed calls cannot be filtered out.
+
+Only a complete admitted run prints `METRIC name=value`: that primary metric,
+`tiny_math_reward`, `committed_tps_1024`, `committed_tps_8192`,
+`committed_tps_32768`, corresponding `ttft_seconds_1024`,
+`ttft_seconds_8192`, `ttft_seconds_32768`, and `elapsed_seconds`.
+C1 committed-counter rates and TTFT are separate secondary measurements; elapsed
+time covers the entire command through admission. Retained artifacts include
+`tiny-math/`, `decode/`, private `logs/`, `sources/`, before/after identity,
+`benchmark.json`, `admitted.json` and `measurement.json`; failures retain
+`failure.json` and/or `worker-failure.json`. Review the upstream text/reasoning
+and grades privately. The first completed sampled result is recorded below.
+
+This sampled baseline is not the full qualification vector described below.
+`serve.qualification check-eval` validates one native `tiny`, `quick` or `full`
+profile entry only. The separate `qualify --manifest ... --output ...` interface
+requires schema-1 `profile`, `baseline` and `candidate`; each arm supplies
+`identity_before`, `identity_after`, `bend_directory`, `decode_report`,
+`capacity_directory`, `numerical_reports` and `evaluations`. Even a `tiny`
+qualification manifest requires those evidence gates; `autoresearch.sh` instead
+admits its narrower sampled-math/C1 measurement without running that full manifest.
+Tiny selects only AIME25. The unchanged core suite is AIME24, AIME25, AIME26,
+i3-logic and LiveCodeBench. Promotion requires profile `full`, every arm's
+evidence complete and a verified observed dominance comparison; otherwise the
+decision is `retain_control`. A valid tiny measurement never promotes.
+
+### First completed sampled measurement (2026-09-20)
+
+The [native baseline ledger](../bench/results/bend20-native-baseline-20260920.json)
+binds the first admitted measurement to the native 29-patch image
+`sha256:54eed6bfc1726ba03753c19fdbbf4b28792e533b030c32716877b4599cd4b499`.
+It used the **predecessor operator environment**, before the private-descriptor
+cutover. The workload is unchanged, but this result does not verify the updated
+plain `bash autoresearch.sh` invocation, which remains pending at this record.
+
+| Sampled measurement | Result |
+|---|---:|
+| Math pooled full-model-call output rate | 92.820548 tok/s |
+| Native tiny AIME25 reward | 0.666667 (2/3) |
+| C1 committed rate, 1024 / 8192 / 32768 content tokens | 84.716496 / 74.174910 / 54.942068 tok/s |
+| C1 TTFT, 1024 / 8192 / 32768 content tokens | 1.421334 / 9.232604 / 40.817490 s |
+| Whole measurement through admission | 1023.131889 s |
+| Native math CLI wall time / selected-board energy | 427.215123 s / 111244.744489 J |
+| Math wall time / energy per successful task rollout | 213.607562 s / 55622.372245 J |
+
+All three math calls completed operationally, with one legitimate length
+truncation and no operational failures. Private trace review reported: the first
+answer correctly boxed **117** after **1832** completion tokens; the middle task
+exhausted **32768** tokens without final output and retained native grade **0**,
+despite eventually deriving **259** internally; the last correctly boxed **106**
+after **3074** tokens, with scratch mistakes corrected. The entire middle trace
+was reviewed, not retroactively graded. Its failure remains in both the reward
+denominator and pooled model-call timing. The network-blocked notice is pinned
+Verifiers dialect text, not a task mutation.
+
+Energy coverage was complete over the native math CLI window (856 valid board
+samples, p90 270.17 W, maximum 277.91 W); it is not whole-system energy or a
+decode-only measure. No workload, scorer, task count or token budget was reduced.
+These three sampled tasks and the fixed C1 matrix do not replace full-profile
+quality, numerical or promotion evidence.
 
 ## Optimization contract
 
@@ -120,7 +254,7 @@ F_d=\frac{\sum_r(t_{{\rm first\ content/reasoning},r}-t_{{\rm start},r})}
            {10^9\,N_d}.
 $$
 
-The primary observed vector is `(Qe for every e, Td for every d, -Fd for every d)`.
+The full comparison's observed vector is `(Qe for every e, Td for every d, -Fd for every d)`.
 All coordinates must be present, comparable and legitimate. Every native
 environment and each frozen depth remains separate; no scalar weighting hides
 a loss. Repetition rows remain available for variability and paired analysis.
@@ -218,6 +352,80 @@ remain in [the result index](../bench/results/README.md), not as launch defaults
 The [video preprocessing OOM](../bench/results/multimodal-baseline.json) also
 remains a real limitation. Enabling vision code does not prove memory capacity.
 
+## Latest Bend/native evidence and completed capacity
+
+The only admitted compiler is the pinned original **Bend 2.0.20** release, with
+its retained compiler/toolchain identity; an arbitrary installed version is not
+equivalent. Root `PROOF.bend` passed unchanged (`All terms check`, exit 0,
+99.59 s) under the recorded resource settings: a 1073741824-byte stack limit,
+disabled core dumps and `BUN_JSC_maxPerThreadStackUsage=536870912`, with telemetry
+disabled. This used the original release, not a patched checker.
+
+A real CUDA acceptance-helper run passed **128 masks, 5500 rows and 80
+invocations**, exercising eager and graph paths. This is compiled-policy plus
+GPU acceptance-helper evidence, not full worker/KV-write/Mamba integration,
+recurrence, publication or numerical-quality proof. The separate component
+numerical suite has now passed with the narrower scope recorded below.
+
+The native **262144 context / 263168 pool** service subsequently completed one
+**262014 submitted-input + 128-output** request, with matching before/after
+identity, zero cached tokens/retractions and finite aligned output logprobs.
+The generation HTTP interval was **638.808 s**, not a throughput qualification.
+The operator independently replayed the retained raw capacity evidence through
+the capacity gate (48 hashed files), rather than relying only on its producer
+summary. Seed **20260920** and the exact input/body hashes match the earlier
+interrupted trial. Private review found a coherent initial geometric answer
+and recorded forced continuation after EOS. See the
+[capacity chronology](capacity.md#completed-native-request-and-earlier-interruption)
+and [sanitized ledger](../bench/results/bend20-native-baseline-20260920.json).
+
+The earlier request remains **inconclusive**: the **900-second guardian**
+interrupted it with `RemoteDisconnected` and failed identity-after capture.
+That failed attempt is not an OOM diagnosis or completed-output result. Its
+historical FP8 recovery was authenticated. The later math window's guardian also
+reported `baseline_restored_authenticated` with exit 0, as directly observed by
+the operator. Neither recovery qualifies native context or confirms recovery
+for any subsequent validation window.
+
+Upstream already reserves **262528 RoPE rows**; the redundant constructor patch
+was removed. That source correction is not itself capacity evidence. The earlier
+startup reports below retain their original identities and chronology; one later
+completed request and sampled math measurement do not establish full qualification.
+
+### Component numerical run and harness controls
+
+The actual `bench.numerical` run passed **exit 0 in 105.19 s** under protocol
+`qwen-component-numerics-v2`; the operator independently replayed **576 events**.
+Coverage includes `kvarn_attention`, `kvarn_native_context`, `kvarn_storage`,
+`packed_embedding`, `dflash_commit` and `dflash_sampler`. The report hash and
+private evidence pointer are retained in the
+[ledger](../bench/results/bend20-native-baseline-20260920.json).
+
+This exercises real native pools and the production commit runner with
+deterministic toy draft projections, full-history traversal over repeated real
+packed tiles plus a raw tail, and all **248320 embedding rows / 1271398400
+values** hashed to the immutable oracle. The fixed component limitations remain:
+KVarN error is relative to the dequantized packed-KV reference, not unquantized
+KV; the traversal is not loaded-model capacity or quality proof; the commit
+fixture does not exercise loaded-model projections, Mamba recurrence or scheduler
+cancellation. Sampler coverage is greedy temperature 0, top-p 1, without
+penalties or grammar—not non-greedy or finite-RNG-law coverage. There is no W4A8
+claim, full served-path validation or model-quality qualification.
+
+The first cold numerical attempt is preserved: two suites failed only with
+`ModuleNotFoundError: bend`. Explicit `docker-exec` `PYTHONPATH=/opt/qwen`,
+matching the immutable image's working directory/package, repaired the import
+environment; no gate, tolerance or workload changed. Its guardian reported
+`restored_authenticated` and exit 0. The second numerical candidate remains
+live and unqualified at this record; its eventual recovery is not yet confirmed.
+
+The lifecycle fix also passed five real CPU cases: clean completion, abrupt
+double-fork, rejection of zero-exit live orphans, acceptance of zombie-only
+descendants, and TERM-time fork/KILL cleanup. An unrelated sentinel survived.
+Seventeen descriptor rejection controls and a live positive control passed.
+These controls do **not** complete the still-pending plain canonical
+`bash autoresearch.sh` math/C1 invocation.
+
 ## Refactored FP8 hardware trial
 
 [The bounded startup trial](../bench/results/refactor-fp8-startup.json) requested
@@ -236,12 +444,16 @@ The candidate had zero restarts and was stopped deliberately. The original
 service was restored with authenticated health, model inventory and a short
 completion check. No power/fan policy or permanent deployment was changed.
 
-## Required capacity matrix
+## Full-qualification capacity matrix
 
-Run each row independently for baseline KV, FP8 KV, applicable upstream
-compression and the explicit KVarN experiment. Unsupported hardware paths must
-be recorded as unsupported, not tested failures. Reserve meaningful output
-space inside the total context, plus engine-required accounting overhead.
+For full qualification, run each row independently for baseline KV, FP8 KV,
+applicable upstream compression and the explicit KVarN experiment. Record
+unsupported hardware paths as unsupported, not tested failures. Reserve
+meaningful output inside the total context plus engine accounting overhead.
+These requirements do not add a capacity ladder to `autoresearch.sh`.
+The implemented automated capacity gate admits one exact near-native request per
+arm; passing that gate does not establish the broader study or the other
+promotion requirements below.
 
 | Total context | Startup | Deep prefill + output | Peak VRAM / finite numerics | Direct-context quality | Status |
 |---:|---|---|---|---|---|
@@ -250,7 +462,7 @@ space inside the total context, plus engine-required accounting overhead.
 | 196608 | — | — | — | — | Not run |
 | 229376 | — | — | — | — | Not run |
 | 245760 | — | — | — | — | Not qualified; earlier startup failure |
-| 262144 | — | — | — | — | FP8 pool68004; packed KVarN 0.94 profile-rejected (211328<263168); 0.98 pool cap passed but hybrid wiring failed; no deep request |
+| 262144 | Native API authenticated, pool263168 | One 262014-input + 128-output request completed; earlier interrupted attempt remains inconclusive | Finite aligned output logprobs; standalone component numerical suite passed, not peak-memory or full served-path proof | Not established by synthetic capacity probe | Not qualified. First sampled tiny-math/C1 result is separate; full promotion gates remain pending. Earlier FP8 pool68004, packed 0.94 profile rejection and 0.98 wiring failure remain historical. |
 
 A row passes only after startup, near-depth request acceptance, completed
 prefill, meaningful subsequent output, measured VRAM safety, finite numerics
@@ -270,6 +482,8 @@ environments for capability; file-search tasks measure a different workload.
 3. **Capacity and cache:** complete all capacity rungs that fit, then cold/warm
    identical prefix, extension and divergent continuation at meaningful depths.
    Record startup, TTFT, cache hits, retractions, peak VRAM and restoration.
+   This promotion study is separate from the tiny measurement; startup alone
+   cannot pass it.
 4. **Capability:** run frozen Prime Envs smoke/quick/full for target-only and
    each proposed patch/quantization change. Declare per-environment tolerances
    before runs; retain errors, truncations, seeds and traces. No accepted
@@ -286,23 +500,24 @@ candidate launch because the agent resumed after the independent recovery
 deadline. The original service was restored and passed authenticated health,
 model and short-completion checks. **No KVarN GPU measurement was made in that window.** This is
 not an allocation failure, startup failure or capacity result for KVarN. No
-further GPU trial was made in this run.
+further GPU trial was made during that historical run.
 
 ## Experimental native KVarN sizing
 
-`kvarn-native-rungs.patch` is a new, separate experimental change after the
-byte-preserving ten-stage migration. It admits the six native/eager DFlash2
-context rungs with exact `context + 1024` pools and derived page counts. It rejects
-an actual pool smaller than the request rather than silently treating a lower
-allocation as success. CPU checks cover 132 admission/budget cases; all eleven
-patches apply to the exact upstream commit. This is not GPU capacity evidence.
+At that historical stage, `kvarn-native-rungs.patch` was a separate experimental
+change after the byte-preserving ten-stage migration. It admitted the six
+native/eager DFlash2 context rungs with exact `context + 1024` pools and derived
+page counts, rejecting an actual pool smaller than requested rather than
+advertising lower allocation as success. CPU checks covered 132 admission/budget
+cases; all eleven patches applied to the pinned commit. That was not GPU capacity
+evidence.
 
-Tile geometry, workspace, null-page and error-status checks stay intact. Graph
-mode remains at its prior 245760 envelope. KVarN target-only execution remains
-blocked: the ordinary worker does not yet check native sticky error status before
-publishing results. Do not remove that guard merely to obtain a comparison.
-Target-only FP8/BF16 controls are available, but a different KV policy is a
-confounded comparison and must be labeled as such.
+Tile geometry, workspace, null-page and error-status checks stayed intact. At
+that stage graph mode remained at its prior 245760 envelope. The KVarN target-only
+guard blocked the ordinary worker because it did not check native sticky error
+status before publication. That history is not a claim about the latest graph
+envelope or a reason to remove the guard for a comparison. FP8/BF16 target-only
+controls use a different KV policy and must be labeled as confounded comparisons.
 
 ## Packed trial exposed a launcher defect
 
@@ -314,17 +529,17 @@ embedding. It then rejected requested pool263168 against profiled139520.
 score was produced. The scheduler's explicit process-tree termination must not
 be mislabeled as a CUDA OOM; Docker reported `OOMKilled=false`.
 
-The correction must bind the explicit representation to its loader flag,
+The subsequent correction bound the explicit representation to its loader flag,
 `safetensors` load format, BF16 dtype and DFlash2 requirement. File hashing alone
 does not prove that the intended model-loading branch was selected. Corrected
-images need separate runtime qualification; the old image is retained for evidence.
+images needed separate runtime qualification; the old image remains evidence.
 
 The next separate experimental patch, `packed-embedding-lora-defaults.patch`,
-corrects upstream's disabled LoRA defaults (`None`) without enabling LoRA. Only
-identity `None` or `False` is accepted for the two LoRA flags; any supplied paths,
-true values or invalid types are rejected. All other guards remain unchanged.
-Forty-two CPU constructor checks passed; the complete twelve-stage series applies
-to the pinned source. This is compatibility evidence, not a GPU loader pass.
+corrected upstream's disabled LoRA defaults (`None`) without enabling LoRA. Only
+identity `None` or `False` was accepted for the two LoRA flags; supplied paths,
+true values or invalid types were rejected. All other guards remained unchanged.
+Forty-two CPU constructor checks passed; the complete twelve-stage series applied
+to the pinned source. That was compatibility evidence, not a GPU loader pass.
 
 ## Corrected packed image: first GPU admission result
 
@@ -341,10 +556,10 @@ warning appeared, and the target/draft weights took 14.75/1.22 GB. The KVarN
 profiler backed only **211328 tokens** against the requested 263168 pool cap,
 and the scheduler refused to advertise an unbacked context length. This is a
 valid packed-load startup rejection, not a capacity result: no readiness,
-VRAM-at-ready, deep request or quality result exists. The conditional 0.98
-retry was not taken because under seven minutes remained in the window; it runs
-in a separate window with the same image and protocol. The baseline was
-restored and re-authenticated.
+VRAM-at-ready, deep request or quality result came from that attempt. The
+conditional 0.98 retry was not taken because under seven minutes remained; the
+later separate 0.98 window is recorded below. The baseline was restored and
+re-authenticated.
 
 [The 0.98 admission window](../bench/results/packed-kvarn-098-admission.json)
 then passed the strict pool-cap check for the first time: no profile rejection
@@ -354,19 +569,22 @@ attention-backend wiring: upstream's `HybridLinearAttnBackend` reads
 `token_to_kv_pool`, `req_to_token_pool` and `kv_index_translator` from its
 full-attention child, but the experimental `KVarNAttnBackend` constructor never
 set them. This is a source-level integration gap in the patch chain, not a
-memory-capacity result. **No admission, readiness or VRAM evidence exists**;
-the deep-request probe stays deferred. The fix must ship as a new patch stage
-with a new image identity and its own CPU checks.
+memory-capacity result. **No API readiness or deep-request evidence came from
+that attempt**; its probe was deferred pending a new patch stage/image and
+separate checks. Later authenticated native readiness is recorded above.
 
 ## Known blockers
 
 CPU probes previously found DFlash selector differences for top-k/top-p,
 `min_p`, frequency/presence and repetition penalties. Local sampler repairs
 remain experimental until GPU and target-only quality comparisons pass.
-KVarN's corrected packing passed small GPU fixtures but has no successful
-full-model near-native result. Full CPU artifact reproduction has now passed,
-including exact inventories and the all-row proof. That does not establish packed
-runtime inference parity, native capacity or capability preservation.
+KVarN now has one completed full-model near-native allocation/generation request
+and the first sampled tiny-math/C1 result. Standalone component numerics passed,
+but loaded-model numerical/recurrence/cache, direct-context quality and
+full-profile comparison evidence remain incomplete.
+Full CPU artifact reproduction has passed, including exact inventories and the
+all-row proof; it does not establish packed-runtime inference parity or capability
+preservation. The descriptor-based plain launcher still needs its own execution.
 
 A 280 W host cap was used historically. It is not a recommended knee for the new
 recipe. No canonical 200–350 W sweep has completed. Do not change host fan or

@@ -6,6 +6,7 @@ import ./speculation.bend as Speculation
 import ./speculation_spec.bend as Spec
 import ./SPECULATE.bend as Wire
 import ./range.bend as Range
+import ./speculation_laws.bend as SemanticLaws
 
 def add_zero(n: Nat) -> {Nat.add(n, 0n) == n : Nat}:
   match n:
@@ -28,8 +29,8 @@ def add_succ(n: Nat, -m: Nat)
 # recursion helpers. Only the shared decision ABI is used by this proof.
 def accepted(value: Spec.Decision) -> Nat:
   match value:
-    case Spec.Decision{count, committed, bonus, advance}:
-      count
+    case Spec.Decision{naccepted, ncommitted, nbonus, nadvance}:
+      naccepted
 
 # The accumulator is an arbitrary prior accepted prefix, not a block8 bound.
 # Induction follows every finite comparison list, including tails after false.
@@ -52,11 +53,171 @@ def scan_zero(+flags: List<&2, Bool>)
     {Speculation.scan(flags, 0n) == _ : Nat}
   scan_reference(flags, 0n)
 
-def Laws.greedy_acceptance(flags):
-  %scan_zero(flags) :
-    {Speculation.decision(Speculation.scan(flags, 0n)) ==
-      Speculation.decision(_) : Spec.Decision}
+def proposals_length(count: Nat, start: Nat)
+  -> {Spec.length(Spec.proposals(count, start)) == count : Nat}:
+  match count:
+    case 0n:
+      {==}
+    case 1n+p:
+      %proposals_length(p, 1n+start) :
+        {1n+Spec.length(Spec.proposals(p, 1n+start)) == 1n+_ : Nat}
+      {==}
+
+def output_length(count: Nat, start: Nat, bonus: Nat)
+  -> {Spec.length(List.append(&2, Spec.Source, Spec.proposals(count, start),
+    [Spec.Bonus{bonus}])) == 1n+count : Nat}:
+  match count:
+    case 0n:
+      {==}
+    case 1n+p:
+      %output_length(p, 1n+start, bonus) :
+        {1n+Spec.length(List.append(&2, Spec.Source, Spec.proposals(p, 1n+start),
+          [Spec.Bonus{bonus}])) == 1n+_ : Nat}
+      {==}
+
+def SemanticLaws.decision_refinement(accepted):
+  %proposals_length(accepted, 1n) :
+    {Spec.Decision{accepted, 1n+_, accepted, 1n+accepted} == Spec.decision(accepted) : Spec.Decision}
+  %proposals_length(accepted, 1n) :
+    {Spec.Decision{accepted, 1n+Spec.length(Spec.proposals(accepted, 1n)), _, 1n+accepted} ==
+      Spec.decision(accepted) : Spec.Decision}
+  %output_length(accepted, 1n, accepted) :
+    {Spec.Decision{accepted, 1n+Spec.length(Spec.proposals(accepted, 1n)),
+      Spec.length(Spec.proposals(accepted, 1n)), _} == Spec.decision(accepted) : Spec.Decision}
   {==}
+
+def Laws.greedy_acceptance(flags):
+  +bits = flags
+  Equal.trans(Spec.Decision, Speculation.decide(bits),
+    Speculation.decision(Spec.prefix(bits)), Spec.decide(bits),
+    Equal.cong(Nat, Spec.Decision, count => Speculation.decision(count),
+      Speculation.scan(bits, 0n), Spec.prefix(bits), scan_zero(bits)),
+    SemanticLaws.decision_refinement(Spec.prefix(bits)))
+
+def prefix_bound(+flags: List<&2, Bool>)
+  -> {Nat.is_le(Spec.prefix(flags), List.length(&2, Bool, flags)) == True{} : Bool}:
+  match flags:
+    case Nil{}:
+      {==}
+    case False{} <> rest:
+      {==}
+    case True{} <> rest:
+      prefix_bound(rest)
+
+def SemanticLaws.prefix_bound(flags):
+  %Equal.sym(Nat, Speculation.scan(flags, 0n), Spec.prefix(flags), scan_zero(flags)) :
+    {Nat.is_le(_, List.length(&2, Bool, flags)) == True{} : Bool}
+  prefix_bound(flags)
+
+def repeat_stop(count: Nat, +suffix: List<&2, Bool>)
+  -> {Spec.prefix(List.append(&2, Bool, List.replicate(Bool, count, True{}),
+    False{} <> suffix)) == count : Nat}:
+  match count:
+    case 0n:
+      {==}
+    case 1n+p:
+      %repeat_stop(p, suffix) :
+        {1n+Spec.prefix(List.append(&2, Bool, List.replicate(Bool, p, True{}),
+          False{} <> suffix)) == 1n+_ : Nat}
+      {==}
+
+def SemanticLaws.first_mismatch(accepted, suffix):
+  Equal.cong(Nat, Spec.Decision, count => Speculation.decision(count),
+    Speculation.scan(List.append(&2, Bool, List.replicate(Bool, accepted, True{}),
+      False{} <> suffix), 0n), accepted,
+    Equal.trans(Nat,
+      Speculation.scan(List.append(&2, Bool, List.replicate(Bool, accepted, True{}),
+        False{} <> suffix), 0n),
+      Spec.prefix(List.append(&2, Bool, List.replicate(Bool, accepted, True{}),
+        False{} <> suffix)), accepted,
+      scan_zero(List.append(&2, Bool, List.replicate(Bool, accepted, True{}),
+        False{} <> suffix)), repeat_stop(accepted, suffix)))
+
+def SemanticLaws.seven_bound(b0, b1, b2, b3, b4, b5, b6):
+  SemanticLaws.prefix_bound([b0, b1, b2, b3, b4, b5, b6])
+
+def flags_length(width: Nat, mask: Nat)
+  -> {List.length(&2, Bool, Spec.flags(width, mask)) == width : Nat}:
+  match width:
+    case 0n:
+      {==}
+    case 1n+p:
+      %flags_length(p, Nat.div(mask, 2n)) :
+        {1n+List.length(&2, Bool, Spec.flags(p, Nat.div(mask, 2n))) == 1n+_ : Nat}
+      {==}
+
+def SemanticLaws.native_bound(mask):
+  %flags_length(7n, mask) :
+    {Nat.is_le(Spec.accepted_count(Speculation.decide(Spec.flags(7n, mask))), _) == True{} : Bool}
+  SemanticLaws.prefix_bound(Spec.flags(7n, mask))
+
+def SemanticLaws.committed_length(accepted):
+  %proposals_length(accepted, 1n) :
+    {1n+Spec.length(Spec.proposals(accepted, 1n)) == 1n+_ : Nat}
+  {==}
+
+def SemanticLaws.emitted_length(accepted):
+  output_length(accepted, 1n, accepted)
+
+def SemanticLaws.bonus_position(accepted):
+  proposals_length(accepted, 1n)
+
+def take_proposals(count: Nat, start: Nat, rejected: List<&2, Spec.Source>)
+  -> {Spec.take(count, List.append(&2, Spec.Source, Spec.proposals(count, start), rejected)) ==
+    Spec.proposals(count, start) : List<&2, Spec.Source>}:
+  match count:
+    case 0n:
+      {==}
+    case 1n+p:
+      %take_proposals(p, 1n+start, rejected) :
+        {Spec.Input{start} <> Spec.take(p, List.append(&2, Spec.Source,
+          Spec.proposals(p, 1n+start), rejected)) == Spec.Input{start} <> _ : List<&2, Spec.Source>}
+      {==}
+
+def SemanticLaws.rejected_suffix_excluded(accepted, rejected):
+  %take_proposals(accepted, 1n, rejected) :
+    {Spec.Input{0n} <> Spec.take(accepted, List.append(&2, Spec.Source,
+      Spec.proposals(accepted, 1n), rejected)) == Spec.Input{0n} <> _ : List<&2, Spec.Source>}
+  {==}
+
+def proposals_materialized(count: Nat, start: Nat)
+  -> {Spec.inputs_only(Spec.proposals(count, start)) == True{} : Bool}:
+  match count:
+    case 0n:
+      {==}
+    case 1n+p:
+      proposals_materialized(p, 1n+start)
+
+def SemanticLaws.committed_inputs_only(accepted):
+  proposals_materialized(accepted, 1n)
+
+def SemanticLaws.bonus_not_materialized(accepted, rejected):
+  Equal.trans(Bool,
+    Spec.inputs_only(Spec.take(Spec.commit_count(Speculation.decision(accepted)),
+      Spec.materialized(accepted, rejected))),
+    Spec.inputs_only(Spec.committed(accepted)), True{},
+    Equal.cong(List<&2, Spec.Source>, Bool, Spec.inputs_only,
+      Spec.take(Spec.commit_count(Speculation.decision(accepted)), Spec.materialized(accepted, rejected)),
+      Spec.committed(accepted), SemanticLaws.rejected_suffix_excluded(accepted, rejected)),
+    SemanticLaws.committed_inputs_only(accepted))
+
+def SemanticLaws.anchor_lower_bound(accepted):
+  {==}
+
+def SemanticLaws.commit_upper_bound(accepted, valid):
+  valid
+
+def SemanticLaws.bonus_upper_bound(accepted, valid):
+  valid
+
+def SemanticLaws.advance_committed(accepted):
+  {==}
+
+def SemanticLaws.zero_acceptance():
+  ({==}, {==}, {==})
+
+def SemanticLaws.all_acceptance():
+  ({==}, {==}, {==})
 
 # Congruence is checked with abstract lists, not normalized output tables.
 def append_equal(-left: List<&2, Spec.Decision>,
@@ -163,7 +324,7 @@ def decode_table()
 def row_reference(value: Spec.Decision)
   -> {Wire.row(value) == Spec.render(value) : String}:
   match value:
-    case Spec.Decision{count, committed, bonus, advance}:
+    case Spec.Decision{naccepted, ncommitted, nbonus, nadvance}:
       {==}
 
 def rows_reference(count: Nat, +index: Nat)

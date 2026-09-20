@@ -444,16 +444,35 @@ def client_from_settings(
     return Client(endpoint.hostname, port, key, args.timeout, context_length)
 
 
-def make_fixture(client: Client, input_tokens: int) -> tuple[str, list[int], list[int]]:
+def fixture_text(nonce: str) -> str:
+    """Build the unchanged ledger from an explicit benchmark-only nonce."""
+    if len(nonce) != 32 or any(
+        character not in "0123456789abcdef" for character in nonce
+    ):
+        message = "fixture nonce must be exactly 32 lowercase hexadecimal characters"
+        raise BenchError(message)
+    return (
+        f"Synthetic ledger {nonce}. Copper square follows amber circle. "
+        "Record seven blue triangles, then repeat the numbered inventory calmly. "
+    )
+
+
+def make_fixture(
+    client: Client,
+    input_tokens: int,
+    *,
+    nonce: str | None = None,
+) -> tuple[str, list[int], list[int]]:
     """Verify the served model and build exact IDs from authenticated tokenization.
 
     Returns:
         Synthetic source text, seed IDs and repeated/truncated input IDs.
 
     Raises:
-        BenchError: If model identity or tokenizer counts do not match.
+        BenchError: If the nonce, model identity or tokenizer counts do not match.
 
     """
+    text = fixture_text(secrets.token_hex(16) if nonce is None else nonce)
     models = client.request("/v1/models").get("data")
     if (
         not isinstance(models, list)
@@ -462,11 +481,6 @@ def make_fixture(client: Client, input_tokens: int) -> tuple[str, list[int], lis
     ):
         message = "served model identity mismatch"
         raise BenchError(message)
-    nonce = secrets.token_hex(16)
-    text = (
-        f"Synthetic ledger {nonce}. Copper square follows amber circle. "
-        "Record seven blue triangles, then repeat the numbered inventory calmly. "
-    )
     tokenized = client.request(
         "/v1/tokenize",
         {

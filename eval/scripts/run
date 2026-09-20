@@ -8,7 +8,9 @@ umask 077
 root=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)
 repo=$(cd -- "$root/.." && pwd -P)
 usage() {
-    printf '%s\n' 'Usage: eval/scripts/run PROFILE [TASKSET] [--dry-run] [--measure-power]' \
+    printf '%s\n' 'Usage: eval/scripts/run PROFILE [TASKSET] [--dry-run] [--measure-power] [--output FRESH_DIRECTORY]' \
+        '  tiny aime25                  Three native seed-0 shuffled math tasks; not full qualification.' \
+        '  --output FRESH_DIRECTORY     Exclusive-create the result group at this path.' \
         '  --measure-power              Collect board energy and per-environment task efficiency.' \
         '  --power-gpu=0                One GPU index, UUID or PCI bus ID (no power-policy changes).' \
         '  --power-interval-seconds=0.5  Monotonic sample period; allowed 0.1..60 s.' \
@@ -18,16 +20,26 @@ usage() {
         'Measurement is opt-in, cannot accompany --dry-run, and never changes upstream scores.'
 }
 if [[ ${1:-} == --help || ${1:-} == -h ]]; then usage; exit 0; fi
-profile=${1:?Usage: eval/scripts/run PROFILE [TASKSET] [--dry-run] [--measure-power]}
+profile=${1:?Usage: eval/scripts/run PROFILE [TASKSET] [--dry-run] [--measure-power] [--output FRESH_DIRECTORY]}
 shift
-case "$profile" in smoke|quick|full|agentic|agentic-full) ;; *) printf 'Unknown profile: %s\n' "$profile" >&2; exit 2 ;; esac
+case "$profile" in smoke|tiny|quick|full|agentic|agentic-full) ;; *) printf 'Unknown profile: %s\n' "$profile" >&2; exit 2 ;; esac
 selection=""
 dry=false
 measure=false
+output=""
 power_options=()
-for argument in "$@"; do
+while [[ $# -gt 0 ]]; do
+    argument=$1
+    shift
     if [[ "$argument" == --dry-run ]]; then dry=true
     elif [[ "$argument" == --measure-power ]]; then measure=true
+    elif [[ "$argument" == --output ]]; then
+        [[ -z "$output" && $# -gt 0 && -n "$1" ]] || { usage >&2; exit 2; }
+        output=$1
+        shift
+    elif [[ "$argument" == --output=* ]]; then
+        [[ -z "$output" && -n "${argument#*=}" ]] || { usage >&2; exit 2; }
+        output=${argument#*=}
     elif [[ "$argument" == --power-gpu=* ]]; then power_options+=("--gpu=${argument#*=}")
     elif [[ "$argument" == --power-interval-seconds=* ]]; then power_options+=("--interval-seconds=${argument#*=}")
     elif [[ "$argument" == --power-max-seconds=* ]]; then power_options+=("--max-seconds=${argument#*=}")
@@ -41,6 +53,12 @@ if [[ "$measure" == false && ${#power_options[@]} -gt 0 ]]; then
 fi
 if [[ "$measure" == true && "$dry" == true ]]; then
     printf 'Power measurement requires a real evaluation, not --dry-run\n' >&2; exit 2
+fi
+if [[ -n "$output" && ( -e "$output" || -L "$output" ) ]]; then
+    printf 'Output already exists; choose a fresh directory: %s\n' "$output" >&2; exit 2
+fi
+if [[ "$profile" == tiny && -n "$selection" && "$selection" != aime25 ]]; then
+    printf 'Tiny is sampled math only: aime25, 3 tasks, 1 rollout each\n' >&2; exit 2
 fi
 if [[ -n "$selection" ]]; then
     configs=("$root/configs/$profile/$selection.toml")
@@ -76,7 +94,12 @@ export MRCR_V2_CACHE_DIR="$root/.cache/mrcr_v2"
 export UV_PYTHON="$root/.venv/bin/python" UV_PYTHON_DOWNLOADS=never
 unset UV_FROZEN
 mkdir -p -- "$HOME" "$root/runs"
-group=$(mktemp -d "$root/runs/$profile.XXXXXXXX")
+if [[ -n "$output" ]]; then
+    mkdir -- "$output"
+    group=$(realpath -- "$output")
+else
+    group=$(mktemp -d "$root/runs/$profile.XXXXXXXX")
+fi
 # Fresh derived Arrow cache: only authenticated raw dataset assets are reused.
 export HF_DATASETS_CACHE="$group/.dataset-cache"
 printf 'Native outputs and provenance: %s\n' "$group"
@@ -195,6 +218,11 @@ for config in "${configs[@]}"; do
             printf 'Upstream episode failures; inspect %s\n' "${traces[0]}" >&2
             jq -r 'select(.ok == false) | .errors[]? | .message' "${traces[0]}" >&2
             exit 1
+        fi
+        if [[ "$profile" == tiny ]]; then
+            qualification check-eval --profile tiny --environment aime25 \
+                --directory "$group/aime25" --identity "$before" \
+                --output "$group/provenance/aime25.sampled-math.json"
         fi
     fi
     if [[ "$status" -ne 0 ]]; then exit "$status"; fi

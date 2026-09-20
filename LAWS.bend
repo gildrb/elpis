@@ -9,8 +9,7 @@ import ./bend/control.bend as Control
 import ./bend/spec.bend as Spec
 import ./bend/PLAN.bend as Wire
 import ./bend/selection_laws.bend as SelectionLaws
-import ./bend/acceptance_laws.bend as AcceptanceLaws
-import ./bend/commit_laws.bend as CommitLaws
+import ./bend/speculation_laws.bend as SpeculationLaws
 import ./bend/speculation.bend as Speculation
 import ./bend/speculation_spec.bend as SpeculationSpec
 import ./bend/SPECULATE.bend as SpeculationWire
