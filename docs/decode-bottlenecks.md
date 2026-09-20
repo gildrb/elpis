@@ -10,6 +10,71 @@ Baseline identity changes are recorded per entry. All stage19j/20 speed
 records were measured on corrupted attention (see P0-A/P0-B in
 [patch notes](../patches/NOTES.md)) and are not comparison baselines.
 
+## Decode measurement protocol
+
+New `bench/decode.py` reports and individual rows carry `schema_version: 2`
+and `measurement_protocol: "sglang-continuous-usage-counter-delta-v2"`.
+They are not equivalent to historical schema-1/unversioned rows using
+`completion_tokens / (wall - TTFT)`: that old numerator includes the first
+already-delivered multi-token chunk although its denominator excludes its
+delivery interval. Historical results below remain unchanged and must not be
+merged with protocol-2 rates as equivalent measurements.
+
+The frozen natural prompt corpus and EOS behavior are unchanged. Requests use
+`temperature: 0`, `top_p: 1`, `n: 1`, no `top_k`, and both
+`stream_options.include_usage` and `continuous_usage_stats`. On pinned SGLang
+`0bcd822377da7b5718e674eaf9c870d349424dd1`, streaming content/reasoning chunks
+carry cumulative completion counters from each generation return; the terminal
+usage record has `choices: []` and is followed by `[DONE]`. Multiple chunks may
+repeat the same cumulative count and are never counted as tokens.
+An earlier `choices: []` chunk with no usage may carry a nonempty typed `sglext`
+envelope instead: `routed_experts` is a string, and `cached_tokens_details` and
+single-choice `spec_tokens_details` are objects. Null extension fields are
+allowed alongside a nonnull supported field. These metadata-only chunks do not
+establish terminal usage or contribute counter samples.
+
+Every data line is timestamped with `monotonic_ns` immediately on client receipt,
+before decoding/parsing. The exact integer timestamp fields are
+`request_started_ns` (immediately before the HTTP request),
+`first_content_or_reasoning_observed_ns` (first nonempty content OR reasoning
+delta), `first_positive_counter_observed_ns`, `terminal_usage_observed_ns`,
+and `done_observed_ns`. Request timing excludes prompt sizing, serialization,
+and speculation-gauge reads. `ttft_s` remains separately defined as
+`(first_content_or_reasoning_observed_ns - request_started_ns) / 1e9`.
+
+Each row preserves `prompt_tokens`, terminal `completion_tokens`,
+`finish_reason`, `first_positive_completion_tokens`, and all `counter_samples`
+in receipt order. Each sample contains the raw `prompt_tokens` and
+`completion_tokens`, exact `observed_ns`, and a `terminal` boolean; equal
+counter samples are retained. Derived fields are:
+
+- `counter_window_tokens = completion_tokens - first_positive_completion_tokens`.
+- `counter_window_ns = terminal_usage_observed_ns - first_positive_counter_observed_ns`.
+- `committed_tok_s = counter_window_tokens * 1e9 / counter_window_ns`:
+  **post-first-counter committed rate**, including client/transport observation
+  costs, not kernel-only throughput and not the historical decode estimate.
+- `elapsed_ns = done_observed_ns - request_started_ns`;
+  `elapsed_seconds = elapsed_ns / 1e9`.
+- `whole_request_tok_s = completion_tokens * 1e9 / elapsed_ns`:
+  whole-request completed rate with an explicit request-start-to-DONE boundary.
+
+The report retains its classification, running-container identity, rows, and
+`committed_tok_s_min`/`committed_tok_s_max` (now exclusively protocol-2 rates);
+rows retain depth/repetition, power evidence, and speculation gauges.
+Admission requires a valid terminal usage record followed by DONE, a successful
+`stop` or output-budget `length` finish reason, first content/reasoning, consistent
+prompt counts, nonnegative nondecreasing exact integer completion counters
+(booleans are invalid), a positive token delta, and positive counter/request
+windows.
+Completion counters cannot exceed the requested output budget; `length` requires
+the terminal count to equal that budget, while natural `stop` may be shorter.
+Choice deltas must be objects or null, with content/reasoning fields strings or
+null; only nonempty strings establish TTFT.
+A single positive counter repeated through terminal usage cannot produce a rate.
+Missing or invalid evidence fails; there is no legacy estimate or
+chunk-count fallback. Unsupported depth matrices fail before any row runs,
+rather than silently dropping depths.
+
 ## Corrected baseline (stage21, image built from a7598a5)
 
 Single-request streamed chat completions, exact input depths, 1024 committed

@@ -18,12 +18,16 @@ services:
     ports:
       - "127.0.0.1:${QWEN_PORT:-18020}:18020"
     environment:
-      QWEN_MEM_FRACTION_STATIC: ${QWEN_MEM_FRACTION_STATIC:-0.94}
+      # Historical native-capacity candidate, not a qualified memory setting.
+      QWEN_MEM_FRACTION_STATIC: ${QWEN_MEM_FRACTION_STATIC:-0.98}
       QWEN_QUALIFICATION: ${QWEN_QUALIFICATION:-speculative}
       QWEN_QUALIFICATION_EXECUTION: ${QWEN_QUALIFICATION_EXECUTION:-default}
-      QWEN_QUALIFICATION_KV: ${QWEN_QUALIFICATION_KV:-fp8}
+      QWEN_QUALIFICATION_KV: ${QWEN_QUALIFICATION_KV:-kvarn}
       QWEN_QUALIFICATION_CONTEXT: ${QWEN_QUALIFICATION_CONTEXT:-262144}
       QWEN_ALLOW_UNQUALIFIED: ${QWEN_ALLOW_UNQUALIFIED:-0}
+      QWEN_COMMIT_GRAPH: ${QWEN_COMMIT_GRAPH:-1}
+      QWEN_MARLIN_ACTIVATION_BITS: ${QWEN_MARLIN_ACTIVATION_BITS-16}
+      QWEN_DRAFT_VOCAB_JSON: /state/draft_vocab_ids.json
     healthcheck:
       test: [CMD, python3, /opt/qwen/serve/healthcheck.py]
       interval: 30s
@@ -39,6 +43,12 @@ services:
       - type: bind
         source: ${QWEN_STATE_ROOT:?Set QWEN_STATE_ROOT to the existing model state directory}/models
         target: /models
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ${QWEN_STATE_ROOT:?Set QWEN_STATE_ROOT to the existing model state directory}/overrides/draft_vocab_ids.json
+        target: /state/draft_vocab_ids.json
         read_only: true
         bind:
           create_host_path: false

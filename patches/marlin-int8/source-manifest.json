@@ -1,0 +1,373 @@
+{
+  "schema_version": 1,
+  "package": "litos-marlin-int8",
+  "status": "experimental-source-only-not-built-or-qualified",
+  "license": {
+    "spdx": "Apache-2.0",
+    "file": "LICENSE",
+    "notice": "NOTICE",
+    "upstream_sha256": "c71d239df91726fc519c6eb72d318ec65820627232b2f796219e87dcf35d0ab4"
+  },
+  "upstream": {
+    "repository": "https://github.com/vllm-project/vllm",
+    "pull_request": 24722,
+    "commit": "b11cc08f181d61375099783a86f3d034f5fe98a0",
+    "tree": "988a8eefe30c927de6033a59cbd1475748f4811d",
+    "merge_commit_not_used": "1656ad37045579999a5a9ef3b940f945cd92bb4e",
+    "source_directory": "csrc/quantization/gptq_marlin"
+  },
+  "signed_scale_backport": {
+    "pull_request": 48926,
+    "original_fix_commit": "64452fce103854b173c0d5d6c3a7ba5b7d966301",
+    "original_fix_parent": "ee8f36d0b3dc36ad1751c2193b30feb2ba11e0da",
+    "reviewed_pr_head": "179d11258266ae2093dc42be925fe597d1c5103e",
+    "diff_url": "https://github.com/vllm-project/vllm/commit/64452fce103854b173c0d5d6c3a7ba5b7d966301.diff",
+    "diff_sha256": "ab60dbcb81c1344c16ec27c39cd5280ab975d3cdc5eda73fe5ec6321b02d392c",
+    "upstream_path": "csrc/libtorch_stable/quantization/marlin/marlin_template.h",
+    "original_fixed_source_sha256": "629ce80c34753fca5e4678d620be60c5ff754effb522f5786a50f9825c927fcf",
+    "original_fixed_git_blob_sha1": "33e272fadd4015d6d9b753ba9244d1efd6e1f0e3",
+    "reviewed_head_source_sha256": "84286b046eb840d1521242719a136262034af6adb8d9b2cee768ec77bbb5cad3",
+    "reviewed_head_git_blob_sha1": "98f6f60eeb90dccda659781c51cd917473f16ac9",
+    "local_path": "csrc/quantization/gptq_marlin/marlin_template.h",
+    "change": "reinterpret_cast<uint16_t*> to reinterpret_cast<int16_t*> at four grouped INT8 scale loads; no MoE source included",
+    "license": "Apache-2.0"
+  },
+  "files": [
+    {
+      "path": "csrc/quantization/gptq_marlin/dequant.h",
+      "upstream_path": "csrc/quantization/gptq_marlin/dequant.h",
+      "upstream_sha256": "c91d79cf52538aa3c8622f0fc2fa93344b5deeb59cd1ae3c5bb25155359b8a70",
+      "upstream_git_blob_sha1": "26b8d40368aa959af3a78013c56e869c50f86f60",
+      "local_sha256": "c91d79cf52538aa3c8622f0fc2fa93344b5deeb59cd1ae3c5bb25155359b8a70",
+      "modifications": []
+    },
+    {
+      "path": "csrc/quantization/gptq_marlin/generate_kernels.py",
+      "upstream_path": "csrc/quantization/gptq_marlin/generate_kernels.py",
+      "upstream_sha256": "2923b5b49335cd5231d978fef82be5ea4983908b3e90f4d2221a66dee0a0ee81",
+      "upstream_git_blob_sha1": "27ef7271ba41cfbcdbaf9d5b44b5d25a9779a570",
+      "local_sha256": "1db4a8c0c1b9423667115ea21c031a7f495bac2e5c31d6e87d92d36de30b3e19",
+      "modifications": [
+        "restrict QUANT_CONFIGS to kS8/kU4B8/group_blocks=8 and upstream FP16/BF16 output variants"
+      ]
+    },
+    {
+      "path": "csrc/quantization/gptq_marlin/gptq_marlin.cu",
+      "upstream_path": "csrc/quantization/gptq_marlin/gptq_marlin.cu",
+      "upstream_sha256": "203a733a61eb748173b8273b256534d5fb6f5b1535a4b3db02d18612bd1d0c79",
+      "upstream_git_blob_sha1": "28ff06559a98a254c325a14ccbd6b550fb6134f5",
+      "local_sha256": "41e3a3bfb2185b615bc84bc36cd0ab174947a29a5ec8bcdf3257f40d63a1a274",
+      "modifications": [
+        "include standalone contract.h and validate all tensor metadata before upstream dispatch"
+      ]
+    },
+    {
+      "path": "csrc/quantization/gptq_marlin/gptq_marlin_repack.cu",
+      "upstream_path": "csrc/quantization/gptq_marlin/gptq_marlin_repack.cu",
+      "upstream_sha256": "f4d0372b7a4cb83f761a3851aa55762c6cdbe80265f0f760baf7525ab0e495d2",
+      "upstream_git_blob_sha1": "796e6c5359da1ce200a88aacddaf14b5f967ec5b",
+      "local_sha256": "83b9c62f443d6b630e3e3b5dc7b9bcf8f81e018a6e2c95745aaa934e46d44949",
+      "modifications": [
+        "include standalone contract.h and validate metadata",
+        "instantiate only CALL_IF(4,false,true)"
+      ]
+    },
+    {
+      "path": "csrc/quantization/gptq_marlin/kernel.h",
+      "upstream_path": "csrc/quantization/gptq_marlin/kernel.h",
+      "upstream_sha256": "7d4f2d86de913a5ec405f0e07fa7779c6c157952132b38a07c7a94201fe0baee",
+      "upstream_git_blob_sha1": "b3b79c8aec452a051331d4e626d7a1348a78c352",
+      "local_sha256": "7d4f2d86de913a5ec405f0e07fa7779c6c157952132b38a07c7a94201fe0baee",
+      "modifications": []
+    },
+    {
+      "path": "csrc/quantization/gptq_marlin/marlin.cuh",
+      "upstream_path": "csrc/quantization/gptq_marlin/marlin.cuh",
+      "upstream_sha256": "f17fcb0617bef0eb364d99d7435edb99ce5828d3a4e83c1f266dbdf469a887f5",
+      "upstream_git_blob_sha1": "2505e221322dde60ad749d37dd070ac25250e648",
+      "local_sha256": "f17fcb0617bef0eb364d99d7435edb99ce5828d3a4e83c1f266dbdf469a887f5",
+      "modifications": []
+    },
+    {
+      "path": "csrc/quantization/gptq_marlin/marlin_dtypes.cuh",
+      "upstream_path": "csrc/quantization/gptq_marlin/marlin_dtypes.cuh",
+      "upstream_sha256": "15b90a65eadb200a3f7165e2e0d7d899f36d4993b20dbd89093ef2cea274da71",
+      "upstream_git_blob_sha1": "a4807a6887f81383e773275787edc5808ceea720",
+      "local_sha256": "15b90a65eadb200a3f7165e2e0d7d899f36d4993b20dbd89093ef2cea274da71",
+      "modifications": []
+    },
+    {
+      "path": "csrc/quantization/gptq_marlin/marlin_template.h",
+      "upstream_path": "csrc/quantization/gptq_marlin/marlin_template.h",
+      "upstream_sha256": "846554f90c7e9a899d6287ce3b8b53bd83efca0a12711342c18f3ad149552136",
+      "upstream_git_blob_sha1": "22bb71e482ce8775920fc4e864002b5e0a74729f",
+      "local_sha256": "116c261c28e746a7ac29866d07d3de2274c81ea3154bacc34fdb7dbdef017515",
+      "modifications": [
+        "PR48926: four signed int16 group-scale reads",
+        "local: initialize only allocated two A8 N fragments",
+        "local: exact signed-int64 scale-weighted accumulation and final __ll2float_rn; original IMMA partials, activation scaling, reductions, bias and output conversion remain"
+      ]
+    },
+    {
+      "path": "LICENSE",
+      "upstream_path": "LICENSE",
+      "upstream_sha256": "c71d239df91726fc519c6eb72d318ec65820627232b2f796219e87dcf35d0ab4",
+      "upstream_git_blob_sha1": "261eeb9e9f8b2b4b0d119366dda99c6fd7d35c64",
+      "local_sha256": "c71d239df91726fc519c6eb72d318ec65820627232b2f796219e87dcf35d0ab4",
+      "modifications": []
+    },
+    {
+      "path": "csrc/core/scalar_type.hpp",
+      "upstream_path": "csrc/core/scalar_type.hpp",
+      "upstream_sha256": "bc4800ca8e0bf65e455e2a747b1c6de515a79b870ae4788a3d966988597af495",
+      "upstream_git_blob_sha1": "68a8750f583b46d344cd3180ffb334f38e3ae1f8",
+      "local_sha256": "bc4800ca8e0bf65e455e2a747b1c6de515a79b870ae4788a3d966988597af495",
+      "modifications": []
+    },
+    {
+      "path": "csrc/core/registration.h",
+      "upstream_path": "csrc/core/registration.h",
+      "upstream_sha256": "58b98cd4792f18baae3d316af7a91440ec991ee75d2641d2bc805bcc8cd1c02e",
+      "upstream_git_blob_sha1": "4d0ce1c572c1c1ea947db0720ace5e7abe2a5624",
+      "local_sha256": "58b98cd4792f18baae3d316af7a91440ec991ee75d2641d2bc805bcc8cd1c02e",
+      "modifications": []
+    },
+    {
+      "path": ".gitignore",
+      "local_sha256": "98c3c0267fdd70c88d916b1aaa48b9fe594c8598c2e2fe083f7f93a94853ed28",
+      "origin": "local standalone adapter; see derived_source_references where applicable"
+    },
+    {
+      "path": "MANIFEST.in",
+      "local_sha256": "cc0dbefe17d8f15a48b4dbb49797c0d553b1699c82bdfea11d0f41d090c347a2",
+      "origin": "local standalone adapter; see derived_source_references where applicable"
+    },
+    {
+      "path": "pyproject.toml",
+      "local_sha256": "7788a905bb429f4666c0cabc111e886d0521225603a75ff55b78240f777cdc16",
+      "origin": "local standalone adapter; see derived_source_references where applicable"
+    },
+    {
+      "path": "setup.py",
+      "local_sha256": "f99bfb0f3461b62aaa8e370ed0abde9d9712c43bb4bf33100dcc67a4468f34d2",
+      "origin": "local standalone adapter; see derived_source_references where applicable"
+    },
+    {
+      "path": "NOTICE",
+      "local_sha256": "a760961c03dde830c6350158e3908a759a0586e32856a455e0f42eeb438262d1",
+      "origin": "local standalone adapter; see derived_source_references where applicable"
+    },
+    {
+      "path": "litos_marlin_int8/__init__.py",
+      "local_sha256": "6aaeb85666271c31acb86f430a0194fad4448ed860ae47eaf9a550aeff92db8c",
+      "origin": "local standalone adapter; see derived_source_references where applicable"
+    },
+    {
+      "path": "litos_marlin_int8/quantization.py",
+      "local_sha256": "4dcd6adf158cedb8274faaecedd5cd8685b4e7d89d3e649e6a6424236b4f1c1c",
+      "origin": "local standalone adapter; see derived_source_references where applicable"
+    },
+    {
+      "path": "litos_marlin_int8/py.typed",
+      "local_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "origin": "local standalone adapter; see derived_source_references where applicable"
+    },
+    {
+      "path": "csrc/bindings.cpp",
+      "local_sha256": "e50a87d7f5df417bb734123b03a26132eb9696bf5684584ef60353fc5e1422cc",
+      "origin": "local standalone adapter; see derived_source_references where applicable"
+    },
+    {
+      "path": "csrc/contract.h",
+      "local_sha256": "40d4c6a6a0390084440ea0a8f388432056eca3e1cbe7454ddede40245c1d3ff8",
+      "origin": "local standalone adapter; see derived_source_references where applicable"
+    }
+  ],
+  "derived_source_references": [
+    {
+      "path": "vllm/model_executor/layers/quantization/utils/int8_utils.py",
+      "url": "https://raw.githubusercontent.com/vllm-project/vllm/b11cc08f181d61375099783a86f3d034f5fe98a0/vllm/model_executor/layers/quantization/utils/int8_utils.py",
+      "sha256": "b655d6833ef1cb6bc9497fb3fb21fc929ce7a0c35760266aa9cd147187327339",
+      "git_blob_sha1": "925d0a516ce631eebd6a372904f12b2390a94ede",
+      "installed": false
+    },
+    {
+      "path": "vllm/model_executor/layers/quantization/utils/marlin_utils.py",
+      "url": "https://raw.githubusercontent.com/vllm-project/vllm/b11cc08f181d61375099783a86f3d034f5fe98a0/vllm/model_executor/layers/quantization/utils/marlin_utils.py",
+      "sha256": "e65d6aaa0a0b4235d8db6fe7f7fd74721d513d785acb11983befe042eaf20ca9",
+      "git_blob_sha1": "14337ee1d7bee05c6d1c86c1b5e928646f9365d0",
+      "installed": false
+    },
+    {
+      "path": "csrc/torch_bindings.cpp",
+      "url": "https://raw.githubusercontent.com/vllm-project/vllm/b11cc08f181d61375099783a86f3d034f5fe98a0/csrc/torch_bindings.cpp",
+      "sha256": "475bcd4e634956f4abfc08b75ee20957897e0216cce7c8dab1df3324c482ef8d",
+      "git_blob_sha1": "914227838558a22b55f150e3a90a60f4faf82ae8",
+      "installed": false
+    },
+    {
+      "path": "CMakeLists.txt",
+      "url": "https://raw.githubusercontent.com/vllm-project/vllm/b11cc08f181d61375099783a86f3d034f5fe98a0/CMakeLists.txt",
+      "sha256": "0eab730b4b2e0ba95a44c334a7ce9429804ae228bc6641229e7e02b81fb97852",
+      "git_blob_sha1": "e09972fe719955ccf12d9462b8684af74ffd888c",
+      "installed": false
+    }
+  ],
+  "extractions": {
+    "litos_marlin_int8/quantization.py": [
+      "CUDA round_int8",
+      "_per_token_quant_int8",
+      "per_token_quant_int8 allocation/launch semantics; adds optional output buffers and metadata guards"
+    ],
+    "litos_marlin_int8/__init__.py": [
+      "get_scale_perms scale_perm_single",
+      "marlin_permute_scales A8 branch",
+      "marlin_permute_bias",
+      "marlin_act_int8_process_scales",
+      "marlin_make_workspace_new"
+    ],
+    "csrc/bindings.cpp": [
+      "gptq_marlin_gemm upstream argument order; truthful local alias/mutation annotations",
+      "gptq_marlin_repack schema"
+    ]
+  },
+  "activation_quantizer_notices": [
+    {
+      "project": "sgl-project/sglang",
+      "commit": "4cb53ecd0cffceb6dee5c011a58f65997a86f151",
+      "url": "https://github.com/sgl-project/sglang/blob/4cb53ecd0cffceb6dee5c011a58f65997a86f151/python/sglang/srt/layers/quantization/int8_kernel.py",
+      "relationship": "attribution retained by vLLM int8_utils.py"
+    },
+    {
+      "project": "InternLM/lmdeploy",
+      "commit": "086481ed84b59bee3b8e4274e5fc69620040c048",
+      "url": "https://github.com/InternLM/lmdeploy/blob/086481ed84b59bee3b8e4274e5fc69620040c048/lmdeploy/pytorch/kernels/cuda/w8a8_triton_kernels.py#L282",
+      "relationship": "attribution retained beside upstream _per_token_quant_int8"
+    }
+  ],
+  "build": {
+    "command": "python -m pip install --no-build-isolation --no-deps ./patches/marlin-int8",
+    "working_directory": "repository root",
+    "installed_provenance": "share/litos-marlin-int8/source-manifest.json, NOTICE, LICENSE",
+    "gpu_required": false,
+    "network_required": false,
+    "toolchain": "existing installed image Torch ABI/CUDA toolkit; no vLLM or sgl-kernel replacement",
+    "target": "sm_86 only; TORCH_CUDA_ARCH_LIST forcibly 8.6",
+    "python": ">=3.10",
+    "torch": ">=2.8 (Float8_e8m0fnu host enum required by retained upstream dispatcher)",
+    "cuda": ">=12.0; upstream -static-global-template-stub=false for CUDA>=12.8",
+    "build_dependencies": [
+      "setuptools>=68",
+      "wheel",
+      "ninja",
+      "jinja2>=3",
+      "torch>=2.8",
+      "CUDA toolkit",
+      "C++17 compiler",
+      "Python development headers"
+    ],
+    "runtime_dependencies": [
+      "torch>=2.8",
+      "triton>=3.4"
+    ],
+    "generated_during_build": [
+      "csrc/quantization/gptq_marlin/kernel_selector.h",
+      "csrc/quantization/gptq_marlin/sm80_kernel_s8_u4b8_float16.cu",
+      "csrc/quantization/gptq_marlin/sm80_kernel_s8_u4b8_bfloat16.cu"
+    ],
+    "fast_math": false
+  },
+  "contract": {
+    "module": "litos_marlin_int8",
+    "native_namespace": "torch.ops._litos_marlin_int8",
+    "weight_type": "WeightType.uint4b8; ID obtained from retained upstream C++ ScalarType",
+    "activation_dtype": "torch.int8",
+    "scale_carrier_and_output_dtypes": [
+      "torch.float16",
+      "torch.bfloat16"
+    ],
+    "group_size": 128,
+    "symmetric": true,
+    "activation_order": false,
+    "tensor_parallel_partial_K": false,
+    "M": "nonnegative; M*max(N,K)<=INT_MAX",
+    "N": "positive multiple of 64",
+    "K": "multiple of 128, >=256; K=128 intentionally rejected because upstream infers channelwise scales",
+    "index_bound": "N*K<=INT_MAX",
+    "raw_gptq_weight": "contiguous CUDA int32 [K/8,N], packed along K",
+    "repacked_weight": "contiguous CUDA int32 [K/16,2*N], A8 Marlin layout, not W4A16 layout",
+    "scales": "[K/128,N], single permutation, signed-int16 bits viewed as fp16/bf16",
+    "a_scales": "contiguous CUDA float32 [M] or [M,1], multiplied by input_global_scale before GEMM",
+    "global_scale": "None; upstream argument is NVFP4-only",
+    "bias": "None or contiguous CUDA [N] matching output dtype and single-permuted",
+    "zero_points_and_g_idx_and_perm": "None or empty one-dimensional int32 CUDA tensors",
+    "workspace": "contiguous zero-initialized CUDA int32 [SM_count*max_blocks_per_sm], max_blocks_per_sm>=1",
+    "all_native_tensors": "same SM86 device, contiguous, inference-only, nonempty pointers 16-byte aligned; output/workspace may not overlap inputs",
+    "atomic_add": "optional for FP16 only; BF16 rejected on SM86",
+    "unsupported": "explicit error, never W4A16 fallback"
+  },
+  "graph_and_ownership": [
+    "Prepare/repack/validate scale values only during load, never capture; scale validation synchronizes.",
+    "Warm the Triton per-token quantization specialization and GEMM before capture.",
+    "Caller may pass per-token out/scales buffers and GEMM c; keep addresses alive for graph lifetime.",
+    "One zeroed lock workspace per concurrently executing stream/graph. It returns to zero only on successful completion. Do not reuse after failure until safely reset.",
+    "Upstream GEMM internally allocates FP32 reduction scratch: 4*SM_count*min(ceil(M/16)*16,64)*256 bytes. Graph private pools own captured scratch; no claim of allocator-free eager execution.",
+    "Native schemas declare mutation/aliasing. torch.compile/fake/functionalization integration is the consuming framework responsibility; raw CUDA graphs still require validation.",
+    "Replace original weights after repack; no package-owned full-model duplicate, no head/draft/sgl-kernel modifications."
+  ],
+  "numerical_policy": {
+    "activation": "Exact extracted CUDA Triton: FP32 absmax reduction with floor 1e-10, divide by127, libdevice.round (halfway away from zero) then int8. Finite inputs required.",
+    "scale": "Preserve upstream (s/s.max()*4096).round().int16().view(original_dtype), including FP16/BF16 arithmetic; input_global_scale=s.max().float()/4096. Reject nonfinite, zero maximum, or signed-int16 out-of-range conversion; negative scales are supported.",
+    "weight_decode": "Unchanged upstream uint4b8 nibble decode: integer range [-8,7].",
+    "integer_accumulation": "Local safety correction, not an upstream backport: IMMA sums remain int32, then signed-int64 multiply/add of the group scale; convert once per upstream slice with __ll2float_rn. No guessed carry representation or unchecked int32 multiplication remains in the supported path.",
+    "bound_derivation": {
+      "IMMA_k": 32,
+      "IMMA_calls_before_scale_flush": 2,
+      "max_abs_activation_including_raw_int8_minus128": 128,
+      "max_abs_weight": 8,
+      "max_abs_IMMA_partial": 65536,
+      "max_abs_signed_int16_scale": 32768,
+      "worst_abs_weighted_slice_sum_formula": "K*128*8*32768",
+      "max_admitted_K_across_any_N": 33554304,
+      "max_abs_weighted_slice_sum_upper_bound": 1125895611875328,
+      "signed_int64_max": 9223372036854775807,
+      "production_requirement": "For every layer, K%128=0, K>=256, N%64=0, N*K<=INT_MAX; each group has128 K entries. Bound includes all allowed layer shapes, not statistical activation assumptions."
+    },
+    "rounding_comparison": "When upstream signed-int32 accumulation did not overflow, exact integer sum and final round-to-nearest FP32 conversion agree mathematically. Overflow inputs now compute the intended wide sum rather than wrapped signed integers. GPU proof pending.",
+    "remaining_risks": [
+      "extra 64-bit accumulator registers/instructions may reduce occupancy or negate speedup",
+      "INT8 activation and INT16-scale quantization change model outputs/acceptance",
+      "FP16/BF16 output overflow remains possible for unrepresentable real outputs",
+      "optional FP16 global reduction/atomic-add have their upstream precision/order behavior",
+      "graph capture/replay, sanitizers, numerical oracle, model Prime quality and speed remain unqualified"
+    ]
+  },
+  "later_fix_review": {
+    "reviewed_dense_history_paths": [
+      "csrc/quantization/gptq_marlin/marlin_template.h",
+      "csrc/quantization/marlin/marlin_template.h",
+      "csrc/libtorch_stable/quantization/marlin/marlin_template.h"
+    ],
+    "latest_reviewed_upstream_dense_change": "2c9d68f80bd20af7af1bc539c044a4aebbe52f8e",
+    "other_reviewed_fix": "148a5c1226f8668cb52c4900b5ff2c80344e78f2",
+    "other_fix_scope": "PR33972 corrects NVFP4 global-scale precision and SM75 FP16 accumulation; neither mode is enabled here, so not backported.",
+    "finding": "Neither requested base nor reviewed signed-fix head contains an INT32 carry/overflow guard or a two-column zero_accums fix; these corrections are explicitly local, not attributed upstream."
+  },
+  "validation": {
+    "build": "not run per assignment",
+    "lint": "not run per assignment",
+    "tests": "not run per assignment",
+    "gpu": "not run per assignment",
+    "performance": "no claim",
+    "arithmetic_bounds": "integer formulas evaluated on host; this is a range derivation, not numerical GPU validation",
+    "required_by_main": [
+      "image-native extension build/import",
+      "integer oracle and positive/negative-scale GEMM checks across actual layer shapes",
+      "overflow/cancellation stress and pre/post signed-scale negative control",
+      "CUDA compute-sanitizer",
+      "graph capture/replay",
+      "Prime quality/acceptance",
+      "controlled W4A16-vs-W4A8 latency/throughput/power measurements"
+    ]
+  }
+}

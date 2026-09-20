@@ -31,6 +31,9 @@ ATOL = 0.0009765625
 RTOL = 0.0078125
 RMSE = 0.00048828125
 
+# Optional raw observation sink installed by bench.numerical; never changes gates.
+EVIDENCE = None
+
 
 def build(device: str) -> tuple[KVarNLayerView, KVarNWorkspace]:
     layout = KVarNLayout(head_dim=HEAD_DIM, kv_heads=KV_HEADS, layer_ids=(0,))
@@ -151,6 +154,11 @@ def run_case(
         "within_tolerance": bool((diff <= ATOL + RTOL * reference.float().abs()).all()),
         "finite": bool(torch.isfinite(output.float()).all()),
     }
+    if EVIDENCE is not None:
+        EVIDENCE("prefill", {"q": q, "table": table, "requests": request_ids,
+                 "lower": lower, "upper": upper, "output": output, "reference": reference},
+                 {"pages": pages, "raw_tail": raw_tail, "queries": queries,
+                  "empty_rows": list(empty_rows), "status": status})
     return case
 
 
@@ -178,6 +186,9 @@ def negative_case(
     workspace.native_status.zero_()
     packed_attention_out(q, view, table, request_ids, lower, upper, SCALE, workspace)
     torch.cuda.synchronize()
+    if EVIDENCE is not None:
+        EVIDENCE("prefill_status", {"table": table, "lower": lower, "upper": upper},
+                 {"bad_page": bad_page, "status": int(workspace.native_status.item())})
     return {
         "pages": pages,
         "bad_page": bad_page,
@@ -231,6 +242,11 @@ def run_serving_chunk_case(
     status = int(workspace.native_status.item())
     diff = (output.float() - reference.float()).abs()
     denom = reference.float().abs().clamp_min(1e-6)
+    if EVIDENCE is not None:
+        EVIDENCE("prefill", {"q": q, "table": table, "requests": request_ids,
+                 "lower": lower, "upper": upper, "output": output, "reference": reference,
+                 "keys": keys, "values": values, "locations": locations},
+                 {"kind": "serving_first_chunk", "status": status, "write_status": write_status})
     return {
         "pages": 1,
         "raw_tail": True,

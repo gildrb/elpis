@@ -1,0 +1,140 @@
+diff --git a/python/sglang/srt/speculative/dflash_worker_v2.py b/python/sglang/srt/speculative/dflash_worker_v2.py
+--- a/python/sglang/srt/speculative/dflash_worker_v2.py
++++ b/python/sglang/srt/speculative/dflash_worker_v2.py
+@@ -389,6 +389,11 @@
+                 self._run_region()
+             self.graph = graph
+         finally:
++            if self.graph is None:
++                # A failed warmup may have queued work on the side stream
++                # before its normal join. Keep dummy inputs intact until
++                # that work finishes; never clear sticky failures here.
++                torch.cuda.synchronize(self._device)
+             # Restore the live step's planning values and leave the reserved
+             # dummy page's masks pristine for the decode graph runner.
+             self.loc_2d.copy_(real_loc)
+@@ -2042,9 +2047,12 @@
+             pool.begin_status_mirror()
+ 
+     def _finish_kvarn_status_mirror(self) -> None:
+-        """Publication gate: wait for and validate every armed status mirror."""
+-        for pool in self._kvarn_pools():
++        """Validate every pool before refreshing admission or publishing."""
++        pools = self._kvarn_pools()
++        for pool in pools:
+             pool.finish_status_mirror()
++        for pool in pools:
++            pool.refresh_free_slot_mirror()
+ 
+     def forward_batch_generation(
+         self,
+@@ -2054,6 +2062,7 @@
+         pp_proxy_tensors=None,
+     ) -> GenerationBatchResult:
+         self._validate_phase1_sampling_support(batch)
++        kvarn_native = bool(self._kvarn_pools())
+ 
+         if batch.forward_mode.is_extend() or batch.is_extend_in_batch:
+             # Target prefill: capture DFlash aux hidden states for prompt tokens.
+@@ -2070,9 +2079,6 @@
+             )
+             self._tp_sync.sync(SpecTpSyncSite.DFLASH_TARGET, next_token_ids)
+             new_seq_lens = batch.seq_lens
+-            batch_output.new_seq_lens = new_seq_lens
+-            if on_publish is not None:
+-                on_publish(batch_output.new_seq_lens)
+ 
+             if logits_output.hidden_states is None:
+                 raise RuntimeError(
+@@ -2085,6 +2091,15 @@
+                     "DFLASH expected extend_lens / prefix_lens to be populated in extend mode, "
+                     "but got None."
+                 )
++            if batch.out_cache_loc is None:
++                raise RuntimeError(
++                    "DFLASH prefill expected out_cache_loc, but got None."
++                )
++
++            # Non-KVarN keeps the early overlap fence; native KV must include
++            # draft materialization in its final status/publication boundary.
++            if not kvarn_native and on_publish is not None:
++                on_publish(new_seq_lens)
+ 
+             # Materialize prompt tokens into the draft KV cache immediately. This is required
+             # for radix cache safety (the scheduler may update radix after prefill returns).
+@@ -2094,10 +2109,6 @@
+                 batch.prefix_lens, dtype=torch.int32, device=device
+             )
+ 
+-            if batch.out_cache_loc is None:
+-                raise RuntimeError(
+-                    "DFLASH prefill expected out_cache_loc, but got None."
+-                )
+             positions, _ = compute_position(
+                 self.model_runner.prefill_attention_backend_str,
+                 draft_seq_lens,
+@@ -2109,14 +2120,23 @@
+                 cache_loc=batch.out_cache_loc,
+                 positions=positions,
+             )
++            if self._kvarn_commit_graph_enabled():
++                self._begin_kvarn_status_mirror()
+ 
+             # Avoid copying large hidden-state buffers to CPU in overlap scheduling.
+             logits_output.hidden_states = None
++            if self._kvarn_commit_graph_enabled():
++                self._finish_kvarn_status_mirror()
++            else:
++                self._check_kvarn_native_status()
+ 
+             batch_output.next_draft_input = self._make_next_draft_input_prefill(
+                 bonus_tokens=next_token_ids,
+                 seq_lens=new_seq_lens,
+             )
++            batch_output.new_seq_lens = new_seq_lens
++            if kvarn_native and on_publish is not None:
++                on_publish(new_seq_lens)
+             return batch_output
+ 
+         # Decode / target-verify stage.
+@@ -2569,15 +2589,9 @@
+                             layer_id, verify_out_cache_loc_2d, commit_lens
+                         )
+ 
+-        if self._kvarn_commit_graph_enabled():
+-            # Arm the single overlapped end-of-step status read; the wait
+-            # happens after the draft-append work below, before publication.
+-            self._begin_kvarn_status_mirror()
+-        else:
+-            self._check_kvarn_native_status()
+         if new_seq_lens is None:
+             new_seq_lens = prefix_lens + commit_lens.to(prefix_lens.dtype)
+-        if not self._kvarn_commit_graph_enabled() and on_publish is not None:
++        if not kvarn_native and on_publish is not None:
+             on_publish(new_seq_lens)
+ 
+         if not commit_graph_replayed:
+@@ -2593,6 +2607,10 @@
+                 commit_lens=commit_lens,
+                 may_have_pos0=may_have_pos0,
+             )
++        if self._kvarn_commit_graph_enabled():
++            # Snapshot after every producer, including eager append when
++            # capture failed or the captured geometry did not match.
++            self._begin_kvarn_status_mirror()
+ 
+         # Avoid copying large hidden-state buffers to CPU in overlap scheduling.
+         logits_output.hidden_states = None
+@@ -2601,8 +2619,10 @@
+             # End-of-step publication gate: the overlapped status reads must be
+             # validated before lengths are published or results returned.
+             self._finish_kvarn_status_mirror()
+-            if on_publish is not None:
+-                on_publish(new_seq_lens)
++        else:
++            self._check_kvarn_native_status()
++        if kvarn_native and on_publish is not None:
++            on_publish(new_seq_lens)
+ 
+         next_draft_input = self._make_next_draft_input_decode(
+             bonus_tokens=bonus,

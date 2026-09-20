@@ -16,3 +16,8 @@
 !prepare/source.sha256
 !prepare/draft.sha256
 !prepare/embedding-validation.json
+!bend/
+!bend/adapter.py
+!bend/*.bend
+!LAWS.bend
+!PROOF.bend

@@ -25,6 +25,7 @@ import importlib.util
 import json
 import os
 import sys
+from types import ModuleType
 
 import torch
 
@@ -40,13 +41,17 @@ ATOL = 0.0009765625     # one bf16 ulp, repo convention (kvarn-nosync-parity)
 RTOL = 0.0078125
 SEED = 20260917
 
+EVIDENCE = None
 
-def load_candidate():
+
+def load_candidate() -> ModuleType | None:
     path = os.environ.get("KVARN_GATHER_CANDIDATE")
     if not path:
         return None
     spec = importlib.util.spec_from_file_location(
         "sglang.kernels.ops.kvarn._gather_candidate", path)
+    if spec is None or spec.loader is None:
+        raise ValueError(f"Cannot load gather candidate: {path}")
     module = importlib.util.module_from_spec(spec)
     sys.modules[spec.name] = module
     spec.loader.exec_module(module)
@@ -179,6 +184,10 @@ def valid_case(name, module, view, workspace, status, locations, lengths,
     if "cross_bitexact" in result:
         ok = ok and result["cross_bitexact"] and result["cross_status"] == 0
     result["ok"] = bool(ok)
+    if EVIDENCE is not None:
+        EVIDENCE("gather", {"locations": locations, "lengths": lengths,
+                 "keys": keys, "values": values, "reference_keys": eager[0],
+                 "reference_values": eager[1]}, {"case": name, "status": code})
     return result
 
 
@@ -188,6 +197,9 @@ def invalid_case(name, module, view, workspace, status, locations, lengths):
     keys, values, code = run_kernel(module, view, locations, lengths,
                                     workspace, status)
     ok = code & 1 == 1 and oracle_error is not None
+    if EVIDENCE is not None:
+        EVIDENCE("gather_invalid", {"locations": locations, "lengths": lengths},
+                 {"case": name, "status": code, "oracle_error": oracle_error})
     return {"case": name, "status": code, "expected_status": 1,
             "oracle_rejected": oracle_error is not None,
             "oracle_error": oracle_error, "ok": bool(ok)}
@@ -217,6 +229,12 @@ def graph_case(module, view, workspace, status, locations, lengths):
           and torch.equal(first[0], second[0])
           and torch.equal(first[1], second[1])
           and all(r["within_one_ulp"] for r in rows))
+    if EVIDENCE is not None:
+        EVIDENCE("gather_graph", {"locations": locations, "lengths": lengths,
+                 "keys": first[0], "values": first[1], "replay_keys": second[0],
+                 "replay_values": second[1], "reference_keys": eager[0],
+                 "reference_values": eager[1]},
+                 {"case": "graph_replay", "status": first[2], "replay_status": second[2]})
     return {"case": "graph_replay", "status": first[2],
             "replay_bitexact": bool(torch.equal(first[0], second[0])
                                     and torch.equal(first[1], second[1])),
@@ -308,6 +326,8 @@ def main():
                               status)
     torch.cuda.synchronize()
     sticky_combined = int(status.item())
+    if EVIDENCE is not None:
+        EVIDENCE("gather_sticky", {}, {"valid": sticky_kept, "invalid": sticky_combined})
     results.append({"case": "sticky_prepoisoned_bits",
                     "status_after_valid": sticky_kept,
                     "status_after_invalid": sticky_combined,
@@ -321,8 +341,7 @@ def main():
         ("invalid_length_over_width", None, [WIDTH + 1]),
     ):
         locations, lengths = window(device, [WIDTH], overwrites=overwrites)
-        if lens is not None:
-            lengths = torch.tensor(lens, dtype=torch.int32, device=device)
+        lengths = torch.tensor(lens, dtype=torch.int32, device=device)
         results.append(invalid_case(name, module, view, workspace, status,
                                     locations, lengths))
     # Graph capture safety of the module under test.

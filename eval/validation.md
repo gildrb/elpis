@@ -101,3 +101,69 @@ eval/scripts/sandbox
 export QWEN_API_KEY_FILE=/absolute/path/to/serving/state/api-key
 eval/scripts/run smoke
 ```
+
+## Opt-in task time and board energy
+
+The measurement path is `eval/scripts/run PROFILE [TASKSET] --measure-power`.
+It wraps the same pinned native command without changing tasks, retries, rewards,
+sampling, runtime or serving policy. Use an exclusive quiet endpoint and select
+the actual serving GPU; no board limit or service is modified:
+
+```sh
+eval/scripts/run quick aime24 --measure-power --power-gpu=0 \
+  --power-interval-seconds=0.5 --power-max-seconds=86400 \
+  --power-max-samples=200000
+```
+
+`eval/scripts/run --help` documents the bounds. Collection stops at its duration
+or sample bound; evaluation continues, with uncovered time explicitly reported.
+Each `nvidia-smi` query has a two-second timeout. INT, TERM and HUP are forwarded
+to the native process group; teardown has a ten-second grace period before kill,
+and the collector is joined before evidence is written. SIGKILL cannot execute
+cleanup. `--dry-run` cannot be combined with measurement. Native exit status and
+raw rewards are retained; measurement failure is a warning and a separate status,
+never an invented benchmark failure score or zero-joule observation.
+
+The private run's `TASKSET/measurement/` contains:
+
+- `power-samples.json`: selected board, host Unix/monotonic clock anchors, power
+  in watts, each query's monotonic start/end and midpoint, and categorized read
+  failures. These are host observations, not device timestamps.
+- `task-intervals.json`: episode ordinals, operational status, original numeric
+  reward components (including fractional scores), error counts, truncation and
+  attributable trace-envelope intervals. No prompts or error text are copied.
+- `efficiency.json`: sanitized per-environment machine-readable totals and
+  denominators. Publish only this summary with separately reviewed deployment
+  provenance; keep native traces and detailed records private.
+
+Energy is the clipped trapezoidal integral between adjacent valid observations.
+There is no extrapolation, idle subtraction, interpolation across failed reads,
+or bridging gaps longer than three sample periods. `observed_joules` describes
+only covered intervals; `total_joules` and joules/success are null unless the whole
+native-command interval is covered. Coverage, gaps, read failures and collection
+limits remain in the evidence. The scope is selected-board energy, not whole-host
+or decode-only energy.
+
+`successful_task_rollouts` counts single-trace episodes with both native
+operational statuses true and the native weighted reward exactly 1; `ok=true`
+alone is not solved. Fractional rewards remain fractional. Repeated rollouts are
+not unique questions. Zero successes, unsupported/missing reward denominators,
+or an interrupted/failed native CLI produce null efficiency ratios. Total wall
+time and energy include startup, scoring, failed attempts, retry/backoff and
+teardown, not just successful episodes.
+
+At the pinned Verifiers revision, episodes have no serialized whole-episode
+start/end. Only each persisted trace's start and phase spans are available.
+Task attribution therefore uses **persisted trace envelopes**, never claims
+discarded retry or whole-episode durations, and reports unattributed overhead.
+Attribution requires resolved C1, nonoverlapping spans inside the measured run,
+and host Unix/monotonic clock drift no greater than 50 ms. Missing/invalid spans
+or clock jumps disable attribution explicitly without changing native scores
+or whole-run monotonic energy. This does not correct an unobserved clock jump
+between samples; query intervals and clock uncertainty are retained.
+
+This path's implementation is not a new measurement result or qualification.
+Verification must exercise synthetic linear/clipped intervals, failed-read and
+long-gap coverage, zero/fractional/full rewards, missing or torn native traces,
+overlapping timestamps, clock jumps, collection bounds and signal cleanup before
+using a real isolated GPU run as efficiency evidence.

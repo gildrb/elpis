@@ -37,6 +37,7 @@ import importlib.util
 import json
 import sys
 import time
+from types import ModuleType
 
 import torch
 
@@ -57,8 +58,10 @@ RTOL = 0.0078125
 RMSE = 0.00048828125
 
 
-def load_module(name, path):
+def load_module(name: str, path: str) -> ModuleType:
     spec = importlib.util.spec_from_file_location(name, path)
+    if spec is None or spec.loader is None:
+        raise ValueError(f"Cannot load module {name!r} from {path}")
     mod = importlib.util.module_from_spec(spec)
     sys.modules[name] = mod
     spec.loader.exec_module(mod)

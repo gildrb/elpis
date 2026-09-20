@@ -1,0 +1,263 @@
+diff --git a/python/sglang/srt/mem_cache/kvarn/pool.py b/python/sglang/srt/mem_cache/kvarn/pool.py
+--- a/python/sglang/srt/mem_cache/kvarn/pool.py
++++ b/python/sglang/srt/mem_cache/kvarn/pool.py
+@@ -82,18 +82,22 @@
+                 torch.zeros(self.num_pages, dtype=torch.bool, device=device))
+             self._owners[layer] = [-1] * capacity.tail_slots
+         self.mem_usage = self.allocation_bytes / (1024 ** 3)
+-        # Host-side mirrors for sync-free hot-path reads (C2/C4). The free-slot
+-        # mirror is an optimization only: every native kernel still fail-closes
+-        # device-side through the sticky status word, so a stale mirror can
+-        # never corrupt state, only trigger the documented abort path.
++        # Host reads require both D2H completion and a current ownership epoch.
++        # Pool mutation/admission is serialized by the worker; CUDA producers
++        # must be ordered onto the current pool-device stream before a refresh.
+         with torch.inference_mode(False):
+             self._free_slot_mirror = torch.zeros(
+-                (), dtype=torch.int32, pin_memory=True
++                (), dtype=torch.int32, device="cpu",
++                pin_memory=torch.device(self.device).type == "cuda"
+             )
+-        self._free_slot_stale = True
++        self._free_slot_epoch = 0
++        self._free_slot_mirror_epoch = -1
++        self._free_slot_event: torch.cuda.Event | None = None
++        self._free_slot_pending = False
+         with torch.inference_mode(False):
+             self._status_mirror = torch.zeros(
+-                (), dtype=torch.int32, pin_memory=True
++                (), dtype=torch.int32, device="cpu",
++                pin_memory=torch.device(self.device).type == "cuda"
+             )  # reshaped on first arm to match native_status
+         self._status_event: torch.cuda.Event | None = None
+         self._status_mirror_armed = False
+@@ -123,56 +127,98 @@
+                     for view in self._views.values())
+         return self.allocation_bytes - raw_v, raw_v
+ 
++    def _require_outside_capture(self, operation: str) -> None:
++        device = torch.device(self.device)
++        if device.type == "cuda":
++            with torch.cuda.device(device):
++                if torch.cuda.is_current_stream_capturing():
++                    raise RuntimeError(f"{operation} must run outside CUDA capture")
++
++    def _invalidate_free_slot_mirror(self) -> None:
++        self._free_slot_epoch += 1
++
++    def _drain_free_slot_mirror(self) -> None:
++        """Retire the sole pinned-buffer writer before host fill or reset."""
++        if self._free_slot_pending:
++            if self._free_slot_event is None:
++                raise RuntimeError("pending free-slot mirror has no completion event")
++            self._free_slot_event.synchronize()
++            self._free_slot_pending = False
++
+     def available_tail_slots(self, layer_id: int | None = None) -> int:
+         """Exact, synchronizing free-slot count. Cold/validation paths only."""
++        self._require_outside_capture("free-slot recount")
+         layers = self.layout.layer_ids if layer_id is None else (layer_id,)
+         if layer_id is not None:
+             self.layer_view(layer_id)
+         return min(int((self._views[layer].tail_to_page < 0).sum().item()) for layer in layers)
+ 
+     def refresh_free_slot_mirror(self) -> None:
+-        """Recompute min-over-layers free slots into the pinned host mirror.
+-
+-        Async end to end: the reduction launches on the current stream and the
+-        D2H copy into pinned memory is stream-ordered after it. The host value
+-        is only valid after the accompanying event synchronizes; callers that
+-        need a bound immediately may treat a not-yet-synchronized mirror as
+-        stale (0), which merely makes capacity admission conservative.
++        """Snapshot min-over-layers ownership on the current pool-device stream.
++
++        Never overwrite a pending D2H. If it is still in flight, admission
++        uses an exact recount instead; neither stale nor unready means zero.
++        A completed snapshot is usable only in its original ownership epoch.
+         """
++        self._require_outside_capture("free-slot mirror refresh")
+         device = torch.device(self.device)
+         if device.type != "cuda":
+-            self._free_slot_mirror.fill_(self.available_tail_slots())
+-            self._free_slot_stale = False
++            self.refresh_free_slot_mirror_exact()
+             return
+-        counts = torch.stack([
+-            (view.tail_to_page < 0).sum(dtype=torch.int32)
+-            for view in self._views.values()
+-        ])
+-        minimum = counts.min().to(torch.int32)
+-        self._free_slot_mirror.copy_(minimum, non_blocking=True)
+-        self._free_slot_stale = False
++        if self._free_slot_pending:
++            if self._free_slot_event is None:
++                raise RuntimeError("pending free-slot mirror has no completion event")
++            if not self._free_slot_event.query():
++                return
++            self._free_slot_pending = False
++        self._free_slot_mirror_epoch = -1
++        if self._free_slot_event is None:
++            self._free_slot_event = torch.cuda.Event()
++        stream = torch.cuda.current_stream(device)
++        with torch.cuda.stream(stream):
++            counts = torch.stack([
++                (view.tail_to_page < 0).sum(dtype=torch.int32)
++                for view in self._views.values()
++            ])
++            minimum = counts.min()
++            self._free_slot_mirror.copy_(minimum, non_blocking=True)
++            self._free_slot_event.record(stream)
++        self._free_slot_pending = True
++        self._free_slot_mirror_epoch = self._free_slot_epoch
+ 
+     def refresh_free_slot_mirror_exact(self) -> int:
+-        """Synchronizing exact recount that also re-arms the mirror."""
++        """Progress-safe recount; retire any D2H before touching pinned memory."""
++        self._require_outside_capture("exact free-slot mirror refresh")
++        self._drain_free_slot_mirror()
++        self._free_slot_mirror_epoch = -1
+         value = self.available_tail_slots()
+         self._free_slot_mirror.fill_(value)
+-        self._free_slot_stale = False
++        self._free_slot_mirror_epoch = self._free_slot_epoch
+         return value
+ 
+     def mirrored_tail_slots(self) -> int:
+-        """Sync-free read of the last mirrored free-slot count.
+-
+-        Falls back to one exact synchronizing recount when no mirror has been
+-        produced yet (process start, pool reset), so admission can never wedge
+-        on a permanently stale mirror. Steady-state reads are sync-free.
+-        """
+-        if self._free_slot_stale:
++        """Read a completed current snapshot, or synchronously recount once."""
++        self._require_outside_capture("free-slot mirror read")
++        if self._free_slot_mirror_epoch != self._free_slot_epoch:
+             return self.refresh_free_slot_mirror_exact()
++        if self._free_slot_pending:
++            if self._free_slot_event is None:
++                raise RuntimeError("pending free-slot mirror has no completion event")
++            if not self._free_slot_event.query():
++                return self.refresh_free_slot_mirror_exact()
++            self._free_slot_pending = False
+         return int(self._free_slot_mirror)
+ 
+     def clear(self) -> None:
+         """Allocator reset only: all radix/request references must already be gone."""
+-        self._free_slot_stale = True
++        self._require_outside_capture("pool reset")
++        self._invalidate_free_slot_mirror()
++        self._drain_free_slot_mirror()
++        if self._status_mirror_armed and self._status_event is not None:
++            self._status_event.synchronize()
++        # Explicit post-abort allocator reset may clear sticky status, but
++        # only after any abandoned snapshot has stopped writing host memory.
++        self._status_mirror_armed = False
+         self.workspace.native_status.zero_()
+         self.workspace.native_seal_pages.fill_(-1)
+         for layer, view in self._views.items():
+@@ -209,6 +255,7 @@
+     def begin_write(self, layer_id: int, locs: torch.Tensor, K: torch.Tensor,
+                     V: torch.Tensor, provisional: bool) -> None:
+         view = self.layer_view(layer_id)
++        self._invalidate_free_slot_mirror()
+         if self.native_enabled:
+             from sglang.kernels.ops.kvarn.store import begin_write_out
+             begin_write_out(view, locs, K, V, provisional, self.workspace)
+@@ -264,6 +311,7 @@
+     def finish_attention(self, layer_id: int) -> None:
+         """Post-attention barrier. Rejected proposals never enter tile statistics."""
+         view = self.layer_view(layer_id)
++        self._invalidate_free_slot_mirror()
+         if self.native_enabled:
+             from sglang.kernels.ops.kvarn.store import complete_tiles_out
+             complete_tiles_out(view, self.workspace, seal=True)
+@@ -285,6 +333,7 @@
+                       accepted_lengths: torch.Tensor) -> None:
+         if self.native_enabled:
+             from sglang.kernels.ops.kvarn.store import commit_prefix_out
++            self._invalidate_free_slot_mirror()
+             commit_prefix_out(self.layer_view(layer_id), locations_2d, accepted_lengths, self.workspace)
+             return
+         if locations_2d.ndim != 2 or accepted_lengths.shape != (locations_2d.shape[0],):
+@@ -313,6 +362,7 @@
+ 
+     def discard_provisional(self, layer_id: int) -> None:
+         view = self.layer_view(layer_id)
++        self._invalidate_free_slot_mirror()
+         if self.native_enabled:
+             from sglang.kernels.ops.kvarn.store import discard_provisional_out
+             discard_provisional_out(view, self.workspace)
+@@ -385,6 +435,7 @@
+         ids = self._page_ids(pages)
+         if len(self._graph_dummy_pages.intersection(ids)) > 0:
+             raise ValueError("allocator-reserved graph pages cannot be released")
++        self._invalidate_free_slot_mirror()
+         for layer, view in self._views.items():
+             for page in ids:
+                 slot = int(view.page_to_tail_slot[page].item())
+@@ -425,6 +476,7 @@
+             if need > len(free):
+                 raise KVarNCapacityError("page-copy raw slot pressure")
+             plans[layer] = free
++        self._invalidate_free_slot_mirror()
+         for layer, view in self._views.items():
+             free_iter = iter(plans[layer])
+             for old, new in zip(src, dst):
+@@ -647,8 +699,10 @@
+         Status is sticky across launches/layers. Never clear an error and continue
+         a request: abort it, release affected pages, then clear/reset the pool.
+         """
+-        if torch.device(self.device).type == "cuda" and torch.cuda.is_current_stream_capturing():
+-            raise RuntimeError("native status check belongs after graph replay")
++        self._require_outside_capture("native status check")
++        # Replay executes no Python ownership mutators. Both final status
++        # boundaries therefore retire any pre-replay free-slot snapshot.
++        self._invalidate_free_slot_mirror()
+         status = int(self.workspace.native_status.item())
+         if status & 4:
+             raise KVarNCapacityError("native raw-slot pressure: abort batch and evict actual radix pages")
+@@ -664,28 +718,37 @@
+         fail-closed contract is unchanged, only the wait moves to overlap
+         host-side packaging work instead of stalling mid-step.
+         """
++        self._require_outside_capture("status mirror begin")
++        self._invalidate_free_slot_mirror()
++        if self._status_mirror_armed:
++            # Another pool/producer may have failed before this pool's finish.
++            # Retire its writer and surface its error before reusing the buffer.
++            self.finish_status_mirror()
++        device = torch.device(self.device)
+         source = self.workspace.native_status
+         if source.shape != self._status_mirror.shape:
+             # The workspace status rank differs between fixture builds
+             # (0-dim) and the live pool ([1]); mirror the live shape once.
+             with torch.inference_mode(False):
+                 self._status_mirror = torch.zeros(
+-                    source.shape, dtype=torch.int32, pin_memory=True
++                    source.shape, dtype=torch.int32, device="cpu",
++                    pin_memory=device.type == "cuda"
+                 )
+-        if torch.device(self.device).type != "cuda":
++        if device.type != "cuda":
+             self._status_mirror.fill_(int(self.workspace.native_status.item()))
+             self._status_mirror_armed = True
+             return
+-        if torch.cuda.is_current_stream_capturing():
+-            raise RuntimeError("status mirror cannot be armed inside CUDA capture")
+         if self._status_event is None:
+             self._status_event = torch.cuda.Event()
+-        self._status_mirror.copy_(self.workspace.native_status, non_blocking=True)
+-        self._status_event.record()
++        stream = torch.cuda.current_stream(device)
++        with torch.cuda.stream(stream):
++            self._status_mirror.copy_(source, non_blocking=True)
++            self._status_event.record(stream)
+         self._status_mirror_armed = True
+ 
+     def finish_status_mirror(self) -> None:
+         """Publication gate for the overlapped status read."""
++        self._require_outside_capture("status mirror finish")
+         if not self._status_mirror_armed:
+             raise RuntimeError("status mirror was not armed before finish")
+         if self._status_event is not None:

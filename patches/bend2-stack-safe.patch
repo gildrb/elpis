@@ -1,0 +1,390 @@
+Bend v2.0.16: stack-safe checker comparison traversal
+
+Upstream-Commit: 981899d6b2fb2c109ed83545cffed9d20910a025
+Upstream-Source: https://raw.githubusercontent.com/bendlang/bend/981899d6b2fb2c109ed83545cffed9d20910a025/bend2/bend.ts
+Upstream-bend.ts-SHA256: 47e1b06e2fa4466bad702f86d8cbce03f40e833a8ba8eaa1e04297fa46dc94a9
+Patched-bend.ts-SHA256: b29828dc987f15247dc41f76fe1f3e2c7971d6642ea6655c3ab483893da90213
+
+Replace recursive term_compare calls with explicit continuations and tail
+iteration. Preserve left-to-right forcing, structural short-circuiting,
+eager kind-meet branches, delayed codomain opening and binder depths.
+No memoization, checker bypass, source-language change or runtime change.
+
+--- a/bend2/bend.ts
++++ b/bend2/bend.ts
+@@ -3142,115 +3142,267 @@
+ // same walk, kinds exact, no swap (a swap under EQ is harmless, so
+ // the All case swaps unconditionally).
+ 
++// Pending comparisons retain raw terms, not normalized pairs: forcing a
++// share cell can change what a later comparison observes.
++type CompareFrame =
++  | { $: "NEXT"; a: HTerm; b: HTerm; dep: number }
++  | { $: "ALL"; a: Extract<HTerm, { $: "All" }>; b: Extract<HTerm, { $: "All" }>; x: HTerm; mode: "EQ" | "LE"; dep: number }
++  | { $: "FIELDS"; a: HTerm[]; b: HTerm[]; j: number; n: number; dep: number }
++  | { $: "LEFT"; g: Extract<HTerm, { $: "Min" }>; b: HTerm; dep: number }
++  | { $: "RIGHT"; a: HTerm; h: Extract<HTerm, { $: "Min" }>; dep: number }
++  | { $: "AND" | "OR"; first: boolean };
++
+ export function term_compare(mode: "EQ" | "LE", book: Book, lhs: HTerm, rhs: HTerm, dep: number = 0): boolean {
+-  if (lhs === rhs) {
+-    return true;
+-  }
+-  const a = term_wnf(book, lhs);
+-  const b = term_wnf(book, rhs);
+-  if (a === b) {
+-    return true;
+-  }
+-  if (a.$ === "Lam" || b.$ === "Lam") {
+-    const k = a.$ === "Lam" ? a.k : (b as Extract<HTerm, { $: "Lam" }>).k;
+-    const x: HTerm = Var(k, dep);
+-    return term_compare(mode, book, term_apply(a, x), term_apply(b, x), dep + 1);
+-  }
+-  switch (a.$) {
+-    case "Var": {
+-      return b.$ === "Var" && a.i === b.i;
+-    }
+-    case "Ref": {
+-      return b.$ === "Ref" && a.k === b.k;
+-    }
+-    case "Typ": {
+-      if (b.$ !== "Typ") {
+-        return false;
+-      }
+-      if (mode === "EQ") {
+-        return term_compare("EQ", book, a.g, b.g, dep);
+-      }
+-      const g = term_wnf(book, a.g);
+-      const h = term_wnf(book, b.g);
+-      if ((g.$ === "Qua" && g.q.$ === "Many") || (h.$ === "Qua" && h.q.$ !== "Many")) {
+-        return true;
+-      }
+-      if (g.$ === "Min") {
+-        const fa = term_compare("LE", book, Typ(g.a), b, dep);
+-        const fb = term_compare("LE", book, Typ(g.b), b, dep);
+-        return fa && fb;
+-      }
+-      if (h.$ === "Min") {
+-        const fa = term_compare("LE", book, a, Typ(h.a), dep);
+-        const fb = term_compare("LE", book, a, Typ(h.b), dep);
+-        return fa || fb;
+-      }
+-      return term_compare("LE", book, g, h, dep);
+-    }
+-    case "Qnt": {
+-      return b.$ === "Qnt";
+-    }
+-    case "Qua": {
+-      return b.$ === "Qua" && a.q.$ === b.q.$;
+-    }
+-    case "Min": {
+-      return b.$ === "Min"
+-          && term_compare("EQ", book, a.a, b.a, dep)
+-          && term_compare("EQ", book, a.b, b.b, dep);
+-    }
+-    case "All": {
+-      const x: HTerm = Var(a.k, dep);
+-      return b.$ === "All" && a.q.$ === b.q.$
+-          && term_compare(mode, book, b.A, a.A, dep)
+-          && term_compare(mode, book, a.B(x), b.B(x), dep + 1);
+-    }
+-    case "App": {
+-      return b.$ === "App"
+-          && term_compare("EQ", book, a.f, b.f, dep)
+-          && term_compare("EQ", book, a.x, b.x, dep);
+-    }
+-    case "ADT": {
+-      if (b.$ !== "ADT" || a.k !== b.k || a.x.length !== b.x.length) {
+-        return false;
+-      }
+-      if (mode === "EQ" && a.r.length !== b.r.length) {
+-        return false;
+-      }
+-      return b.r.every((c) => a.r.includes(c))
+-          && a.x.every((x, j) => term_compare("EQ", book, x, b.x[j], dep));
+-    }
+-    case "Ctr": {
+-      return b.$ === "Ctr" && a.k === b.k && a.x.length === b.x.length
+-          && a.x.every((x, j) => term_compare("EQ", book, x, b.x[j], dep));
+-    }
+-    case "Mat": {
+-      return b.$ === "Mat" && a.k === b.k
+-          && term_compare("EQ", book, a.h, b.h, dep)
+-          && term_compare("EQ", book, a.m, b.m, dep);
+-    }
+-    case "Efq": {
+-      return b.$ === "Efq";
+-    }
+-    case "Eql": {
+-      return b.$ === "Eql"
+-          && term_compare("EQ", book, a.a, b.a, dep)
+-          && term_compare("EQ", book, a.b, b.b, dep)
+-          && term_compare("EQ", book, a.T, b.T, dep);
+-    }
+-    case "Rfl": {
+-      return b.$ === "Rfl";
+-    }
+-    case "Hol": {
+-      return b.$ === "Hol" && a.k === b.k;
+-    }
+-    case "Rwt": {
+-      return b.$ === "Rwt"
+-          && term_compare("EQ", book, a.e, b.e, dep)
+-          && term_compare("EQ", book, a.p, b.p, dep)
+-          && term_compare("EQ", book, a.f, b.f, dep);
+-    }
+-    default: {
+-      return false;
++  const frs: CompareFrame[] = [];
++  let same: boolean;
++  main: while (true) {
++    focus: {
++      if (lhs === rhs) {
++        same = true;
++        break focus;
++      }
++      const a = term_wnf(book, lhs);
++      const b = term_wnf(book, rhs);
++      if (a === b) {
++        same = true;
++        break focus;
++      }
++      const k = a.$ === "Lam" ? a.k : b.$ === "Lam" ? b.k : null;
++      if (k !== null) {
++        const x: HTerm = Var(k, dep);
++        lhs = term_apply(a, x);
++        rhs = term_apply(b, x);
++        dep += 1;
++        continue main;
++      }
++      switch (a.$) {
++        case "Var": {
++          same = b.$ === "Var" && a.i === b.i;
++          break;
++        }
++        case "Ref": {
++          same = b.$ === "Ref" && a.k === b.k;
++          break;
++        }
++        case "Typ": {
++          if (b.$ !== "Typ") {
++            same = false;
++            break;
++          }
++          if (mode === "EQ") {
++            lhs = a.g;
++            rhs = b.g;
++            continue main;
++          }
++          const g = term_wnf(book, a.g);
++          const h = term_wnf(book, b.g);
++          if ((g.$ === "Qua" && g.q.$ === "Many") || (h.$ === "Qua" && h.q.$ !== "Many")) {
++            same = true;
++            break;
++          }
++          if (g.$ === "Min") {
++            frs.push({ $: "LEFT", g, b, dep });
++            lhs = Typ(g.a);
++            rhs = b;
++          } else if (h.$ === "Min") {
++            frs.push({ $: "RIGHT", a, h, dep });
++            lhs = a;
++            rhs = Typ(h.a);
++          } else {
++            lhs = g;
++            rhs = h;
++          }
++          continue main;
++        }
++        case "Qnt": {
++          same = b.$ === "Qnt";
++          break;
++        }
++        case "Qua": {
++          same = b.$ === "Qua" && a.q.$ === b.q.$;
++          break;
++        }
++        case "Min": {
++          if (b.$ !== "Min") {
++            same = false;
++            break;
++          }
++          frs.push({ $: "NEXT", a: a.b, b: b.b, dep });
++          lhs = a.a;
++          rhs = b.a;
++          mode = "EQ";
++          continue main;
++        }
++        case "All": {
++          const x: HTerm = Var(a.k, dep);
++          if (b.$ !== "All" || a.q.$ !== b.q.$) {
++            same = false;
++            break;
++          }
++          frs.push({ $: "ALL", a, b, x, mode, dep });
++          lhs = b.A;
++          rhs = a.A;
++          continue main;
++        }
++        case "App": {
++          if (b.$ !== "App") {
++            same = false;
++            break;
++          }
++          frs.push({ $: "NEXT", a: a.x, b: b.x, dep });
++          lhs = a.f;
++          rhs = b.f;
++          mode = "EQ";
++          continue main;
++        }
++        case "ADT":
++        case "Ctr": {
++          if (b.$ !== a.$ || a.k !== b.k || a.x.length !== b.x.length) {
++            same = false;
++            break;
++          }
++          if (a.$ === "ADT" && b.$ === "ADT") {
++            if ((mode === "EQ" && a.r.length !== b.r.length) || !b.r.every((c) => a.r.includes(c))) {
++              same = false;
++              break;
++            }
++          }
++          if (a.x.length === 0) {
++            same = true;
++            break;
++          }
++          // A unary constructor is a tail call, not a heap frame per Succ.
++          if (a.x.length > 1) {
++            frs.push({ $: "FIELDS", a: a.x, b: b.x, j: 1, n: a.x.length, dep });
++          }
++          lhs = a.x[0];
++          rhs = b.x[0];
++          mode = "EQ";
++          continue main;
++        }
++        case "Mat": {
++          if (b.$ !== "Mat" || a.k !== b.k) {
++            same = false;
++            break;
++          }
++          frs.push({ $: "NEXT", a: a.m, b: b.m, dep });
++          lhs = a.h;
++          rhs = b.h;
++          mode = "EQ";
++          continue main;
++        }
++        case "Efq": {
++          same = b.$ === "Efq";
++          break;
++        }
++        case "Eql": {
++          if (b.$ !== "Eql") {
++            same = false;
++            break;
++          }
++          frs.push({ $: "NEXT", a: a.T, b: b.T, dep });
++          frs.push({ $: "NEXT", a: a.b, b: b.b, dep });
++          lhs = a.a;
++          rhs = b.a;
++          mode = "EQ";
++          continue main;
++        }
++        case "Rfl": {
++          same = b.$ === "Rfl";
++          break;
++        }
++        case "Hol": {
++          same = b.$ === "Hol" && a.k === b.k;
++          break;
++        }
++        case "Rwt": {
++          if (b.$ !== "Rwt") {
++            same = false;
++            break;
++          }
++          frs.push({ $: "NEXT", a: a.f, b: b.f, dep });
++          frs.push({ $: "NEXT", a: a.p, b: b.p, dep });
++          lhs = a.e;
++          rhs = b.e;
++          mode = "EQ";
++          continue main;
++        }
++        case "Sub":
++        case "Let":
++        case "Lam":
++        case "Ann": {
++          same = false;
++          break;
++        }
++      }
++    }
++    while (true) {
++      const fr = frs.pop();
++      if (fr === undefined) {
++        return same;
++      }
++      switch (fr.$) {
++        case "NEXT": {
++          if (!same) {
++            continue;
++          }
++          lhs = fr.a;
++          rhs = fr.b;
++          mode = "EQ";
++          dep = fr.dep;
++          continue main;
++        }
++        case "ALL": {
++          if (!same) {
++            continue;
++          }
++          lhs = fr.a.B(fr.x);
++          rhs = fr.b.B(fr.x);
++          mode = fr.mode;
++          dep = fr.dep + 1;
++          continue main;
++        }
++        case "FIELDS": {
++          if (!same) {
++            continue;
++          }
++          lhs = fr.a[fr.j];
++          rhs = fr.b[fr.j];
++          fr.j += 1;
++          if (fr.j < fr.n) {
++            frs.push(fr);
++          }
++          mode = "EQ";
++          dep = fr.dep;
++          continue main;
++        }
++        // Kind meets evaluate BOTH branches, even when the first decides
++        // the result. Ordinary structural comparisons above short-circuit.
++        case "LEFT": {
++          frs.push({ $: "AND", first: same });
++          lhs = Typ(fr.g.b);
++          rhs = fr.b;
++          mode = "LE";
++          dep = fr.dep;
++          continue main;
++        }
++        case "RIGHT": {
++          frs.push({ $: "OR", first: same });
++          lhs = fr.a;
++          rhs = Typ(fr.h.b);
++          mode = "LE";
++          dep = fr.dep;
++          continue main;
++        }
++        case "AND": {
++          same = fr.first && same;
++          continue;
++        }
++        case "OR": {
++          same = fr.first || same;
++          continue;
++        }
++      }
+     }
+   }
+ }

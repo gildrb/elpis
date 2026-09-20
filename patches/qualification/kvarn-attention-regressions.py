@@ -44,6 +44,8 @@ RMSE = 0.00048828125
 FA_RMSE = 0.0005
 FA_MAX_ABS = 0.02
 
+EVIDENCE = None
+
 
 def module_identity():
     import sglang.kernels.ops.kvarn.decode as decode
@@ -159,6 +161,11 @@ def check_p0a(device, generator):
             and entry["dead_zero"] and entry["dead_finite"]
             and entry["padded_zero"] and entry["padded_finite"]
         )
+        if EVIDENCE is not None:
+            EVIDENCE("nosync", {"q": q, "table": table, "requests": request_ids,
+                     "lower": lower_full, "upper": upper_full,
+                     "output": out, "reference": ref},
+                     {"case": name, "status": status})
         results.append(entry)
         return out.clone(), ref.clone(), live_rows
 
@@ -238,6 +245,10 @@ def check_p0b(device, generator):
         entry["passed"] = (
             status == 0 and s["finite"] and s["within_fa"] and s["rmse_gate"] and s["max_abs_gate"]
         )
+        if EVIDENCE is not None:
+            EVIDENCE("flash", {"q": q, "table": table, "requests": request_ids,
+                     "lower": lower, "upper": upper, "output": out, "reference": ref},
+                     {"case": name, "status": status})
         results.append(entry)
         return out.clone(), ref.clone(), q.clone()
 

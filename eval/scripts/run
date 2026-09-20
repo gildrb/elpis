@@ -7,17 +7,41 @@ unset PYTHONPATH PYTHONHOME
 umask 077
 root=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)
 repo=$(cd -- "$root/.." && pwd -P)
-profile=${1:?Usage: eval/scripts/run PROFILE [TASKSET] [--dry-run]}
+usage() {
+    printf '%s\n' 'Usage: eval/scripts/run PROFILE [TASKSET] [--dry-run] [--measure-power]' \
+        '  --measure-power              Collect board energy and per-environment task efficiency.' \
+        '  --power-gpu=0                One GPU index, UUID or PCI bus ID (no power-policy changes).' \
+        '  --power-interval-seconds=0.5  Monotonic sample period; allowed 0.1..60 s.' \
+        '  --power-max-seconds=86400     Stop collection, not evaluation, after 1..604800 s.' \
+        '  --power-max-samples=200000    Bound retained observations to 2..1000000.' \
+        'QWEN_SERVING_CONTAINER selects the running native262144 container (default qwen-inference-inference-1).' \
+        'Measurement is opt-in, cannot accompany --dry-run, and never changes upstream scores.'
+}
+if [[ ${1:-} == --help || ${1:-} == -h ]]; then usage; exit 0; fi
+profile=${1:?Usage: eval/scripts/run PROFILE [TASKSET] [--dry-run] [--measure-power]}
 shift
 case "$profile" in smoke|quick|full|agentic|agentic-full) ;; *) printf 'Unknown profile: %s\n' "$profile" >&2; exit 2 ;; esac
 selection=""
 dry=false
+measure=false
+power_options=()
 for argument in "$@"; do
     if [[ "$argument" == --dry-run ]]; then dry=true
+    elif [[ "$argument" == --measure-power ]]; then measure=true
+    elif [[ "$argument" == --power-gpu=* ]]; then power_options+=("--gpu=${argument#*=}")
+    elif [[ "$argument" == --power-interval-seconds=* ]]; then power_options+=("--interval-seconds=${argument#*=}")
+    elif [[ "$argument" == --power-max-seconds=* ]]; then power_options+=("--max-seconds=${argument#*=}")
+    elif [[ "$argument" == --power-max-samples=* ]]; then power_options+=("--max-samples=${argument#*=}")
     elif [[ -z "$selection" && "$argument" =~ ^[a-z0-9-]+$ ]]; then selection=$argument
-    else printf 'Usage: eval/scripts/run PROFILE [TASKSET] [--dry-run]\n' >&2; exit 2
+    else usage >&2; exit 2
     fi
 done
+if [[ "$measure" == false && ${#power_options[@]} -gt 0 ]]; then
+    printf 'Power options require --measure-power\n' >&2; exit 2
+fi
+if [[ "$measure" == true && "$dry" == true ]]; then
+    printf 'Power measurement requires a real evaluation, not --dry-run\n' >&2; exit 2
+fi
 if [[ -n "$selection" ]]; then
     configs=("$root/configs/$profile/$selection.toml")
     [[ -f "${configs[0]}" ]] || { printf 'No such profile taskset: %s\n' "$selection" >&2; exit 2; }
@@ -61,14 +85,22 @@ cp -- "$root/prime-envs.lock" "$root/datasets.lock" "$root/uv.lock" "$root/confi
 cp -R -- "$root/runtime" "$group/provenance/runtime"
 cp -- "$root/pyproject.toml" "$repo/flake.lock" "$group/provenance/"
 sha256sum -- "$root/scripts/"* >"$group/provenance/scripts.sha256"
+if [[ "$measure" == true ]]; then
+    cp -- "$root/measure.py" "$repo/bench/power.py" "$group/provenance/"
+fi
 git -C "$repo" rev-parse HEAD >"$group/provenance/recipe-checkout.txt"
 git -C "$repo" status --porcelain=v1 >"$group/provenance/worktree-status.txt"
 git -C "$repo" diff --binary HEAD | sha256sum >"$group/provenance/worktree-diff.sha256"
-printf '%s\n' "${QWEN_RECIPE_ID:-UNVERIFIED: identify the actually serving deployment before publishing}" >"$group/provenance/serving-recipe.txt"
 cp -- "$repo/prepare/manifest.json" "$group/provenance/model-artifact-manifest.json"
 cp -- "$repo/patches/source.env" "$group/provenance/sglang-source.env"
 uv --version >"$group/provenance/uv-version.txt"
 "$root/.venv/bin/python" --version >"$group/provenance/python-version.txt"
+qualification() {
+    (
+        cd -- "$repo"
+        exec "$root/.venv/bin/python" -m serve.qualification "$@"
+    )
+}
 cd -- "$root/.sources/prime-envs"
 for config in "${configs[@]}"; do
     cd -- "$root/.sources/prime-envs"
@@ -111,8 +143,48 @@ for config in "${configs[@]}"; do
     pwd -P >"$group/provenance/$taskset-working-directory.txt"
     if [[ "$profile" == smoke ]]; then flags+=(-v); fi
     if [[ "$dry" == true ]]; then flags+=(--dry-run); fi
-    uv run --project "$root" --no-sync eval @ "$root/configs/local.toml" @ "$launch" -o "$group/$taskset" "${flags[@]}"
+    native=(uv run --project "$root" --no-sync eval @ "$root/configs/local.toml" @ "$launch" -o "$group/$taskset" "${flags[@]}")
+    before="$group/provenance/$taskset.serving-before.json"
+    after="$group/provenance/$taskset.serving-after.json"
+    frozen="$group/provenance/$taskset.evaluation-inputs-before.json"
+    capture=(capture --container "${QWEN_SERVING_CONTAINER:-qwen-inference-inference-1}"
+        --base-url http://127.0.0.1:18020/v1 --key-file "${QWEN_API_KEY_FILE:-}")
     if [[ "$dry" == false ]]; then
+        qualification freeze-eval --profile "$profile" --environment "$taskset" --output "$frozen"
+        # Fail before any native evaluator request on fallback context, missing
+        # prepared/proof evidence, wrong endpoint or unavailable actual identity.
+        qualification "${capture[@]}" --output "$before"
+    fi
+    status=0
+    if [[ "$measure" == true ]]; then
+        native_cwd=$PWD
+        (
+            cd -- "$repo"
+            exec "$root/.venv/bin/python" -m eval.measure \
+                --environment "$taskset" --output-dir "$group/$taskset" \
+                --working-directory "$native_cwd" "${power_options[@]}" -- "${native[@]}"
+        ) &
+        measurement_pid=$!
+        # Forward wrapper-only signals too; wait for the sidecar to stop sampling
+        # and persist evidence before this shell exits.
+        trap 'kill -INT "$measurement_pid" 2>/dev/null || printf "Measurement already exited\n" >&2' INT
+        trap 'kill -TERM "$measurement_pid" 2>/dev/null || printf "Measurement already exited\n" >&2' TERM
+        trap 'kill -HUP "$measurement_pid" 2>/dev/null || printf "Measurement already exited\n" >&2' HUP
+        status=0
+        while true; do
+            if wait "$measurement_pid"; then status=0; else status=$?; fi
+            if ! kill -0 "$measurement_pid" 2>/dev/null; then break; fi
+        done
+        trap - INT TERM HUP
+    else
+        if "${native[@]}"; then status=0; else status=$?; fi
+    fi
+    if [[ "$dry" == false ]]; then
+        # Preserve post-run evidence even when the native evaluator exits nonzero.
+        qualification "${capture[@]}" --output "$after" --match "$before" --native-exit-code "$status"
+        qualification freeze-eval --profile "$profile" --environment "$taskset" \
+            --output "$group/provenance/$taskset.evaluation-inputs-after.json" --match "$frozen"
+        if [[ "$status" -ne 0 ]]; then exit "$status"; fi
         traces=("$group/$taskset/"*/traces.jsonl)
         [[ ${#traces[@]} -eq 1 && -s "${traces[0]}" ]] || { printf 'No unique upstream traces file\n' >&2; exit 1; }
         # Operational failures are not a score. Preserve the native records and
@@ -125,4 +197,5 @@ for config in "${configs[@]}"; do
             exit 1
         fi
     fi
+    if [[ "$status" -ne 0 ]]; then exit "$status"; fi
 done

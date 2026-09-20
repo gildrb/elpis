@@ -8,6 +8,7 @@
       system = "x86_64-linux";
       pkgs = import nixpkgs { inherit system; };
       standaloneCompose = import ./nix/compose.nix { inherit pkgs; };
+      bend = import ./nix/bend.nix { inherit pkgs; };
       serve = pkgs.writeShellApplication {
         name = "qwen-serve";
         runtimeInputs = [ pkgs.docker-compose ];
@@ -39,7 +40,7 @@
       nixosModules.qwen-inference = import ./nix/qwen-inference.nix;
       nixosModules.reference = import ./nix/reference.nix;
 
-      packages.${system} = { deployment = standaloneCompose; inherit serve; };
+      packages.${system} = { deployment = standaloneCompose; inherit serve bend; };
       apps.${system}.serve = {
         type = "app";
         meta.description = "Run the canonical Docker deployment in the foreground";
@@ -49,6 +50,8 @@
       devShells.${system}.default = pkgs.mkShellNoCC {
         LD_LIBRARY_PATH = pkgs.lib.makeLibraryPath [ pkgs.stdenv.cc.cc ];
         packages = with pkgs; [
+          bend
+          llvmPackages_19.clang
           python313
           python312
           git

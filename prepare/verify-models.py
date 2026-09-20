@@ -261,137 +261,6 @@ def quantization(config: dict[str, JSON], draft: bool, *, packed: bool = False) 
         )
 
 
-def verify_gguf(target: Path, draft: Path) -> None:
-    """Authenticate the native Bonsai PQ2_0 wrapper, payload and DFlash2 draft.
-
-    The wrapper directory is the only accepted target layout: config,
-    tokenizer, artifact manifest and exactly one GGUF payload. Every byte is
-    checked against prepare/manifest.json before the format contract is
-    interpreted; nothing is detected, guessed or fallen back.
-    """
-    directory(target)
-    directory(draft)
-    preparation = Path(__file__).absolute().parent
-    manifest = document(read_bytes(preparation / "manifest.json"))
-    bonsai = obj(manifest["bonsai_target"])
-    payload_pin = obj(bonsai["payload"])
-    wrapper_pin = obj(bonsai["wrapper"])
-
-    wrapper_manifest = document(read_bytes(target / "MANIFEST.json"))
-    require(integer(wrapper_manifest["schema_version"]) == 1, "Unsupported wrapper manifest schema")
-    pinned_payload = obj(wrapper_manifest["payload"])
-    require(filename(pinned_payload["file"]) == filename(payload_pin["file"]),
-            "Wrapper payload name differs from the repository pin")
-    require(sha256(pinned_payload["sha256"]) == sha256(payload_pin["sha256"]),
-            "Wrapper payload digest differs from the repository pin")
-    require(integer(pinned_payload["size_bytes"]) == integer(payload_pin["size_bytes"]),
-            "Wrapper payload size differs from the repository pin")
-
-    config_path = target / "config.json"
-    require(
-        digest(config_path) == sha256(wrapper_pin["config_sha256"]),
-        "Wrapper config.json differs from the repository pin",
-    )
-    for name, pinned in sorted(obj(wrapper_manifest["files"]).items()):
-        if name == "config.json":
-            continue
-        entry = obj(pinned)
-        require(
-            digest(target / filename(name)) == sha256(entry["sha256"])
-            and (target / filename(name)).stat().st_size == integer(entry["size_bytes"]),
-            f"Wrapper file differs from its manifest pin: {name}",
-        )
-
-    payload_name = filename(payload_pin["file"])
-    payloads = [entry.name for entry in sorted(target.iterdir()) if entry.name.endswith(".gguf")]
-    require(payloads == [payload_name], f"Wrapper must contain exactly the pinned payload: {payloads}")
-    linked = target / payload_name
-    require(linked.is_symlink(), f"Wrapper payload must be a relative symlink: {payload_name}")
-    # The symlink must resolve inside the same state-root models directory,
-    # never into an arbitrary host path.
-    payload = linked.resolve(strict=True)
-    require(payload.parent == target.parent and payload.name == payload_name,
-            f"Payload symlink escapes the models directory: {payload}")
-    require(digest(payload) == sha256(payload_pin["sha256"]), "GGUF payload SHA256 mismatch")
-    require(payload.stat().st_size == integer(payload_pin["size_bytes"]), "GGUF payload size mismatch")
-
-    sys.path.insert(0, str(preparation))
-    from pq2.gguf_reader import GgufReader, GGMLType
-    from pq2 import hadamard as hadamard_mod
-
-    with GgufReader(str(payload)) as reader:
-        metadata = reader.metadata
-        require(filename(str(metadata.get("general.architecture"))) == "qwen35",
-                "Unexpected GGUF architecture")
-        expected = {
-            "qwen35.context_length": 262144,
-            "qwen35.block_count": 64,
-            "qwen35.embedding_length": 5120,
-            "qwen35.feed_forward_length": 17408,
-            "qwen35.attention.head_count": 24,
-            "qwen35.attention.head_count_kv": 4,
-            "qwen35.attention.key_length": 256,
-            "qwen35.attention.value_length": 256,
-            "qwen35.ssm.conv_kernel": 4,
-            "qwen35.ssm.state_size": 128,
-            "qwen35.ssm.group_count": 16,
-            "qwen35.ssm.time_step_rank": 48,
-            "qwen35.ssm.inner_size": 6144,
-            "qwen35.full_attention_interval": 4,
-        }
-        for key, wanted in expected.items():
-            value = metadata.get(key)
-            require(isinstance(value, int) and value == wanted,
-                    f"GGUF {key} = {value!r}, expected {wanted}")
-        sections = metadata.get("qwen35.rope.dimension_sections")
-        require(sections == [11, 11, 10, 0], f"Unexpected rope sections {sections!r}")
-        require(metadata.get("general.quantization_version") == 2, "Unexpected quantization version")
-        require(metadata.get("tokenizer.ggml.bos_token_id") == 248044, "Unexpected bos id")
-        require(metadata.get("tokenizer.ggml.eos_token_id") == 248046, "Unexpected eos id")
-        tokens = metadata.get("tokenizer.ggml.tokens")
-        require(isinstance(tokens, list) and len(tokens) == 248320, "Unexpected GGUF vocabulary")
-
-        contract = hadamard_mod.parse_hadamard_metadata(metadata)
-        require(contract.block_size == 1024, "Unexpected Hadamard block size")
-        pq2_names = {
-            info.name for info in reader.tensors.values()
-            if info.type is GGMLType.PQ2_0
-        }
-        require("token_embd.weight" in pq2_names, "token_embd.weight must be PQ2_0")
-        require(set(contract.weight_names) == pq2_names - {"token_embd.weight"},
-                "Hadamard fold must cover exactly the PQ2 matmul weights")
-        require(set(contract.inverse_weight_names) == {"token_embd.weight"},
-                "token_embd.weight must be the only inverse row-lookup table")
-        token_embd = reader.tensors["token_embd.weight"]
-        require(token_embd.dims == (5120, 248320), f"Unexpected token_embd dims {token_embd.dims}")
-        output_weight = reader.tensors["output.weight"]
-        require(output_weight.dims == (5120, 248320), f"Unexpected output dims {output_weight.dims}")
-
-    # The DFlash2 draft is unchanged: authenticate its retained bytes.
-    draft_hashes = inventory(read_bytes(preparation / "draft.sha256"), DRAFT_NAMES)
-    require(
-        hashlib.sha256(read_bytes(preparation / "draft.sha256")).hexdigest()
-        == sha256(manifest["draft_inventory_sha256"]),
-        "Draft inventory authentication failed",
-    )
-    for name, expected_hash in sorted(draft_hashes.items()):
-        require(digest(draft / filename(name)) == expected_hash, f"SHA256 mismatch: {draft / name}")
-    draft_config = document(read_bytes(draft / "config.json"))
-    require(
-        draft_config["model_type"] == "qwen3"
-        and draft_config["architectures"] == ["DFlash2DraftModel"]
-        and draft_config["dflash_config"]["block_size"] == 8
-        and draft_config["sliding_window"] == 2048
-        and draft_config["use_sliding_window"] is True,
-        "Unexpected draft architecture or DFlash2 configuration",
-    )
-    print(
-        f"Verified Bonsai PQ2_0 wrapper ({len(obj(wrapper_manifest['files']))} pinned files, "
-        f"{integer(payload_pin['size_bytes'])} byte payload) and {len(draft_hashes)} draft files.",
-        flush=True,
-    )
-
-
 def verify(target: Path, draft: Path, representation: str = "dense") -> None:
 
     # Do not resolve(): individual Nix mounts must share this container directory.
@@ -535,16 +404,13 @@ def main() -> int:
     parser.add_argument("--draft", required=True, type=Path)
     parser.add_argument(
         "--representation",
-        choices=("dense", "packed", "gguf"),
+        choices=("dense", "packed"),
         default="dense",
         help="Authenticate only this target representation; never detect or fall back",
     )
     args = parser.parse_args()
     try:
-        if args.representation == "gguf":
-            verify_gguf(args.target, args.draft)
-        else:
-            verify(args.target, args.draft, args.representation)
+        verify(args.target, args.draft, args.representation)
     except (OSError, ValueError, KeyError, TypeError, RecursionError) as error:
         print(f"Model verification failed: {error}", file=sys.stderr, flush=True)
         return 1

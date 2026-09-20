@@ -1,0 +1,447 @@
+diff --git a/python/sglang/srt/arg_groups/kvarn_hook.py b/python/sglang/srt/arg_groups/kvarn_hook.py
+--- a/python/sglang/srt/arg_groups/kvarn_hook.py
++++ b/python/sglang/srt/arg_groups/kvarn_hook.py
+@@ -67,6 +67,11 @@
+         qualification_page_count(cfg.max_total_tokens, capture=mode == "graph")
+         if cfg.max_total_tokens != cfg.context_length + KVAR_N_POOL_HEADROOM:
+             raise ValueError("Native KVarN pool must equal its context rung plus 1024")
++        from sglang.srt.mem_cache.kvarn_bend_plan import native_bend_plan
++
++        native_bend_plan().require_request(
++            cfg.context_length, cfg.max_total_tokens, cfg.page_size
++        )
+     if cfg.max_mamba_cache_size != 8 or cfg.mamba_radix_cache_strategy != "extra_buffer":
+         raise ValueError("KVarN candidate preserves K8 extra_buffer Mamba caching")
+     if cfg.mamba_track_interval < 128 or cfg.mamba_track_interval % 128 != 0:
+diff --git a/python/sglang/srt/mem_cache/kv_cache_configurator.py b/python/sglang/srt/mem_cache/kv_cache_configurator.py
+--- a/python/sglang/srt/mem_cache/kv_cache_configurator.py
++++ b/python/sglang/srt/mem_cache/kv_cache_configurator.py
+@@ -1128,12 +1128,19 @@
+         from sglang.srt.mem_cache.kvarn.pool import KVarNTokenToKVPool
+         from sglang.srt.mem_cache.kvarn.types import KVarNCapacity, KVarNLayout
+         from sglang.srt.mem_cache.kvarn_budget import qualification_page_count
++        from sglang.srt.mem_cache.kvarn_bend_plan import native_bend_plan
+ 
+         mode = get_exec().kernel.kvarn_qualification_mode
+-        if mode != "portable":
++        if mode not in ("portable", "native", "graph"):
++            raise ValueError("Unknown KVarN qualification mode")
++        bend_plan = None if mode == "portable" else native_bend_plan()
++        if bend_plan is not None:
+             qualification_page_count(max_total_num_tokens, capture=mode == "graph")
+             if max_total_num_tokens != get_schedule().max_total_tokens:
+                 raise ValueError("KVarN available memory cannot satisfy the requested native pool capacity")
++            bend_plan.require_request(bend_plan.context, max_total_num_tokens, get_schedule().page_size)
++            if not self.is_draft_worker and self.model_config.context_len != bend_plan.context:
++                raise ValueError("KVarN target context differs from the Bend allocation plan")
+         draft = self.is_draft_worker
+         layer_count = 5 if draft else 16
+         expected_dim = 128 if draft else 256
+@@ -1143,15 +1150,32 @@
+             raise ValueError("KVarN geometry differs from the reviewed memory plan")
+         if draft and self.layer_info.num_effective_layers != layer_count:
+             raise ValueError("KVarN draft layer count differs from the reviewed plan")
+-        layout = KVarNLayout(expected_dim, expected_heads, tuple(range(layer_count)))
+-        capacity = KVarNCapacity(
+-            token_capacity=max_total_num_tokens,
+-            tail_slots=8,
+-            max_write_tokens=128,
+-            max_query_tokens=32,
+-            max_visible_tokens=2304 if draft else 128,
+-            workspace_bytes=64 * 1024 * 1024,
+-        )
++        if bend_plan is None:
++            # Portable qualification only; never a missing-plan fallback.
++            layout = KVarNLayout(expected_dim, expected_heads, tuple(range(layer_count)))
++            capacity = KVarNCapacity(
++                token_capacity=max_total_num_tokens,
++                tail_slots=8,
++                max_write_tokens=128,
++                max_query_tokens=32,
++                max_visible_tokens=2304 if draft else 128,
++                workspace_bytes=64 * 1024 * 1024,
++            )
++        else:
++            role = bend_plan.draft if draft else bend_plan.target
++            if (role.head_dim, role.kv_heads, role.layers) != (expected_dim, expected_heads, layer_count):
++                raise ValueError("KVarN Bend layout differs from the actual model")
++            layout = KVarNLayout(
++                role.head_dim, role.kv_heads, tuple(range(role.layers)), bend_plan.page_size
++            )
++            capacity = KVarNCapacity(
++                token_capacity=bend_plan.pool,
++                tail_slots=bend_plan.tail_slots,
++                max_write_tokens=bend_plan.write_tokens,
++                max_query_tokens=bend_plan.query_tokens,
++                max_visible_tokens=role.visible_tokens,
++                workspace_bytes=64 * 1024 * 1024,
++            )
+         query_heads = self.model_config.hf_text_config.num_attention_heads
+         if not isinstance(query_heads, int) or isinstance(query_heads, bool) or query_heads <= 0:
+             raise ValueError("KVarN requires a positive integer query-head count")
+@@ -1164,6 +1188,7 @@
+             device=self.device,
+             max_query_heads=query_heads,
+             enable_memory_saver=get_exec().features.enable_memory_saver,
++            bend_plan=bend_plan,
+         )
+         if draft:
+             return packed_pool
+@@ -1173,11 +1198,11 @@
+         if len(layer_ids) != layer_count:
+             raise ValueError("KVarN target must contain sixteen full-attention layers")
+         return HybridLinearKVPool(
+-            size=max_total_num_tokens,
++            size=capacity.token_capacity,
+             dtype=self.model_dtype,
+-            page_size=128,
+-            head_num=heads,
+-            head_dim=expected_dim,
++            page_size=layout.tile_tokens,
++            head_num=layout.kv_heads,
++            head_dim=layout.head_dim,
+             full_attention_layer_ids=layer_ids,
+             device=self.device,
+             mamba_pool=req_to_token_pool.mamba_pool,
+@@ -1917,14 +1942,22 @@
+             )
+             if not isinstance(packed_pool, KVarNTokenToKVPool):
+                 raise TypeError("KVarN allocator requires a packed pool")
++            if get_exec().kernel.kvarn_qualification_mode != "portable":
++                from sglang.srt.mem_cache.kvarn_bend_plan import native_bend_plan
++
++                plan = native_bend_plan()
++                plan.require_request(plan.context, sizes.max_total_num_tokens, get_schedule().page_size)
++                if packed_pool.bend_plan is not plan:
++                    raise ValueError("Native KVarN allocation requires the worker's Bend plan")
+             if token_to_kv_pool_allocator is None:
+                 allocator = KVarNPageAllocator(
+-                    size=sizes.max_total_num_tokens,
+-                    page_size=128,
++                    size=packed_pool.capacity.token_capacity,
++                    page_size=packed_pool.page_size,
+                     dtype=self.kv_cache_dtype,
+                     device=self.device,
+                     kvcache=token_to_kv_pool,
+                     need_sort=False,
++                    bend_plan=packed_pool.bend_plan,
+                 )
+             elif isinstance(token_to_kv_pool_allocator, KVarNPageAllocator):
+                 allocator = token_to_kv_pool_allocator
+diff --git a/python/sglang/srt/mem_cache/kvarn/pool.py b/python/sglang/srt/mem_cache/kvarn/pool.py
+--- a/python/sglang/srt/mem_cache/kvarn/pool.py
++++ b/python/sglang/srt/mem_cache/kvarn/pool.py
+@@ -16,6 +16,7 @@
+ 
+ if TYPE_CHECKING:
+     from sglang.srt.layers.radix_attention import RadixAttention
++    from sglang.srt.mem_cache.kvarn_bend_plan import KVarNBendPlan
+ 
+ class KVarNCapacityError(RuntimeError):
+     """Evict actual unreferenced radix pages or reduce chunk size, then retry."""
+@@ -23,11 +24,34 @@
+ class KVarNTokenToKVPool(KVCache):
+     def __init__(self, layout: KVarNLayout, capacity: KVarNCapacity,
+                  dtype: torch.dtype, device: str, enable_memory_saver: bool = False,
+-                 *, max_query_heads: int) -> None:
++                 *, max_query_heads: int, bend_plan: KVarNBendPlan | None = None) -> None:
+         if dtype not in (torch.float16, torch.bfloat16):
+             raise ValueError("raw cache requires fp16/bf16")
+         if enable_memory_saver:
+             raise ValueError("KVarN eager prototype does not support memory-saver regions")
++        pages = capacity.token_capacity // 128 + 1
++        tile_bytes = layout.tile_bytes
++        if bend_plan is not None:
++            from .layout import KVarNOffsets
++
++            bend_plan.require_request(bend_plan.context, capacity.token_capacity, layout.tile_tokens)
++            role = bend_plan.draft if layout.head_dim == 128 else bend_plan.target
++            if (layout.head_dim != role.head_dim or layout.kv_heads != role.kv_heads
++                    or layout.layer_ids != tuple(range(role.layers))
++                    or KVarNOffsets.from_layout(layout) != KVarNOffsets(*role.offsets)
++                    or tile_bytes != role.tile_bytes):
++                raise ValueError("KVarN packed layout differs from the Bend plan")
++            if (capacity.tail_slots != bend_plan.tail_slots
++                    or capacity.max_write_tokens != bend_plan.write_tokens
++                    or capacity.max_query_tokens != bend_plan.query_tokens
++                    or capacity.max_visible_tokens != role.visible_tokens
++                    or capacity.workspace_bytes != 64 * 1024 * 1024
++                    or pages != bend_plan.pages):
++                raise ValueError("KVarN backing capacity differs from the Bend plan")
++            if dtype != torch.bfloat16 or max_query_heads != (32 if layout.head_dim == 128 else 24):
++                raise ValueError("KVarN Bend allocation requires the reviewed BF16 query geometry")
++            pages, tile_bytes = bend_plan.pages, role.tile_bytes
++        self.bend_plan = bend_plan
+         super().__init__(capacity.token_capacity, 128, dtype, len(layout.layer_ids),
+                          device, False, min(layout.layer_ids), max(layout.layer_ids), "KVarN")
+         self._qualification_mode: Literal["disabled", "native", "capture"] = "disabled"
+@@ -37,7 +61,7 @@
+         self.head_num = layout.kv_heads
+         self.head_dim = layout.head_dim
+         self.v_head_dim = layout.head_dim
+-        self.num_pages = capacity.token_capacity // 128 + 1
++        self.num_pages = pages
+         self.kv_cache_layout = "kvarn_k4v2_g128"
+         self.workspace = KVarNWorkspace.create(layout, capacity, dtype, device,
+             max_query_heads)
+@@ -46,7 +70,7 @@
+         for layer in layout.layer_ids:
+             raw_shape = (capacity.tail_slots, 128, layout.kv_heads, layout.head_dim)
+             self._views[layer] = KVarNLayerView(
+-                torch.empty((self.num_pages, layout.kv_heads, layout.tile_bytes), dtype=torch.uint8, device=device),
++                torch.empty((self.num_pages, layout.kv_heads, tile_bytes), dtype=torch.uint8, device=device),
+                 torch.empty(raw_shape, dtype=dtype, device=device),
+                 torch.empty(raw_shape, dtype=dtype, device=device),
+                 torch.full((self.num_pages,), -1, dtype=torch.int32, device=device),
+diff --git a/python/sglang/srt/mem_cache/kvarn_allocator.py b/python/sglang/srt/mem_cache/kvarn_allocator.py
+--- a/python/sglang/srt/mem_cache/kvarn_allocator.py
++++ b/python/sglang/srt/mem_cache/kvarn_allocator.py
+@@ -12,13 +12,17 @@
+ 
+ if TYPE_CHECKING:
+     from sglang.srt.mem_cache.base_prefix_cache import BasePrefixCache
++    from sglang.srt.mem_cache.kvarn_bend_plan import KVarNBendPlan
+ 
+ 
+ class KVarNPageAllocator(PagedTokenToKVPoolAllocator):
+     def __init__(self, size: int, page_size: int, dtype: torch.dtype, device: str,
+-                 kvcache: KVCache, need_sort: bool):
++                 kvcache: KVCache, need_sort: bool, *, bend_plan: KVarNBendPlan | None = None):
+         if page_size != 128 or need_sort:
+             raise ValueError("KVarN supports local page128 allocation only")
++        if bend_plan is not None:
++            bend_plan.require_request(bend_plan.context, size, page_size)
++        self.bend_plan = bend_plan
+         self.kvarn_pools: tuple[KVarNTokenToKVPool, ...] = ()
+         self._graph_dummy_locations: torch.Tensor | None = None
+         super().__init__(size, page_size, dtype, device, kvcache, need_sort)
+@@ -26,6 +30,10 @@
+     def register_pool(self, pool: KVarNTokenToKVPool) -> None:
+         if pool.size != self.size or pool.page_size != self.page_size:
+             raise ValueError("Target and draft must share the physical page namespace")
++        if pool.bend_plan is not self.bend_plan:
++            raise ValueError("Target, draft and allocator must share one immutable Bend plan")
++        if self.bend_plan is not None and pool.num_pages != self.bend_plan.pages:
++            raise ValueError("KVarN Bend free-page IDs exceed or omit the pool backing")
+         if pool in self.kvarn_pools:
+             raise ValueError("KVarN pool is already registered")
+         if len(self.kvarn_pools) >= 2:
+@@ -79,9 +87,26 @@
+         super()._release_page_ids(*page_ids)
+ 
+     def clear(self) -> None:
++        if self.bend_plan is not None:
++            self.bend_plan.require_request(self.bend_plan.context, self.size, self.page_size)
++            if self.num_pages != self.bend_plan.pages - 1:
++                raise ValueError("KVarN allocator page count differs from its Bend plan")
+         for pool in self.kvarn_pools:
+             pool.clear()
+-        super().clear()
++        if self.bend_plan is None:
++            super().clear()
++        else:
++            # Paged.__init__ dispatches here. Populate the actual free list
++            # directly from Bend, without allocating a redundant arange pool.
++            # Page zero stays absent; reserve_graph_dummy_page consumes page1
++            # exactly once, in the existing registration path below.
++            self.num_pages = self.bend_plan.pages - 1
++            self.free_pages = torch.tensor(
++                self.bend_plan.free_pages, dtype=torch.int64, device=self.device
++            )
++            self.free_group = None
++            self.free_page_reps_group = []
++            self.release_pages = torch.empty((0,), dtype=torch.int64, device=self.device)
+         if self._graph_dummy_locations is not None:
+             dummy_page = self._graph_dummy_locations[0] // 128
+             self.free_pages = self.free_pages[self.free_pages != dummy_page]
+diff --git a/python/sglang/srt/mem_cache/kvarn_bend_plan.py b/python/sglang/srt/mem_cache/kvarn_bend_plan.py
+new file mode 100644
+--- /dev/null
++++ b/python/sglang/srt/mem_cache/kvarn_bend_plan.py
+@@ -0,0 +1,145 @@
++# SPDX-License-Identifier: Apache-2.0
++"""Startup-only Bend 2 plan consumer; not a proof of Python or CUDA.
++
++The deployment adapter verifies source/compiler/C/binary/proof identity before
++launch. Here the engine independently checks its allocation ABI and retains only
++immutable typed values. No environment override or missing-file fallback exists.
++"""
++from __future__ import annotations
++
++import json
++from dataclasses import dataclass
++from functools import cache
++from itertools import pairwise
++from pathlib import Path
++
++
++_OFFSET_NAMES = (
++    "k_packed", "k_scale", "k_zero", "k_token", "v_packed", "v_channel",
++    "v_scale", "v_zero", "end",
++)
++_FIELDS = (
++    "context", "headroom", "pool", "page_size", "pages", "tail_slots",
++    "write_tokens", "query_tokens", "commit_tokens", "write_span_pages",
++    "admission_free_slots", "target_visible", "draft_window", "draft_visible",
++    "target_dim", "target_kv_heads", "target_layers", "draft_dim",
++    "draft_kv_heads", "draft_layers",
++) + tuple(f"{role}_{name}" for role in ("target", "draft") for name in _OFFSET_NAMES)
++
++
++@dataclass(frozen=True, slots=True)
++class BendPoolLayout:
++    head_dim: int
++    kv_heads: int
++    layers: int
++    visible_tokens: int
++    offsets: tuple[int, ...]
++
++    @property
++    def tile_bytes(self) -> int:
++        return self.offsets[-1]
++
++
++@dataclass(frozen=True, slots=True)
++class KVarNBendPlan:
++    context: int
++    headroom: int
++    pool: int
++    page_size: int
++    pages: int
++    tail_slots: int
++    write_tokens: int
++    query_tokens: int
++    commit_tokens: int
++    write_span_pages: int
++    admission_free_slots: int
++    draft_window: int
++    target: BendPoolLayout
++    draft: BendPoolLayout
++    free_pages: tuple[int, ...]
++
++    def require_request(self, context: int, pool: int, page_size: int) -> None:
++        if any(type(value) is not int for value in (context, pool, page_size)):
++            raise ValueError("KVarN native request geometry must contain exact integers")
++        if (context, pool, page_size) != (self.context, self.pool, self.page_size):
++            raise ValueError("KVarN native request differs from the compiled Bend plan")
++
++
++def _unique_object(items: list[tuple[str, object]]) -> dict[str, object]:
++    result: dict[str, object] = {}
++    for key, value in items:
++        if key in result:
++            raise ValueError(f"Duplicate KVarN Bend plan key: {key}")
++        result[key] = value
++    return result
++
++
++def _integer(value: object, name: str) -> int:
++    if type(value) is not int or not 0 <= value <= 2147483647:
++        raise ValueError(f"KVarN Bend plan field must be a nonnegative int32: {name}")
++    return value
++
++
++@cache
++def native_bend_plan() -> KVarNBendPlan:
++    """Read once per worker, before allocation/capture; never on a token path."""
++    with Path("/opt/qwen/bend/plan.json").open("rb") as stream:
++        raw = stream.read(65537)
++    if len(raw) > 65536:
++        raise ValueError("KVarN Bend plan exceeds the startup artifact size limit")
++    decoded: object = json.loads(raw, object_pairs_hook=_unique_object)
++    if not isinstance(decoded, dict) or set(decoded) != {*_FIELDS, "schema", "free_pages"}:
++        raise ValueError("KVarN Bend plan has missing or unexpected fields")
++    if _integer(decoded["schema"], "schema") != 2:
++        raise ValueError("KVarN requires the Bend 2 schema2 allocation plan")
++    values = {name: _integer(decoded[name], name) for name in _FIELDS}
++    if (values["context"], values["headroom"], values["page_size"]) != (262144, 1024, 128):
++        raise ValueError("KVarN Bend plan is not the native262144 deployment")
++    pool, page_size, pages = values["pool"], values["page_size"], values["pages"]
++    if (pool != values["context"] + values["headroom"]
++            or pool % page_size or pages != pool // page_size + 1):
++        raise ValueError("KVarN Bend plan violates reserved-zero page geometry")
++    # IDs include the reserved zero page: last physical token is 263295,
++    # NOT pool-1 (263167). Kernels encode physical addresses in signed int32.
++    if pages * page_size - 1 > 2147483647:
++        raise ValueError("KVarN Bend physical token addresses exceed int32")
++    page_list: object = decoded["free_pages"]
++    if not isinstance(page_list, list) or len(page_list) != pages - 1:
++        raise ValueError("KVarN Bend free pages must contain every nonzero page exactly in order")
++    free_pages = tuple(_integer(page, "free_pages") for page in page_list)
++    if any(page != index for index, page in enumerate(free_pages, 1)):
++        raise ValueError("KVarN Bend free pages must contain every nonzero page exactly in order")
++    if (values["tail_slots"], values["write_tokens"], values["query_tokens"],
++            values["commit_tokens"]) != (8, 128, 32, 8):
++        raise ValueError("KVarN Bend plan changes the bounded native workspace")
++    if (values["write_span_pages"] != 2
++            or values["admission_free_slots"] != values["write_span_pages"] + 2):
++        raise ValueError("KVarN Bend plan changes write/sink/COW admission bounds")
++    if (values["target_visible"] != page_size
++            or values["draft_window"] != 2048 + page_size + values["commit_tokens"]
++            or values["draft_visible"] != -(-values["draft_window"] // page_size) * page_size):
++        raise ValueError("KVarN Bend plan changes target or draft visible bounds")
++    layouts: list[BendPoolLayout] = []
++    for role, dim, heads, layers in (("target", 256, 4, 16), ("draft", 128, 8, 5)):
++        if (values[f"{role}_dim"], values[f"{role}_kv_heads"],
++                values[f"{role}_layers"]) != (dim, heads, layers):
++            raise ValueError(f"KVarN Bend plan changes reviewed {role} model geometry")
++        offsets = tuple(values[f"{role}_{name}"] for name in _OFFSET_NAMES)
++        sizes = (dim * page_size // 2, 2 * dim, 2 * dim, 2 * page_size,
++                 dim * page_size // 4, 2 * dim, 2 * page_size, 2 * page_size)
++        if (offsets[0] != 0
++                or tuple(b - a for a, b in pairwise(offsets)) != sizes
++                or offsets[-1] != dim * page_size * 3 // 4 + 6 * (dim + page_size)):
++            raise ValueError(f"KVarN Bend plan changes the packed {role} byte layout")
++        layouts.append(BendPoolLayout(
++            values[f"{role}_dim"], values[f"{role}_kv_heads"],
++            values[f"{role}_layers"], values[f"{role}_visible"], offsets,
++        ))
++    return KVarNBendPlan(
++        context=values["context"], headroom=values["headroom"], pool=pool,
++        page_size=page_size, pages=pages, tail_slots=values["tail_slots"],
++        write_tokens=values["write_tokens"], query_tokens=values["query_tokens"],
++        commit_tokens=values["commit_tokens"], write_span_pages=values["write_span_pages"],
++        admission_free_slots=values["admission_free_slots"], draft_window=values["draft_window"],
++        target=layouts[0], draft=layouts[1], free_pages=free_pages,
++    )
+diff --git a/python/sglang/srt/model_executor/pool_configurator.py b/python/sglang/srt/model_executor/pool_configurator.py
+--- a/python/sglang/srt/model_executor/pool_configurator.py
++++ b/python/sglang/srt/model_executor/pool_configurator.py
+@@ -163,16 +163,37 @@
+         if kvc.spec_aux_config.dflash_draft_num_layers != 5:
+             raise ValueError("KVarN memory plan requires the five-layer draft")
+         self.budget = KVarNMemoryBudget()
++        from sglang.srt.mem_cache.kvarn_bend_plan import native_bend_plan
++        from sglang.srt.runtime_context import get_exec
++
++        mode = get_exec().kernel.kvarn_qualification_mode
++        if mode not in ("portable", "native", "graph"):
++            raise ValueError("Unknown KVarN qualification mode")
++        self.bend_plan = None if mode == "portable" else native_bend_plan()
++        if self.bend_plan is not None:
++            self.bend_plan.require_request(
++                kvc.model_config.context_len,
++                get_schedule().max_total_tokens,
++                get_schedule().page_size,
++            )
+ 
+     def calculate_pool_sizes(self, available_bytes: int, page_size: int) -> MemoryPoolConfig:
+         if page_size != self.budget.page_size:
+             raise ValueError("KVarN memory accounting requires page128")
+         tokens = self.budget.capacity_for_bytes(available_bytes)
++        if self.bend_plan is not None:
++            # The plan is a requested allocation, not evidence that VRAM fits.
++            if tokens < self.bend_plan.pool or available_bytes < self.budget.required_bytes(self.bend_plan.pool):
++                raise ValueError("Available KVarN memory cannot satisfy the Bend allocation plan")
++            tokens = self.bend_plan.pool
+         return MemoryPoolConfig(max_total_num_tokens=tokens)
+ 
+     def calculate_pool_sizes_from_max_tokens(self, max_total_num_tokens: int, page_size: int) -> MemoryPoolConfig:
+         if page_size != self.budget.page_size:
+             raise ValueError("KVarN memory accounting requires page128")
++        if self.bend_plan is not None:
++            self.bend_plan.require_request(self.bend_plan.context, max_total_num_tokens, page_size)
++            return MemoryPoolConfig(max_total_num_tokens=self.bend_plan.pool)
+         tokens = max_total_num_tokens // page_size * page_size
+         if tokens <= 0:
+             raise ValueError("No complete KVarN token page fits")
