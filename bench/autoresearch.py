@@ -1,5 +1,5 @@
 # Copyright (c) 2026 inference contributors.
-"""Finite native sampled-math/C1 measurements; run bash autoresearch.sh --help.
+"""Finite native math/logic/direct-context/C1 measurements; see autoresearch.sh.
 
 This supervisor never operates Docker lifecycle, promotion, power policy or the
 maintenance guardian. The latter must independently recover the owned candidate.
@@ -24,7 +24,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from types import FrameType
 
-from bench import decode
+from bench import decode, direct_context
 from eval.measure import mapping, number, sequence
 from serve import qualification
 
@@ -53,6 +53,25 @@ METRIC_NAMES = (
     "ttft_seconds_8192",
     "ttft_seconds_32768",
     "tiny_math_reward",
+    "short_i3_model_call_output_tok_s",
+    "short_i3_reward",
+    "long_graphwalks_model_call_output_tok_s",
+    "long_graphwalks_reward",
+)
+SUITE_PROTOCOL = "native-math3-logic1-graphwalks179k1-c1-v1"
+SUITE_ORDER = ("tiny-math", "short-i3", "long-graphwalks", "decode")
+SUITE_SCOPE = "sampled_math_logic_direct_graphwalks_and_C1_not_full_qualification"
+SUITE_SOURCES = (
+    "autoresearch.sh",
+    "bench/autoresearch.py",
+    "bench/direct_context.py",
+    "bench/decode.py",
+    "bench/cache.py",
+    "bench/power.py",
+    "bench/throughput-prompts.jsonl",
+    "serve/qualification.py",
+    "bend/adapter.py",
+    "bend/build_toolchain.py",
 )
 
 
@@ -345,6 +364,7 @@ def run_producer(settings: Settings, name: str, command: list[str]) -> None:
 def model_call_observations(
     evidence: qualification.Evidence,
     directory: Path,
+    expected_episode_count: int = 3,
 ) -> dict[str, object]:
     """Pool every native model call, including graded incorrect/truncated answers.
 
@@ -352,12 +372,17 @@ def model_call_observations(
     received response. Usage.completion_tokens already includes reasoning tokens.
     This is whole-model-call throughput, not SSE committed-decode/GPU timing.
     """
+    require(
+        type(expected_episode_count) is int and expected_episode_count > 0,
+        "Expected a positive exact native episode count",
+    )
     paths = list(directory.glob("*/traces.jsonl"))
-    require(len(paths) == 1, "Missing unique native math trace file")
+    require(len(paths) == 1, "Missing unique native trace file")
     path = evidence.retain(paths[0])
     observations: list[dict[str, object]] = []
     durations: list[float] = []
     total_tokens = 0
+    total_input_tokens = 0
     episodes = 0
     with path.open("rb") as stream:
         for ordinal, raw in enumerate(stream):
@@ -365,12 +390,13 @@ def model_call_observations(
                 raw, object_pairs_hook=qualification.pairs
             )
             episode = mapping(episode_value)
+            task = mapping(episode.get("task"))
             require(
                 episode.get("ok") is True and not sequence(episode.get("errors")),
                 "Model-call metric cannot exclude an operationally failed episode",
             )
             traces = sequence(episode.get("traces"))
-            require(len(traces) == 1, "Expected the native single-agent math trace")
+            require(len(traces) == 1, "Expected the native single-agent trace")
             trace = mapping(traces[0])
             require(
                 trace.get("ok") is True and not sequence(trace.get("errors")),
@@ -387,11 +413,21 @@ def model_call_observations(
                 )
                 require(
                     call.get("finish_reason") in ("stop", "length"),
-                    "Incomplete native math model-call finish",
+                    "Incomplete native model-call finish",
                 )
                 usage = mapping(call.get("usage"))
                 tokens = qualification.integer(usage.get("completion_tokens"))
                 require(tokens >= 0, "Negative model-call completion usage")
+                prompt_tokens = qualification.integer(usage.get("prompt_tokens"))
+                cached_value = usage.get("cached_input_tokens")
+                cached_tokens = (
+                    0 if cached_value is None else qualification.integer(cached_value)
+                )
+                require(
+                    prompt_tokens >= 0 and cached_tokens >= 0,
+                    "Negative native prompt/cache usage",
+                )
+                input_tokens = prompt_tokens + cached_tokens
                 reasoning = usage.get("reasoning_tokens")
                 if reasoning is not None:
                     require(
@@ -406,12 +442,18 @@ def model_call_observations(
                     "Missing, nonfinite or reversed native model-call wall clocks",
                 )
                 total_tokens += tokens
+                total_input_tokens += input_tokens
                 durations.append(duration)
                 observations.append({
                     "episode": ordinal,
+                    "task_key": qualification.text(task.get("key")),
+                    "task_sha256": qualification.text(task.get("hash")),
                     "trace_id": trace.get("id"),
                     "call": index,
                     "completion_tokens": tokens,
+                    "input_tokens": input_tokens,
+                    "uncached_prompt_tokens": prompt_tokens,
+                    "cached_input_tokens": cached_value,
                     "reasoning_tokens_subset": reasoning,
                     "start_unix_seconds": start,
                     "end_unix_seconds": end,
@@ -419,20 +461,147 @@ def model_call_observations(
                     "finish_reason": call["finish_reason"],
                 })
             episodes += 1
-    require(episodes == 3, "Model-call metric requires all three native math episodes")
+    require(
+        episodes == expected_episode_count,
+        f"Model-call metric requires all {expected_episode_count} native episodes",
+    )
     seconds = number(math.fsum(durations))
     require(seconds > 0, "No positive native model-call duration")
     return {
         "model_call_output_tok_s": number(total_tokens / seconds),
         "completion_tokens": total_tokens,
+        "input_tokens": total_input_tokens,
         "model_call_wall_seconds": seconds,
         "call_count": len(observations),
         "episode_count": episodes,
         "calls": observations,
         "scope": "whole native model-call wall time including prefill/decode/HTTP; not decode-only, monotonic or GPU time",
         "usage_semantics": "completion_tokens includes reasoning; optional reasoning_tokens is not added again",
+        "input_usage_semantics": "native prompt_tokens excludes cache reads; input_tokens adds reported cached_input_tokens back, without claiming omitted cache telemetry is zero",
         "clock": "native Unix wall seconds, unmodified; positive finite end minus start per call",
     }
+
+
+def _native_workload(
+    frozen: dict[str, object], provenance: Path, environment: str
+) -> dict[str, object]:
+    """Remove only the fresh launch path, not any frozen content identity."""
+    files = mapping(frozen.get("files_sha256"))
+    launch_hash = files.pop(str((provenance / f"{environment}.toml").resolve()))
+    return {
+        "profile": frozen["profile"],
+        "environment": frozen["environment"],
+        "selection": frozen["selection"],
+        "files_sha256": files,
+        "launch_config_sha256": launch_hash,
+    }
+
+
+def _freeze_suite(settings: Settings) -> dict[str, object]:
+    """Bind all lanes before inference, inside the existing supervised deadline."""
+    supervisor = qualification.document(settings.output / "supervisor.json")
+    provenance_root = settings.output / "suite-provenance"
+    provenance_root.mkdir(mode=0o700)
+    native: dict[str, object] = {}
+    files: dict[str, object] = {}
+    image = (ROOT / "eval/.cache/sandbox-image").read_text(encoding="utf-8").strip()
+    require(
+        re.fullmatch(r"sha256:[a-f0-9]{64}", image) is not None,
+        "Missing pinned native sandbox image",
+    )
+    for lane, profile, environment in (
+        ("tiny-math", "tiny", "aime25"),
+        ("short-i3", "diverse", "i3-logic"),
+    ):
+        provenance = provenance_root / lane
+        provenance.mkdir(mode=0o700)
+        config = ROOT / "eval/configs" / profile / f"{environment}.toml"
+        launch, replacements = re.subn(
+            r"^image = .*$",
+            f'image = "{image}"',
+            config.read_text(encoding="utf-8"),
+            flags=re.MULTILINE,
+        )
+        require(replacements == 1, "Native profile must bind one sandbox image")
+        with (provenance / f"{environment}.toml").open("xb") as stream:
+            _ = stream.write(launch.encode())
+        frozen = qualification.frozen_inputs(profile, environment, provenance)
+        qualification.save(provenance / "evaluation-inputs.json", frozen)
+        plan = _native_workload(frozen, provenance, environment)
+        native[lane] = plan
+        files.update(mapping(plan["files_sha256"]))
+    direct_sources = {
+        str(path.resolve()): qualification.digest(path)
+        for path in direct_context.source_paths()
+    }
+    files.update(direct_sources)
+    files.update({
+        str((ROOT / name).resolve()): qualification.digest(ROOT / name)
+        for name in SUITE_SOURCES
+    })
+    # Source/data hashes stay complete; copy repository producer/config bytes,
+    # not large offline datasets or the prepared third-party source trees.
+    names: set[str] = set()
+    for value in files:
+        path = Path(value)
+        if path.is_relative_to(ROOT):
+            relative = path.relative_to(ROOT)
+            if not any(part.startswith(".") for part in relative.parts):
+                names.add(relative.as_posix())
+    sources = sequence(supervisor["sources"])
+    already = {
+        qualification.text(mapping(item)["path"]).removeprefix("sources/")
+        for item in sources
+    }
+    sources.extend(
+        decode.snapshot_sources(settings.output, tuple(sorted(names - already)))
+    )
+    for value in sources:
+        item = mapping(value)
+        name = qualification.text(item["path"]).removeprefix("sources/")
+        require(
+            item.get("sha256") == files.get(str((ROOT / name).resolve())),
+            f"Benchmark source changed after its initial snapshot: {name}",
+        )
+    workload: dict[str, object] = {
+        "protocol": SUITE_PROTOCOL,
+        "order": list(SUITE_ORDER),
+        "primary_metric": "model_call_output_tok_s",
+        "primary_scope": "tiny-math native model calls only; unchanged numerator and wall-clock denominator",
+        "native": native,
+        "long-graphwalks": {
+            "frozen_identity": direct_context.frozen_identity(),
+            "source_closure": direct_sources,
+        },
+        "decode": supervisor["decode"],
+        "files_sha256": files,
+        "sources": sources,
+    }
+    benchmark = {
+        **supervisor,
+        "workload": workload,
+        "workload_sha256": hashlib.sha256(
+            qualification.canonical(workload)
+        ).hexdigest(),
+        "sources": sources,
+    }
+    qualification.save(settings.output / "benchmark.json", benchmark)
+    return benchmark
+
+
+def _admit_native_plan(
+    evidence: qualification.Evidence,
+    directory: Path,
+    environment: str,
+    expected: object,
+) -> None:
+    provenance = directory.parent / "provenance"
+    path = evidence.retain(provenance / f"{environment}.evaluation-inputs-before.json")
+    require(
+        _native_workload(qualification.document(path), provenance, environment)
+        == expected,
+        f"{environment}: native run differs from the pre-suite frozen workload",
+    )
 
 
 def worker(settings: Settings) -> int:
@@ -459,7 +628,11 @@ def worker(settings: Settings) -> int:
         HF_HUB_DISABLE_TELEMETRY="1",
         UV_OFFLINE="1",
         UV_PYTHON_DOWNLOADS="never",
+        QWEN_EVAL_ALLOW_REQUESTS="1",
+        QWEN_EVAL_BASE_URL=f"{ENDPOINT}/v1",
     )
+    benchmark = _freeze_suite(settings)
+    frozen_workload = mapping(benchmark["workload"])
     run_producer(
         settings,
         "tiny-math",
@@ -471,6 +644,35 @@ def worker(settings: Settings) -> int:
             "--measure-power",
             "--output",
             str(settings.output / "tiny-math"),
+        ],
+    )
+    run_producer(
+        settings,
+        "short-i3",
+        [
+            "bash",
+            str(ROOT / "eval/scripts/run"),
+            "diverse",
+            "i3-logic",
+            "--measure-power",
+            "--output",
+            str(settings.output / "short-i3"),
+        ],
+    )
+    run_producer(
+        settings,
+        "long-graphwalks",
+        [
+            sys.executable,
+            "-m",
+            "bench.direct_context",
+            "collect",
+            "--output",
+            str(settings.output / "long-graphwalks"),
+            "--key-file",
+            str(settings.key_file),
+            "--container",
+            settings.container,
         ],
     )
     run_producer(
@@ -516,6 +718,91 @@ def worker(settings: Settings) -> int:
     )
     model_calls = model_call_observations(evidence, math_directory)
     energy = qualification.energy_gate(evidence, math_directory, "aime25", identity)
+    _admit_native_plan(
+        evidence,
+        math_directory,
+        "aime25",
+        mapping(frozen_workload["native"])["tiny-math"],
+    )
+    short_directory = settings.output / "short-i3/i3-logic"
+    short_provenance = short_directory.parent / "provenance"
+    require(
+        qualification.captures(
+            evidence,
+            str(short_provenance / "i3-logic.serving-before.json"),
+            str(short_provenance / "i3-logic.serving-after.json"),
+        )
+        == identity,
+        "Short logic measurement changed serving instance",
+    )
+    short_quality = qualification.evaluation_gate(
+        evidence, short_directory, identity, "diverse", "i3-logic"
+    )
+    short_calls = model_call_observations(
+        evidence, short_directory, expected_episode_count=1
+    )
+    short_energy = qualification.energy_gate(
+        evidence, short_directory, "i3-logic", identity
+    )
+    _admit_native_plan(
+        evidence,
+        short_directory,
+        "i3-logic",
+        mapping(frozen_workload["native"])["short-i3"],
+    )
+    require(short_quality.get("rollouts") == 1, "Missing graded logic sentinel")
+    long_directory = settings.output / "long-graphwalks"
+    long_result = direct_context.admit(long_directory, expected_identity=identity)
+    long_plan = mapping(frozen_workload["long-graphwalks"])
+    long_identity = mapping(long_plan["frozen_identity"])
+    long_sources = mapping(long_plan["source_closure"])
+    require(
+        long_result.get("source_closure") == long_sources
+        and direct_context.frozen_identity() == long_identity
+        and long_result.get("frozen_identity") == long_identity
+        and long_result.get("messages_sha256") == long_identity["messages_sha256"],
+        "Direct context source or frozen identity differs from the pre-suite plan",
+    )
+    require(
+        long_result.get("schema_version") == 1
+        and long_result.get("producer") == "bench.direct_context.admit"
+        and long_result.get("error") is None
+        and type(long_result.get("is_truncated")) is bool
+        and long_result.get("finish_reason") in ("stop", "length")
+        and long_result["is_truncated"] == (long_result["finish_reason"] == "length"),
+        "Incomplete direct-context native finish/error evidence",
+    )
+    long_tokens = qualification.integer(long_result.get("completion_tokens"))
+    long_input = qualification.integer(long_result.get("input_tokens"))
+    long_seconds = number(long_result.get("elapsed_seconds"))
+    long_reward = number(long_result.get("reward"))
+    long_scope = qualification.text(long_result.get("metric_scope"))
+    require(
+        long_input == 178769
+        and 0 <= long_tokens <= 8192
+        and long_seconds > 0
+        and 0 <= long_reward <= 1,
+        "Incomplete native direct-context usage, timing or reward",
+    )
+    long_rate = number(long_tokens / long_seconds)
+    require(
+        number(long_result.get("model_call_output_tok_s")) == long_rate,
+        "Direct-context rate differs from its native model-call clock",
+    )
+    require(
+        qualification.document(evidence.retain(long_directory / "report.json"))
+        == long_result,
+        "Direct-context producer report differs from independent raw admission",
+    )
+    paths = sequence(long_result.get("evidence_paths"))
+    require(bool(paths), "Missing direct-context raw evidence paths")
+    for value in paths:
+        path = Path(qualification.text(value)).resolve(strict=True)
+        require(
+            path.is_relative_to(long_directory.resolve()) or str(path) in long_sources,
+            "Direct-context evidence is outside its fresh root and frozen sources",
+        )
+        evidence.retain(path)
     report_path = settings.output / "decode/decode-depth-matrix.json"
     report = qualification.document(report_path)
     require(
@@ -534,6 +821,12 @@ def worker(settings: Settings) -> int:
     metrics: dict[str, float] = {
         "model_call_output_tok_s": number(model_calls.get("model_call_output_tok_s")),
         "tiny_math_reward": number(quality.get("weighted_reward_mean")),
+        "short_i3_model_call_output_tok_s": number(
+            short_calls.get("model_call_output_tok_s")
+        ),
+        "short_i3_reward": number(short_quality.get("weighted_reward_mean")),
+        "long_graphwalks_model_call_output_tok_s": long_rate,
+        "long_graphwalks_reward": long_reward,
     }
     pooled: dict[str, object] = {}
     for depth in decode.DEPTHS:
@@ -559,18 +852,47 @@ def worker(settings: Settings) -> int:
             "repetitions": REPETITIONS,
         }
     guard(settings)
+    for path_value, expected in mapping(frozen_workload["files_sha256"]).items():
+        path = Path(path_value).resolve(strict=True)
+        if str(path) not in evidence.hashes:
+            evidence.retain(path)
+        require(
+            evidence.hashes[str(path)] == expected,
+            f"Pre-suite source closure changed: {path}",
+        )
+    for path in (
+        settings.output / "benchmark.json",
+        settings.output / "supervisor.json",
+    ):
+        evidence.retain(path)
+    evidence.tree(settings.output / "suite-provenance")
+    evidence.tree(settings.output / "sources")
+    evidence.tree(settings.output / "logs")
+    evidence.tree(math_directory)
+    evidence.tree(short_directory)
     qualification.save(
         settings.output / "admitted.json",
         {
-            "schema_version": 1,
+            "schema_version": 2,
             "status": "complete_admitted_measurement",
-            "scope": "sampled_math_only_plus_C1; not full qualification or promotion",
-            "quality_scope": "three native seed0 shuffled AIME25 tasks; inspect retained reasoning/text",
+            "protocol": SUITE_PROTOCOL,
+            "scope": SUITE_SCOPE,
+            "quality_scope": "three original AIME25 tasks, one original I3 logic task and one original direct BFS task; separate native rewards, no combined quality score",
+            "order": list(SUITE_ORDER),
+            "workload_sha256": benchmark["workload_sha256"],
+            "benchmark_sha256": qualification.digest(
+                settings.output / "benchmark.json"
+            ),
             "identity": identity,
             "metrics": metrics,
             "pooled_counter_windows": pooled,
             "tiny_math": quality,
             "tiny_math_energy": energy,
+            "short_i3": short_quality,
+            "short_i3_energy": short_energy,
+            "short_i3_model_calls": short_calls,
+            "long_graphwalks": long_result,
+            "long_graphwalks_metric_scope": long_scope,
             "timing": timing,
             "primary_metric": "model_call_output_tok_s",
             "native_model_calls": model_calls,
@@ -765,7 +1087,7 @@ def terminate(child: subprocess.Popen[bytes], deadline: float) -> bool:
 
 
 def supervise(settings: Settings, started: float) -> int:
-    """Enforce one deadline across capture, both native workloads and admission."""
+    """Enforce one deadline across capture, all native workloads and admission."""
     require(not os.path.lexists(settings.output), "Output directory must be fresh")
     state = guard(settings)
     deadline = min(
@@ -805,10 +1127,11 @@ def supervise_created(
         settings.output, ("autoresearch.sh", "bench/autoresearch.py")
     )
     qualification.save(
-        settings.output / "benchmark.json",
+        settings.output / "supervisor.json",
         {
-            "schema_version": 1,
-            "scope": "sampled_math_and_C1_not_full_qualification",
+            "schema_version": 2,
+            "protocol": SUITE_PROTOCOL,
+            "scope": SUITE_SCOPE,
             "started_monotonic": started,
             "deadline_monotonic": deadline,
             "hard_limit_seconds": LIMIT_SECONDS,
@@ -831,13 +1154,42 @@ def supervise_created(
                 "shuffle": True,
                 "seed": 0,
                 "output_budget": 32768,
+                "sampling": "unchanged eval/configs/local.toml; greedy, thinking enabled",
+            },
+            "short": {
+                "profile": "diverse",
+                "environment": "i3-logic",
+                "tasks": 1,
+                "rollouts": 1,
+                "shuffle": False,
+                "output_budget": 8192,
+                "selection": "first_native_eligible_source_order",
+            },
+            "long": {
+                "profile": "diverse",
+                "environment": "direct-graphwalks-bfs",
+                "tasks": 1,
+                "rollouts": 1,
+                "input_tokens": 178769,
+                "output_budget": 8192,
+                "selection": "first_native_filtered_source_order",
             },
             "decode": {
                 "depths": list(decode.DEPTHS),
                 "repetitions": REPETITIONS,
                 "output_budget": 1024,
+                "protocol": decode.MEASUREMENT_PROTOCOL,
+                "concurrency": 1,
+                "order": "depth_then_repetition",
+                "sampling": {
+                    "temperature": 0,
+                    "top_p": 1,
+                    "n": 1,
+                    "ignore_eos": False,
+                },
+                "cache_policy": "deterministic_per_row_nonce_no_flush_no_warmup",
             },
-            "order": ["tiny-math", "decode"],
+            "order": list(SUITE_ORDER),
             "sources": sources,
         },
     )
@@ -926,8 +1278,23 @@ def supervise_created(
         guard(settings)
         admitted = qualification.document(settings.output / "admitted.json")
         require(
-            admitted.get("status") == "complete_admitted_measurement",
-            "Missing admitted measurement",
+            admitted.get("status") == "complete_admitted_measurement"
+            and admitted.get("schema_version") == 2
+            and admitted.get("protocol") == SUITE_PROTOCOL
+            and admitted.get("scope") == SUITE_SCOPE
+            and admitted.get("order") == list(SUITE_ORDER),
+            "Missing complete frozen diverse-suite admission",
+        )
+        benchmark = qualification.document(settings.output / "benchmark.json")
+        require(
+            admitted.get("benchmark_sha256")
+            == qualification.digest(settings.output / "benchmark.json")
+            and admitted.get("workload_sha256")
+            == benchmark.get("workload_sha256")
+            == hashlib.sha256(
+                qualification.canonical(benchmark.get("workload"))
+            ).hexdigest(),
+            "Admitted measurement is not bound to this complete frozen workload",
         )
         values = mapping(admitted.get("metrics"))
         require(
@@ -938,8 +1305,10 @@ def supervise_created(
         qualification.save(
             settings.output / "measurement.json",
             {
-                "schema_version": 1,
+                "schema_version": 2,
                 "status": "complete_admitted_measurement",
+                "protocol": SUITE_PROTOCOL,
+                "workload_sha256": admitted["workload_sha256"],
                 "metrics": metrics,
                 "admitted_sha256": qualification.digest(
                     settings.output / "admitted.json"

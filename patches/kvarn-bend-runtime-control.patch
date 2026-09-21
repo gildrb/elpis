@@ -1,0 +1,106 @@
+diff --git a/python/sglang/srt/mem_cache/kvarn_bend_plan.py b/python/sglang/srt/mem_cache/kvarn_bend_plan.py
+--- a/python/sglang/srt/mem_cache/kvarn_bend_plan.py
++++ b/python/sglang/srt/mem_cache/kvarn_bend_plan.py
+@@ -15,7 +15,7 @@
+ from typing import TYPE_CHECKING
+ 
+ if TYPE_CHECKING:
+-    from bend.adapter import SpeculationPolicy
++    from bend.adapter import RuntimePolicy, SpeculationPolicy
+ 
+ 
+ BEND_ARTIFACT_DIRECTORY = Path("/opt/qwen/bend")
+@@ -103,13 +103,22 @@
+ 
+ 
+ @cache
++def native_bend_runtime() -> RuntimePolicy:
++    """Admit immutable compiled host actions once, outside allocation/capture hotpaths."""
++    from bend.adapter import checked_runtime
++
++    return checked_runtime(BEND_ARTIFACT_DIRECTORY)
++
++
++@cache
+ def native_bend_plan() -> KVarNBendPlan:
+-    """Admit one immutable plan/speculation closure before allocation or capture."""
++    """Admit the immutable plan/speculation/runtime closure before allocation or capture."""
+     from bend.adapter import checked_plan, checked_speculation
+ 
+     directory = BEND_ARTIFACT_DIRECTORY
+     decoded = checked_plan(directory, 262144, 263168, 128)
+     speculation = checked_speculation(directory)
++    _ = native_bend_runtime()
+     if set(decoded) != {*_FIELDS, "schema", "free_pages"}:
+         raise ValueError("KVarN Bend plan has missing or unexpected fields")
+     if _integer(decoded["schema"], "schema") != 2:
+diff --git a/python/sglang/srt/mem_cache/kvarn/pool.py b/python/sglang/srt/mem_cache/kvarn/pool.py
+--- a/python/sglang/srt/mem_cache/kvarn/pool.py
++++ b/python/sglang/srt/mem_cache/kvarn/pool.py
+@@ -11,6 +11,7 @@
+ import torch
+ from sglang.srt.mem_cache.memory_pool import KVCache
+ from sglang.srt.mem_cache.kvarn_budget import qualification_page_count
++from sglang.srt.mem_cache.kvarn_bend_plan import native_bend_runtime
+ from .types import KVarNCapacity, KVarNLayerView, KVarNLayout, KVarNWorkspace
+ from .kernels import gather_visible, store_tile
+ 
+@@ -199,14 +200,21 @@
+     def mirrored_tail_slots(self) -> int:
+         """Read a completed current snapshot, or synchronously recount once."""
+         self._require_outside_capture("free-slot mirror read")
+-        if self._free_slot_mirror_epoch != self._free_slot_epoch:
+-            return self.refresh_free_slot_mirror_exact()
+-        if self._free_slot_pending:
++        epoch_current = self._free_slot_mirror_epoch == self._free_slot_epoch
++        event_ready = False
++        if epoch_current and self._free_slot_pending:
+             if self._free_slot_event is None:
+                 raise RuntimeError("pending free-slot mirror has no completion event")
+-            if not self._free_slot_event.query():
+-                return self.refresh_free_slot_mirror_exact()
+-            self._free_slot_pending = False
++            event_ready = self._free_slot_event.query()
++        # TransactionLaws.free_policy_refinement/free_epoch_refinement connect
++        # these observations to ReadMirror (1) or ExactRecount (0). CUDA event
++        # truth, epoch maintenance and ownership remain trusted native facts.
++        action = native_bend_runtime().free_action(
++            self._free_slot_pending, event_ready, epoch_current
++        )
++        if action == 0:
++            return self.refresh_free_slot_mirror_exact()
++        self._free_slot_pending = False
+         return int(self._free_slot_mirror)
+ 
+     def clear(self) -> None:
+@@ -691,6 +699,8 @@
+                 slot = int(view.page_to_tail_slot[dummy_page].item())
+                 if not 0 <= slot < 8 or int(view.tail_to_page[slot].item()) != dummy_page:
+                     raise ValueError("only the registered empty dummy may retain a raw slot")
++        # Preload before native replay; portable constructors require no artifacts.
++        _ = native_bend_runtime()
+         self._qualification_mode = requested_mode
+ 
+     def check_native_status(self) -> None:
+@@ -749,9 +759,19 @@
+     def finish_status_mirror(self) -> None:
+         """Publication gate for the overlapped status read."""
+         self._require_outside_capture("status mirror finish")
+-        if not self._status_mirror_armed:
++        # TransactionLaws.status_policy_refinement/status_ready_irrelevant select
++        # RejectUnarmed (0), SynchronizeThenCheck (1), or CheckImmediately (2).
++        # False means readiness was not queried, not that the event is incomplete:
++        # both readiness rows require the original synchronize/error observation.
++        # The policy does not prove CUDA completion or pinned-buffer ownership.
++        action = native_bend_runtime().status_action(
++            self._status_mirror_armed, self._status_event is not None, False
++        )
++        if action == 0:
+             raise RuntimeError("status mirror was not armed before finish")
+-        if self._status_event is not None:
++        if action == 1:
++            if self._status_event is None:
++                raise RuntimeError("status mirror synchronization requires a completion event")
+             self._status_event.synchronize()
+         self._status_mirror_armed = False
+         self._raise_if_bad_status(int(self._status_mirror))

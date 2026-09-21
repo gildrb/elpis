@@ -1,0 +1,33 @@
+diff --git a/python/sglang/kernels/ops/kvarn/decode.py b/python/sglang/kernels/ops/kvarn/decode.py
+--- a/python/sglang/kernels/ops/kvarn/decode.py
++++ b/python/sglang/kernels/ops/kvarn/decode.py
+@@ -165,9 +165,9 @@
+                     mask=row_ok[:, None], other=0.0).to(tl.float32)
+         query_ok = tl.sum((tl.abs(q) <= 3.402823466e38).to(tl.int32), 1) == D
+         bad_meta = tl.sum((row_real & ~metadata_ok).to(tl.int32)) > 0
+-        tl.atomic_or(Status, tl.where(bad_meta, 1, 0))
++        tl.atomic_or(Status, 1, mask=bad_meta)
+         bad_query = tl.sum((row_ok & ~query_ok).to(tl.int32)) > 0
+-        tl.atomic_or(Status, tl.where(bad_query, 1, 0))
++        tl.atomic_or(Status, 1, mask=bad_query)
+         q = tl.where(query_ok[:, None], q, 0.0)
+         rotated_q = q
+         for bit in tl.static_range(0, 8 if D == 256 else 7):
+@@ -200,7 +200,7 @@
+             needed = tl.sum(
+                 (row_ok & (upper_row > logical * 128) & (lower_row < (logical + 1) * 128)).to(tl.int32)
+             ) > 0
+-            tl.atomic_or(Status, tl.where(needed & ~page_ok, 1, 0))
++            tl.atomic_or(Status, 1, mask=needed & ~page_ok)
+             preview = tl.load(Preview + page, mask=page_ok, other=0)
+             sink = tl.load(Sink + page, mask=page_ok, other=0)
+             raw_ok = page_ok & (slot >= 0)
+@@ -219,7 +219,7 @@
+                     & (position < upper_row[:, None])
+                 valid = active & written[None, :] & page_ok
+                 missing = tl.sum((active & page_ok & ~written[None, :]).to(tl.int32)) > 0
+-                tl.atomic_or(Status, tl.where(missing, 1, 0))
++                tl.atomic_or(Status, 1, mask=missing)
+                 # P0-C representation gating: each pass runs only when at
+                 # least one (row, token) lane of this block actually selects
+                 # that representation. use_raw mirrors decode_head, so a lane

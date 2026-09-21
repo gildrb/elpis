@@ -331,10 +331,12 @@ rubric range, not an assumed score ceiling.
 The proof chain is therefore: independent reference and input domain; legal
 transformations with semantic/resource certificates; compiled implementation and
 ABI refinement; legitimate runtime measurements; goal-indexed comparison; and,
-only where available, search-coverage/upper-bound certificates. The current Bend
-startup proof establishes only its stated allocation/layout/serialization laws.
-New objective laws establish decision algebra, not the missing GPU, recurrence,
-publication, numerical, measurement or search-coverage obligations.
+only where available, search-coverage/upper-bound certificates. The Bend startup
+proof establishes its stated allocation/layout/serialization laws; objective
+laws establish decision algebra. The subsequently checked transaction,
+ownership, ABI and numerical domains below establish their pure contracts,
+not the remaining native GPU, recurrence, publication, measurement or
+search-coverage obligations.
 
 ## Evidence currently available
 
@@ -356,12 +358,12 @@ remains a real limitation. Enabling vision code does not prove memory capacity.
 
 The only admitted compiler is the pinned original **Bend 2.0.20** release, with
 its retained compiler/toolchain identity; an arbitrary installed version is not
-equivalent. Root `PROOF.bend` passed unchanged (`All terms check`, exit 0,
+equivalent. The earlier root `PROOF.bend` check passed (`All terms check`, exit 0,
 99.59 s) under the recorded resource settings: a 1073741824-byte stack limit,
 disabled core dumps and `BUN_JSC_maxPerThreadStackUsage=536870912`, with telemetry
 disabled. This used the original release, not a patched checker.
 
-A real CUDA acceptance-helper run passed **128 masks, 5500 rows and 80
+The earlier real CUDA acceptance-helper run passed **128 masks, 5500 rows and 80
 invocations**, exercising eager and graph paths. This is compiled-policy plus
 GPU acceptance-helper evidence, not full worker/KV-write/Mamba integration,
 recurrence, publication or numerical-quality proof. The separate component
@@ -391,6 +393,85 @@ Upstream already reserves **262528 RoPE rows**; the redundant constructor patch
 was removed. That source correction is not itself capacity evidence. The earlier
 startup reports below retain their original identities and chronology; one later
 completed request and sampled math measurement do not establish full qualification.
+
+### Checked domains and direct GPU/runtime-control smoke
+
+The subsequent root proof passed with **original, unmodified Bend 2.0.20**
+(`All terms check`, exit 0, **127.01 s**) under the same 1073741824-byte stack,
+disabled-core-dump and `BUN_JSC_maxPerThreadStackUsage=536870912` settings.
+The four isolated proof domains passed in **0.21–0.26 s** each. The additions
+are 17 Bend source files: transaction specification/implementation/laws/proofs
+plus `RUNTIME.bend`, and four files each for ownership, ABI and numerics.
+The root [proof entry point](../PROOF.bend) imports their proof modules.
+
+| Checked domain | Representative statements | Native boundary still required |
+|---|---|---|
+| [Transaction](../bend/transaction_laws.bend) | `trace_refinement`, stale/unchecked publication rejection, `nonreset_poison`, all-pool publication, cancellation drain, graph/eager producer contracts, mirror rearm/reset and exact policy wire | Truthful complete producer observations, stream ordering, status generations and all-writer/reference quiescence |
+| [Ownership](../bend/ownership_laws.bend) | Lease-generation ABA rejection, no release with references/readers/writers, reserved dummy protection, raw/preview/sealed transitions and committed-page sealing | Actual generations/refcounts, exact frontier completeness, global free-list and slot-map refinement; free-slot epochs are not page generations |
+| [ABI](../bend/abi_laws.bend) | Four-word/block-eight transport, bonus provenance, strides, signed widening, low-bit narrowing and wrapping addition | Pointer/extent/alias/lifetime observations, C/CUDA lowering; logical lengths additionally require `SafeAdvance` and nonnegative representability |
+| [Numerical](../bend/numerical_laws.bend) | Finite classification, ties-even/ties-away, packed-code round trip, bounded error, conditional strict argmax, identity-bound complete evidence | Native floating arithmetic, NumPy replay equivalence, loaded-model recurrence and full-vocabulary per-step margins; no task-quality theorem |
+
+The exact **31-patch** image is
+`sha256:e40fc9cbb0323826646d72bb497887e9328cc0781a5aaca0a66b3c063c97e4d5`.
+[Dockerfile](../Dockerfile) uses the original `bend-2.0.20-linux-x64` release,
+`/usr/bin/clang-19` for retained CPU artifacts and
+`/usr/local/cuda/lib64/libnvrtc.so` for the SM86 CUDA artifact, on the pinned
+SGLang v0.5.19 base
+`sha256:d6e7288627be8b02be88e4bba38e73f6d50e2826869f753c13a4c4385ab3eda9`.
+The GPU reports identify RTX 3090 / SM86, CUDA **13.0**, Torch **2.13.0+cu130**
+and, for direct acceptance, Triton **3.7.1**. Retained source/build/native
+identity hashes bind the smoke reports to their artifacts.
+
+Private evidence is at
+`/tmp/litos-recovery-ops-id8q0yvb/bend20-runtime-evidence-3`:
+
+- `bend-flat-gpu.json`: **passed**, direct original Bend-compiled GPU leaf,
+  **128 masks / 5500 rows / 80 invocations**, batches 1/17/128/129, eager and
+  graph replay, unused output cells checked, **zero policy uploads**. This is
+  new direct-leaf evidence, not a relabeling of the historical table helper.
+  It is not evidence for KV writes, worker integration, accuracy or throughput.
+- `runtime-control-gpu.json`: **passed, 18 cases**, elapsed **19.041 s**;
+  `pool.clear + cuda.synchronize` cleanup passed. The fourth CPU artifact,
+  [RUNTIME.bend](../bend/RUNTIME.bend), supplies compiled policies consumed
+  through [the runtime-control patch](../patches/kvarn-bend-runtime-control.patch)
+  by actual `mirrored_tail_slots()` and `finish_status_mirror()` methods.
+  Coverage includes status **0/1/2/4/6**, unarmed rejection, rearm while a real
+  writer is pending, current mirrors, write/release epoch invalidation,
+  exact recount, busy refresh, draining both writers at reset and safe pinned
+  storage reuse. Named pending cases required actual CUDA event queries to
+  observe incompletion, rather than mocked completion.
+
+The host-control smoke used **two small BF16 layers, four usable physical
+pages and eight raw slots per layer** with real portable ownership methods.
+Native-profile admission/attention, model execution, worker publication
+callbacks and full worker graph replay were not exercised by that smoke.
+The eventless status branch and synthetic missing-event corruption were not
+tested. Existing asynchronous D2H mirrors remain the native boundary; the
+integration adds neither per-token subprocess execution nor production D2H
+transfers. These finite observations do not authenticate uninstrumented native
+generations/refcounts/frontiers or establish compiler/CUDA semantics.
+
+Two earlier retained preflight attempts failed before runtime cases: a stale
+private schema gate, then a missing private package path. Both were corrected
+only in fresh private diagnostics; both authenticated FP8 recoveries completed.
+They are not source-kernel failure evidence. Numerical thresholds, graders and
+benchmark protocol were unchanged. The adapter `ty` check passed; Ruff
+diagnostics remain unsuppressed.
+
+The image subsequently reached **authenticated native API readiness** after a
+**78.07 s** readiness wait, candidate
+`e3409f368646b05a28b4652b580849aa9019ae6a3f5c5b12ce8ef5755afec9a1`.
+The existing unchanged `bench.decode` subsequently **completed, exit 0 in
+126.98 s**, with one repetition at all **1024/8192/32768** depths under native
+**262144**. Actual prompt counts were **1076/8244/32821**; every request emitted
+**1024 completion tokens**, with `finish_reason=length`. The report is below
+the same private evidence directory at
+`native-c1-smoke/decode-depth-matrix.json`. This is real native serving smoke,
+**not a comparable canonical primary-rate result, capacity qualification or
+quality qualification**. Best measured run 2 remains
+**93.0255 model-call tok/s versus 92.7021**, tiny reward **2/3**; it does not
+qualify this image or full quality. Optimization resumes from that measured
+baseline, not from a claimed speedup inferred from proofs.
 
 ### Component numerical run and harness controls
 

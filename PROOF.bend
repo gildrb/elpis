@@ -8,6 +8,10 @@ import ./bend/spec.bend as Spec
 import ./bend/PLAN.bend as Wire
 import ./bend/selection_proof.bend as SelectionProof
 import ./bend/speculation_proof.bend as SpeculationProof
+import ./bend/transaction_proof.bend as TransactionProof
+import ./bend/ownership_proof.bend as OwnershipProof
+import ./bend/abi_proof.bend as AbiProof
+import ./bend/numerical_proof.bend as NumericalProof
 
 def add_succ(n: Nat, -i: Nat) -> {Nat.add(n, 1n+i) == 1n+Nat.add(n, i) : Nat}:
   match n:

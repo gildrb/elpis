@@ -1,8 +1,9 @@
-# Executed startup, objective, and greedy speculation contracts.
-# Universal statements quantify all Nat depths/starts and all layout dimensions.
-# Native specialization is exact full output, not a collection of examples.
-# Foreign IO/Base implementation, the compiler, native CUDA and F32 are outside
-# this theorem boundary. The engine must independently validate actual backing.
+# Executed startup, objective, speculation and host mirror-control contracts,
+# plus explicit transaction, ownership, ABI and numerical refinement obligations.
+# Universal laws keep arbitrary logical identities, counts and declared domains;
+# native specialization is exact output, not representative samples.
+# Conditional state laws do not establish absent native observations. Compiler,
+# Base/foreign IO, CUDA ordering and machine arithmetic retain explicit boundaries.
 import Base
 import ./bend/range.bend as Range
 import ./bend/control.bend as Control
@@ -13,6 +14,10 @@ import ./bend/speculation_laws.bend as SpeculationLaws
 import ./bend/speculation.bend as Speculation
 import ./bend/speculation_spec.bend as SpeculationSpec
 import ./bend/SPECULATE.bend as SpeculationWire
+import ./bend/transaction_laws.bend as TransactionLaws
+import ./bend/ownership_laws.bend as OwnershipLaws
+import ./bend/abi_laws.bend as AbiLaws
+import ./bend/numerical_laws.bend as NumericalLaws
 
 # Balanced parallel decomposition preserves the independent ascending loop.
 law tree_is_seq:

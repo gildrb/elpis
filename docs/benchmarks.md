@@ -13,13 +13,90 @@ See [qualification](qualification.md) and [machine-readable matrix](../bench/mat
 Use one RTX 3090, TP1, an exclusive quiet endpoint, and exact image, ordered patch,
 launch and target/draft inventory hashes. Save tokenizer/template identity,
 sampling settings, actual input IDs, output budget, seed, cache condition and
-power policy. Reject failed/truncated requests; do not count them as fast outputs.
+power policy. Record failures and truncations explicitly; operational completion
+is not a successful quality result. Each lane below states its admission rule.
 Never combine percentage gains from different prompts or configurations.
 
 Quality uses the frozen **Prime Envs + Verifiers** profiles under `eval/`.
-`bench/` contains engineering measurements only. Current MRCR/GraphWalks
-file-search tasks do not prove direct-context capability. Historical direct
-runtimes under `eval/direct/` must pass their separate compatibility gates first.
+`bench/` measures and orchestrates those unchanged native tasks; it does not
+define their prompts, graders or a combined intelligence score. Current
+MRCR/GraphWalks file-search tasks do not prove direct-context capability.
+Historical direct runtimes under `eval/direct/` require their separate native
+source, input and raw-result admission.
+
+### Frozen finite autoresearch suite
+
+The varied suite is a **new comparison segment requiring a fresh baseline**.
+Its measured successful runtime is pending; the existing 2400-second bound is
+a deadline, not evidence that all lanes finish within an hour. Do not compare
+its results to the old math/C1-only 93 tok/s result as a like-for-like run.
+
+Every invocation runs these mandatory lanes, exactly once in this order:
+
+| Order | Native workload | Frozen selection and settings |
+| --- | --- | --- |
+| 1 | `tiny/aime25` | Unchanged three native seed-zero shuffled tasks, one rollout each, C1, greedy/thinking, 32768 output-token budget |
+| 2 | `diverse/i3-logic` | First native eligible source-order task, one rollout, C1, greedy/thinking, 8192 output-token budget; unchanged native grader |
+| 3 | Direct `diverse/graphwalks-bfs` | First native filtered source-order BFS row, frozen message/token hashes, 178769 templated input tokens, one rollout, 8192 output-token budget, original sampling parameters and exact BFS grader; new-segment request seed zero and native programmatic client with transport retries zero |
+| 4 | C1 depth matrix | Unchanged 1024/8192/32768-input depths, five repetitions each in depth-then-repetition order, 1024 output-token budget and existing sampling/cache/nonce policy |
+
+The long lane retains temperature 0.6, top-p 0.95, top-k 20 and thinking.
+Its native `131073-262144` filter counts prompt characters, not tokens;
+the independently frozen templated input count is 178769.
+Request seed zero is a new expanded-segment freeze, not a historical config
+default. The existing native environment/selection seed remains zero.
+
+The short producer remains `eval/scripts/run diverse i3-logic --measure-power
+--output <fresh-short-root>`. Direct collection uses
+`python -m bench.direct_context collect --output <fresh-long-root> --key-file
+<private-key-file> --container <owned-container-id>`, then independently replays
+native evidence admission. These are orchestrated by `bash autoresearch.sh`
+inside the existing already-owned maintenance window; they do not deploy,
+recover, promote, flush a shared endpoint or change power policy.
+
+The supervisor retains `supervisor.json` immediately. Before the first model
+request, its deadline-supervised worker freezes both modern native task plans,
+the direct GraphWalks identity, every lane's config/source/data hash closure,
+repository producer snapshots and exact order into `benchmark.json`. Its
+canonical `workload_sha256` excludes only the fresh modern launch-config path,
+not the launch bytes or selected task hashes. Admission binds that workload
+and benchmark digest, replays all lane-specific raw validators, requires the
+same serving instance, and rejects any changed/missing lane. Old suite artifacts
+cannot supply complete admission for this protocol.
+
+`model_call_output_tok_s` remains the **math-only primary**:
+all three math episodes' completion tokens divided by the sum of their native
+model-call wall intervals. These intervals cover request send through the
+fully received response, including prefill/decode/HTTP, not pure decode or
+GPU time. Incorrect and length-truncated but operationally complete graded
+answers stay in both the throughput denominator and the original quality
+report. Failed/missing calls, invalid clocks and skipped episodes reject the
+entire measurement; no faster subset is admitted.
+
+Report `short_i3_model_call_output_tok_s` and `short_i3_reward` separately.
+Report `long_graphwalks_model_call_output_tok_s` and
+`long_graphwalks_reward` separately, retaining the historical native model-call
+clock's exact scope as well as wrapper/native-evaluator durations. Do not pool
+these clocks, rewards or C1 committed-counter windows into the math primary.
+The same inclusion rule applies to the short and long lanes: an operationally
+complete, natively graded length-truncated answer retains its official reward,
+actual tokens and full model-call duration, with its truncation/finish status.
+Operational errors or incomplete evidence still reject the entire suite.
+Each native lane retains actual input/completion usage, original reward
+components, truncation/error evidence, full requests/responses or traces and
+producer logs. Modern native prompt usage excludes cache reads: reported
+`input_tokens` adds available cached-input usage back, while retaining nullable
+cache telemetry. Reasoning tokens are already a completion-token subset.
+C1 rates still pool committed counter tokens over their own counter windows;
+TTFT still averages the five observations per depth.
+
+The single shared 2400-second limit, guardian recovery headroom, termination
+reserve and owned-descendant cleanup remain unchanged. Selection, startup,
+all four lanes and raw admission consume that same budget. A timeout or
+missing case fails the run, retaining partial/failure artifacts and emitting
+no successful metric lines. Successful whole-suite elapsed time is separate
+from every per-lane model-call clock. This small suite is not full quality,
+262144-token capability, or promotion qualification.
 
 ## 2. Use the official serving benchmark
 

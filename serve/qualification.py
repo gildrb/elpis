@@ -697,10 +697,142 @@ def tiny_native_plan(provenance: Path) -> dict[str, object]:
     return plan
 
 
+DIVERSE_NATIVE_PLAN = r"""
+import hashlib
+import json
+import os
+from pathlib import Path
+import sys
+import tempfile
+
+root, provenance, snapshot = map(Path, sys.argv[1:])
+os.environ.update({
+    "HOME": str(root / ".cache/home"),
+    "HF_HOME": str(root / ".cache/huggingface"),
+    "HF_HUB_CACHE": str(root / ".cache/huggingface/hub"),
+    "HF_HUB_OFFLINE": "1", "HF_DATASETS_OFFLINE": "1",
+    "HF_HUB_DISABLE_TELEMETRY": "1",
+})
+with tempfile.TemporaryDirectory(prefix=".logic-selection.", dir=provenance.parent) as cache:
+    os.environ["HF_DATASETS_CACHE"] = cache
+    from pydantic_config import cli
+    from verifiers.v1.cli.resolve import narrow_config
+    from verifiers.v1.configs.cli.eval import EvalConfig
+    from verifiers.v1.utils.loaders import load_taskset
+
+    # Use the actual native CLI merger, including nested sampling overrides.
+    argv = ["@", str(root / "configs/local.toml"),
+            "@", str(provenance / "i3-logic.toml"),
+            "--no-rich", "--no-push",
+            "--env.taskset.dataset.name", str(snapshot / "logic"),
+            "--env.taskset.dataset.subset", "default"]
+    config = cli(narrow_config(EvalConfig, argv), args=argv)
+    taskset = load_taskset(config.env.taskset)
+    selected = taskset.shuffle() if config.shuffle else taskset
+    if config.num_tasks is not None:
+        selected = selected.head(config.num_tasks)
+    tasks, source_rows = [], []
+    for task in selected:
+        tasks.append({"key": task.key, "hash": task.hash, "type": type(task).__name__})
+        source_rows.append({
+            "idx": task.data.idx,
+            "task_name": task.data.task_name,
+            "prompt_sha256": hashlib.sha256(task.data.prompt.encode()).hexdigest(),
+        })
+    resolved = config.model_dump(mode="json")
+    resolved.pop("run")
+    resolved.pop("output_dir")
+    print(json.dumps({"selection_rule": "first_native_eligible_source_order",
+                      "tasks": tasks, "source_rows": source_rows,
+                      "resolved_config": resolved}))
+"""
+
+
+def diverse_native_plan(provenance: Path) -> dict[str, object]:
+    """Freeze the native logic row before results, without changing its grader."""
+    root = ROOT / "eval"
+    with (root / "configs/diverse/i3-logic.toml").open("rb") as stream:
+        settings_value: object = tomllib.load(stream)
+    settings = mapping(settings_value)
+    require(
+        all(
+            settings.get(key) == value
+            for key, value in (
+                ("num_tasks", 1),
+                ("num_rollouts", 1),
+                ("shuffle", False),
+                ("max_concurrent", 1),
+            )
+        )
+        and mapping(settings.get("sampling")) == {"max_tokens": 8192},
+        "Diverse logic requires one source-order C1 rollout and an 8192-token call budget",
+    )
+    env = mapping(settings.get("env"))
+    agent = mapping(env.get("agent"))
+    require(
+        mapping(env.get("taskset")) == {"id": "i3-logic"}
+        and agent.get("max_turns") == 1
+        and agent.get("max_output_tokens") == 8192,
+        "Diverse logic requires unchanged native task defaults and an 8192-token episode budget",
+    )
+    runtime = mapping(agent.get("runtime"))
+    runtime["image"] = (
+        (root / ".cache/sandbox-image").read_text(encoding="utf-8").strip()
+    )
+    agent["runtime"] = runtime
+    env["agent"] = agent
+    settings["env"] = env
+    with (provenance / "i3-logic.toml").open("rb") as stream:
+        launch_value: object = tomllib.load(stream)
+    require(
+        mapping(launch_value) == settings,
+        "Diverse logic launch differs beyond the pinned sandbox image",
+    )
+    dataset = mapping(
+        mapping(document(root / "datasets.lock")["huggingface"])["i3-logic"]
+    )
+    snapshot = (
+        root
+        / ".cache/huggingface/hub"
+        / ("datasets--" + text(dataset["repo"]).replace("/", "--"))
+        / "snapshots"
+        / text(dataset["revision"])
+    )
+    try:
+        result = subprocess.run(
+            [
+                str(root / ".venv/bin/python"),
+                "-I",
+                "-c",
+                DIVERSE_NATIVE_PLAN,
+                str(root),
+                str(provenance),
+                str(snapshot),
+            ],
+            capture_output=True,
+            text=True,
+            timeout=120,
+            check=False,
+        )
+    except subprocess.TimeoutExpired as error:
+        raise ValueError(
+            "Pinned offline logic selection did not finish; no partial plan is admissible"
+        ) from error
+    require(result.returncode == 0, "Pinned offline native logic selection failed")
+    plan = mapping(json.loads(result.stdout))
+    require(
+        plan.get("selection_rule") == "first_native_eligible_source_order"
+        and len(sequence(plan.get("tasks"))) == 1
+        and len(sequence(plan.get("source_rows"))) == 1,
+        "Diverse logic requires exactly the first native eligible row",
+    )
+    return plan
+
+
 def frozen_inputs(
     profile: str, environment: str, provenance: Path
 ) -> dict[str, object]:
-    """Hash existing frozen inputs and retain tiny's native pre-result selection."""
+    """Hash frozen inputs and retain sentinel profiles' native pre-result selection."""
     root = ROOT / "eval"
     files = [
         root / name
@@ -791,6 +923,9 @@ def frozen_inputs(
             environment == "aime25", "Tiny is only the frozen three-task AIME25 sample"
         )
         result["selection"] = tiny_native_plan(provenance)
+    if profile == "diverse":
+        require(environment == "i3-logic", "Diverse is only the frozen logic sentinel")
+        result["selection"] = diverse_native_plan(provenance)
     return result
 
 
@@ -1843,7 +1978,8 @@ def evaluation_gate(
     environment: str,
 ) -> dict[str, object]:
     require(
-        environment in profile_environments(profile),
+        environment
+        in (("i3-logic",) if profile == "diverse" else profile_environments(profile)),
         "Environment is outside the explicit evaluation profile",
     )
     provenance = directory.parent / "provenance"
@@ -1905,7 +2041,10 @@ def evaluation_gate(
     require(taskset.get("id") == environment, f"{environment}: wrong upstream taskset")
     with (ROOT / "eval/configs/local.toml").open("rb") as stream:
         local: object = tomllib.load(stream)
-    for key, expected in mapping(mapping(local)["sampling"]).items():
+    expected_sampling = mapping(mapping(local)["sampling"])
+    if profile == "diverse":
+        expected_sampling["max_tokens"] = 8192
+    for key, expected in expected_sampling.items():
         require(
             mapping(config.get("sampling")).get(key) == expected,
             f"{environment}: changed sampling or output budget",
@@ -1925,11 +2064,11 @@ def evaluation_gate(
     )
     config.pop("run", None)
     config.pop("output_dir", None)
-    if profile == "tiny":
+    if profile in ("tiny", "diverse"):
         selection = mapping(frozen.get("selection"))
         require(
             config == mapping(selection.get("resolved_config")),
-            "Tiny resolved native taskset, harness, reasoning, budget or runtime differs from the frozen plan",
+            f"{profile}: resolved native taskset, harness, reasoning, budget or runtime differs from the frozen plan",
         )
     tasks: list[dict[str, object]] = []
     reward_components: list[object] = []
@@ -1986,6 +2125,14 @@ def evaluation_gate(
             and tasks == sequence(mapping(frozen.get("selection")).get("tasks")),
             "Tiny requires the exact preselected seed-zero three-task, one-rollout native multiset",
         )
+    if profile == "diverse":
+        require(
+            planned_tasks == 1
+            and planned_rollouts == 1
+            and len(episodes) == 1
+            and tasks == sequence(mapping(frozen.get("selection")).get("tasks")),
+            "Diverse logic requires the exact preselected first eligible native task and one rollout",
+        )
     for episode in episodes:
         require(
             episode.operational_ok
@@ -2011,6 +2158,8 @@ def evaluation_gate(
         "profile": profile,
         "scope": "sampled_math_only_not_full_qualification"
         if profile == "tiny"
+        else "logic_sentinel_only_not_full_qualification"
+        if profile == "diverse"
         else "core_suite",
         "weighted_reward_mean": math.fsum(rewards) / len(rewards),
         "reward_components": reward_components,
@@ -2376,7 +2525,15 @@ def main() -> int:
     freeze.add_argument(
         "--profile",
         required=True,
-        choices=("smoke", "tiny", "quick", "full", "agentic", "agentic-full"),
+        choices=(
+            "smoke",
+            "tiny",
+            "diverse",
+            "quick",
+            "full",
+            "agentic",
+            "agentic-full",
+        ),
     )
     freeze.add_argument("--environment", required=True)
     freeze.add_argument("--output", type=Path, required=True)
@@ -2386,7 +2543,7 @@ def main() -> int:
         help="Validate one native profile entry; never full-suite qualification or promotion",
     )
     evaluation.add_argument(
-        "--profile", required=True, choices=("tiny", "quick", "full")
+        "--profile", required=True, choices=("tiny", "diverse", "quick", "full")
     )
     evaluation.add_argument("--environment", required=True)
     evaluation.add_argument("--directory", type=Path, required=True)

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Check Bend 2.0.20 proofs and retain three CPU serving-policy programs.
+"""Check Bend 2.0.20 proofs and retain four CPU serving-policy programs.
 
   python3 bend/adapter.py generate --output /tmp/qwen-bend --bend /path/to/bend
   python3 bend/adapter.py compile --directory /tmp/qwen-bend --cc clang-19
@@ -8,9 +8,9 @@
       --context 262144 --pool 263168 --page-size 128
 
 Generation checks the actual root PROOF.bend, then emits C from bend/PLAN.bend,
-bend/SELECT.bend and bend/SPECULATE.bend. Compilation happens in the target
-runtime. Serving loads the planner and greedy speculation table once
-per startup; qualification loads the objective table once.
+bend/SELECT.bend, bend/SPECULATE.bend and bend/RUNTIME.bend. Compilation happens
+in the target runtime. Serving loads the planner, greedy speculation table and
+mirror action tables once per startup; qualification loads the objective table once.
 Retained hashes bind artifacts, not their trustworthiness: Bend's checker/compiler,
 Base intrinsics, foreign IO, clang and the host runtime remain trusted. This
 is not a CUDA/F32, capacity, quality, or compiler-correctness proof. Engine
@@ -50,6 +50,23 @@ SOURCE_NAMES = (
     "bend/speculation_laws.bend",
     "bend/speculation_proof.bend",
     "bend/SPECULATE.bend",
+    "bend/transaction_spec.bend",
+    "bend/transaction.bend",
+    "bend/transaction_laws.bend",
+    "bend/transaction_proof.bend",
+    "bend/ownership_spec.bend",
+    "bend/ownership.bend",
+    "bend/ownership_laws.bend",
+    "bend/ownership_proof.bend",
+    "bend/numerical_spec.bend",
+    "bend/numerical.bend",
+    "bend/numerical_laws.bend",
+    "bend/numerical_proof.bend",
+    "bend/abi_spec.bend",
+    "bend/abi.bend",
+    "bend/abi_laws.bend",
+    "bend/abi_proof.bend",
+    "bend/RUNTIME.bend",
     "bend/adapter.py",
     "bend/native_build.py",
     "bend/native.py",
@@ -118,6 +135,8 @@ POLICY_HEADER = "QWEN_OBJECTIVE_POLICY_V1\nROLES\n"
 POLICY_END = "END_QWEN_OBJECTIVE_POLICY\n"
 SPECULATION_HEADER = "QWEN_DFLASH_GREEDY_V1\n8\n128\n4\n"
 SPECULATION_END = "END_QWEN_DFLASH_GREEDY\n"
+RUNTIME_HEADER = "QWEN_RUNTIME_CONTROL_V1\nFREE_MIRROR\n8\n"
+RUNTIME_END = "END_QWEN_RUNTIME_CONTROL\n"
 U32_MAX = (1 << 32) - 1
 HEADER = "QWEN_KVARN_PLAN_V2\n"
 FREE = "FREE_PAGES\n"
@@ -155,19 +174,23 @@ SPECULATION_EMIT_COMMAND = [
     "-o",
     "speculate.c",
 ]
+RUNTIME_EMIT_COMMAND = [BEND_COMMAND, "sources/bend/RUNTIME.bend", "-o", "runtime.c"]
 PLAN_COMMAND = ["./plan", "--gpu", "off"]
 POLICY_COMMAND = ["./select", "--gpu", "off"]
 SPECULATION_COMMAND = ["./speculate", "--gpu", "off"]
-PROGRAM_NAMES = ("plan", "select", "speculate")
+RUNTIME_COMMAND = ["./runtime", "--gpu", "off"]
+PROGRAM_NAMES = ("plan", "select", "speculate", "runtime")
 EMISSIONS = (
     (EMIT_COMMAND, "plan.c", "emit.json"),
     (POLICY_EMIT_COMMAND, "select.c", "emit-policy.json"),
     (SPECULATION_EMIT_COMMAND, "speculate.c", "emit-speculation.json"),
+    (RUNTIME_EMIT_COMMAND, "runtime.c", "emit-runtime.json"),
 )
 COMPILATIONS = (
     ("plan", "compile.json"),
     ("select", "compile-policy.json"),
     ("speculate", "compile-speculation.json"),
+    ("runtime", "compile-runtime.json"),
 )
 GENERATION_LOGS = ("version.json", "base.json", "proof.json") + tuple(
     log for _, _, log in EMISSIONS
@@ -175,12 +198,17 @@ GENERATION_LOGS = ("version.json", "base.json", "proof.json") + tuple(
 BUILD_LOGS = ("compiler-version.json",) + tuple(log for _, log in COMPILATIONS)
 SCOPE = (
     "Bend2 checks the filled root PROOF.bend and its transitive local laws; "
-    "the CPU planner, objective policy and greedy block8 speculation decisions are "
-    "compiled from bend/PLAN.bend, bend/SELECT.bend and bend/SPECULATE.bend. "
-    "Speculation acceptance and wire equivalence are proved against an independent "
-    "Bend specification. Base intrinsics, foreign IO, both compilers and the host "
-    "runtime are trusted, not proved. GPU consumption and execution are not proved. "
-    "No CUDA/F32, compiler-correctness, capacity, performance or quality claim."
+    "the CPU planner, objective policy, greedy block8 speculation decisions and "
+    "host mirror action tables are compiled from bend/PLAN.bend, bend/SELECT.bend, "
+    "bend/SPECULATE.bend and bend/RUNTIME.bend. Speculation acceptance and wire "
+    "equivalence are proved against an independent Bend specification. Runtime "
+    "tables select native host free-mirror and status-mirror actions only. "
+    "Transaction, ownership, numerical and ABI laws are abstract contracts, not "
+    "proofs of native events, epochs, ownership, machine arithmetic "
+    "or device addressing. "
+    "Base intrinsics, foreign IO, both compilers and the host runtime are trusted, "
+    "not proved. GPU completion, consumption and execution remain trusted native "
+    "facts. No CUDA/F32, compiler-correctness, capacity, performance or quality claim."
 )
 # String/comment masking preserves token separation, including @ #comment\n unsafe.
 LEXEMES = re.compile(r'"(?:\\.|[^"\\])*"|#[^\n]*|[A-Za-z_][A-Za-z0-9_.]*|[^\s]')
@@ -256,6 +284,47 @@ class SpeculationPolicy:
                 or not 1 <= row[3] <= 8
             ):
                 fail("Malformed compiled speculation row")
+
+
+@dataclass(frozen=True, slots=True)
+class RuntimePolicy:
+    """Compiled host actions; event/epoch observations remain the caller's trust boundary."""
+
+    free_mirror: tuple[int, ...]
+    status: tuple[int, ...]
+
+    def __post_init__(self) -> None:
+        """Require immutable complete tables and the two bounded action alphabets."""
+        for values, maximum in ((self.free_mirror, 1), (self.status, 2)):
+            if (
+                type(values) is not tuple
+                or len(values) != 8
+                or any(
+                    type(value) is not int or not 0 <= value <= maximum
+                    for value in values
+                )
+            ):
+                fail("Malformed compiled runtime action table")
+
+    def free_action(self, pending: bool, event_ready: bool, epoch_current: bool) -> int:
+        """Index pending bit0, readiness bit1, current epoch bit2; no host policy algebra."""
+        if (
+            type(pending) is not bool
+            or type(event_ready) is not bool
+            or type(epoch_current) is not bool
+        ):
+            fail("Runtime free-mirror observations must be exact booleans")
+        return self.free_mirror[pending | (event_ready << 1) | (epoch_current << 2)]
+
+    def status_action(self, armed: bool, event_exists: bool, event_ready: bool) -> int:
+        """Index armed bit0, event existence bit1, readiness bit2."""
+        if (
+            type(armed) is not bool
+            or type(event_exists) is not bool
+            or type(event_ready) is not bool
+        ):
+            fail("Runtime status-mirror observations must be exact booleans")
+        return self.status[armed | (event_exists << 1) | (event_ready << 2)]
 
 
 def digest(path: Path) -> str:
@@ -484,7 +553,7 @@ def source_closure(root: Path, base_root: Path) -> tuple[set[str], set[str]]:
     visit(root / "PROOF.bend", base=False)
     if local != {name for name in SOURCE_NAMES if name.endswith(".bend")}:
         fail(
-            "Root PROOF must retain exactly the required PLAN/SELECT/SPECULATE dependency closure"
+            "Root PROOF must retain exactly the required PLAN/SELECT/SPECULATE/RUNTIME dependency closure"
         )
     if "base.bend" not in trusted:
         fail("Generated programs must use the installed Base IO boundary")
@@ -609,7 +678,7 @@ def generate(output: Path, bend: str) -> None:
     write_json(
         output / "source.json",
         {
-            "schema": 5,
+            "schema": 6,
             "bend_version": BEND_VERSION.rstrip("\n"),
             "bend_origin": str(compiler),
             "sources": sources,
@@ -637,7 +706,7 @@ def source_identity(directory: Path) -> dict[str, object]:
             "scope",
         }
         or type(identity.get("schema")) is not int
-        or identity.get("schema") != 5
+        or identity.get("schema") != 6
         or identity.get("bend_version") != BEND_VERSION.rstrip("\n")
         or identity.get("scope") != SCOPE
     ):
@@ -741,7 +810,7 @@ def compile_programs(directory: Path, cc: str) -> None:
     write_json(
         directory / "build.json",
         {
-            "schema": 4,
+            "schema": 5,
             "source_sha256": digest(directory / "source.json"),
             "compiler": {
                 "path": str(compiler),
@@ -852,6 +921,38 @@ def speculation_record(policy: SpeculationPolicy) -> dict[str, object]:
     return {"schema": 1, "block_size": policy.block_size, "decisions": policy.decisions}
 
 
+def parse_runtime(text: str) -> RuntimePolicy:
+    """Decode the entire count-delimited action wire and its sole final newline."""
+    if not text.startswith(RUNTIME_HEADER) or not text.endswith(RUNTIME_END):
+        fail("Missing or malformed Bend2 runtime control protocol")
+    rows = text[len(RUNTIME_HEADER) : -len(RUNTIME_END)].split("\n")
+    if len(rows) != 19 or rows[8:10] != ["STATUS", "8"] or rows[-1] != "":
+        fail("Bend2 runtime action count or marker mismatch")
+    free_mirror, status = rows[:8], rows[10:-1]
+    if any(re.fullmatch(r"[01]", row) is None for row in free_mirror) or any(
+        re.fullmatch(r"[0-2]", row) is None for row in status
+    ):
+        fail("Bend2 runtime control contains invalid action codes")
+    return RuntimePolicy(
+        tuple(int(row) for row in free_mirror), tuple(int(row) for row in status)
+    )
+
+
+def read_runtime(directory: Path, *, record: Path | None = None) -> RuntimePolicy:
+    """Execute the original compiled CPU runtime table once, never per mirror access."""
+    evidence = run(RUNTIME_COMMAND, cwd=directory, record=record)
+    return parse_runtime(successful_output(evidence, RUNTIME_COMMAND))
+
+
+def runtime_record(policy: RuntimePolicy) -> dict[str, object]:
+    """Retain compiled actions without recreating the decision algebra in Python."""
+    return {
+        "schema": 1,
+        "free_mirror": list(policy.free_mirror),
+        "status": list(policy.status),
+    }
+
+
 def validate_request(plan: Plan, context: int, pool: int, page_size: int) -> None:
     """Independently check geometry, every page ID, headroom and packed layouts."""
     if set(plan) != set(FIELDS) | {"schema", "free_pages"}:
@@ -944,7 +1045,7 @@ def build_identity(directory: Path) -> dict[str, object]:
     if (
         set(build) != {"schema", "source_sha256", "compiler", "c", "binaries", "logs"}
         or type(build.get("schema")) is not int
-        or build.get("schema") != 4
+        or build.get("schema") != 5
         or build.get("source_sha256") != digest(directory / "source.json")
     ):
         fail("Stale build identity")
@@ -993,7 +1094,7 @@ def build_identity(directory: Path) -> dict[str, object]:
 
 
 def verify(directory: Path) -> None:
-    """Run all three generated CPU programs and retain their complete validated output."""
+    """Run all four generated CPU programs and retain their complete validated output."""
     _ = build_identity(directory)
     if any(
         path.exists() or path.is_symlink()
@@ -1001,10 +1102,12 @@ def verify(directory: Path) -> None:
             directory / "plan.json",
             directory / "policy.json",
             directory / "speculation.json",
+            directory / "runtime.json",
             directory / "verified.json",
             directory / "logs/verify.json",
             directory / "logs/verify-policy.json",
             directory / "logs/verify-speculation.json",
+            directory / "logs/verify-runtime.json",
         )
     ):
         fail("Refusing to overwrite existing or partial CPU verification")
@@ -1014,28 +1117,32 @@ def verify(directory: Path) -> None:
     speculation = read_speculation(
         directory, record=directory / "logs/verify-speculation.json"
     )
+    runtime = read_runtime(directory, record=directory / "logs/verify-runtime.json")
     _ = build_identity(directory)
     write_json(directory / "plan.json", plan)
     write_json(directory / "policy.json", policy_record(policy))
     write_json(directory / "speculation.json", speculation_record(speculation))
+    write_json(directory / "runtime.json", runtime_record(runtime))
     write_json(directory / "verified.json", verification_identity(directory))
 
 
 def verification_identity(directory: Path) -> dict[str, object]:
-    """Bind all three retained executions to the complete source, proof and build chain."""
+    """Bind all four retained executions to the complete source, proof and build chain."""
     return {
-        "schema": 4,
+        "schema": 5,
         "build_sha256": digest(directory / "build.json"),
         "source_sha256": digest(directory / "source.json"),
         "proof_sha256": digest(directory / "logs/proof.json"),
         "plan_sha256": digest(directory / "plan.json"),
         "policy_sha256": digest(directory / "policy.json"),
         "speculation_sha256": digest(directory / "speculation.json"),
+        "runtime_sha256": digest(directory / "runtime.json"),
         "execution_sha256": digest(directory / "logs/verify.json"),
         "policy_execution_sha256": digest(directory / "logs/verify-policy.json"),
         "speculation_execution_sha256": digest(
             directory / "logs/verify-speculation.json"
         ),
+        "runtime_execution_sha256": digest(directory / "logs/verify-runtime.json"),
         "scope": SCOPE,
     }
 
@@ -1043,7 +1150,7 @@ def verification_identity(directory: Path) -> dict[str, object]:
 def retained_execution(
     directory: Path,
 ) -> tuple[Plan, ObjectivePolicy, SpeculationPolicy]:
-    """Check the shared closure and all three retained executions without running binaries."""
+    """Check all four retained executions; preserve the existing three-result API."""
     _ = build_identity(directory)
     verified = object_file(directory / "verified.json")
     if (
@@ -1077,7 +1184,22 @@ def retained_execution(
         object_file(directory / "speculation.json"), sort_keys=True
     ) != json.dumps(speculation_record(speculation), sort_keys=True):
         fail("Retained speculation policy differs from verified execution")
+    _ = _retained_runtime(directory)
     return plan, policy, speculation
+
+
+def _retained_runtime(directory: Path) -> RuntimePolicy:
+    """Decode and compare retained runtime output after shared identity admission."""
+    policy = parse_runtime(
+        successful_output(
+            object_file(directory / "logs/verify-runtime.json"), RUNTIME_COMMAND
+        )
+    )
+    if json.dumps(
+        object_file(directory / "runtime.json"), sort_keys=True
+    ) != json.dumps(runtime_record(policy), sort_keys=True):
+        fail("Retained runtime policy differs from verified execution")
+    return policy
 
 
 def checked_plan(directory: Path, context: int, pool: int, page_size: int) -> Plan:
@@ -1109,6 +1231,17 @@ def checked_speculation(directory: Path) -> SpeculationPolicy:
     policy = read_speculation(directory)
     if policy != retained:
         fail("Compiled Bend2 speculation policy changed since verification")
+    return policy
+
+
+def checked_runtime(directory: Path) -> RuntimePolicy:
+    """Validate all retained evidence, then compare one fresh CPU runtime execution."""
+    directory = directory.resolve(strict=True)
+    _ = retained_execution(directory)
+    retained = _retained_runtime(directory)
+    policy = read_runtime(directory)
+    if policy != retained:
+        fail("Compiled Bend2 runtime policy changed since verification")
     return policy
 
 

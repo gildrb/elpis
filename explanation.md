@@ -2,13 +2,13 @@
 
 ## The short answer
 
-We did **not** formally model the entire RTX 3090 or prove NVIDIA's GPU implementation correct. We formalized selected decisions that determine whether inference can use that GPU correctly: allocation geometry, packed-memory layout, accepted speculative prefixes, and the rules for comparing optimization results. We then connected executable Bend programs to the serving implementation and checked selected native boundaries experimentally.
+We did **not** formally model the entire RTX 3090 or prove NVIDIA's GPU implementation correct. We formalized selected decisions and contracts around inference: allocation geometry, packed-memory layout, accepted speculative prefixes, transactions, ownership, bit transport, numerical evidence, and the rules for comparing optimization results. We connected executable Bend programs to the serving implementation and checked selected native boundaries experimentally.
 
 The idea beyond algorithmic complexity was **resource-aware semantic refinement**: an optimized implementation must preserve a separately stated meaning while respecting concrete storage, ownership, ordering, and hardware constraints. A second part was **constrained multi-objective optimization**: define what a legitimate improvement means before measuring candidates.
 
 Those names describe the approach. They do not mean we already have a complete machine-checked refinement proof of the inference server. Some obligations are proved in Bend, others are enforced by native checks, others have measured evidence, and some remain open.
 
-This document describes the state at the first autoresearch baseline and the unfinished direct-GPU Bend candidate on 2026-09-20. The main sources are [the root laws](LAWS.bend), [their proofs](PROOF.bend), and [the optimization contract](docs/qualification.md#optimization-contract).
+This document records the first autoresearch baseline and the subsequently checked formalization and scoped direct-GPU/runtime-control smoke on 2026-09-20. The new image reached authenticated native API readiness and completed a three-depth native C1 serving smoke; canonical comparison and quality qualification remain separate. The main sources are [the root laws](LAWS.bend), [their proof entry point](PROOF.bend), the domain files below, and [the optimization contract](docs/qualification.md#optimization-contract).
 
 ## 1. Why Big-O was not enough
 
@@ -129,15 +129,24 @@ A valid count is not enough. KV and recurrent state must describe the same commi
 
 The native transaction contract requires the appropriate ordering between status reset, producers, final snapshot, fence, and publication. Failure must poison the step rather than pretend that partially changed layers were atomically rolled back. CUDA graph capture/replay and fallback paths must preserve those obligations too.
 
-These requirements motivated native publication and host-mirror fixes. **The pure Bend acceptance proof does not prove the whole scheduler, CUDA memory model, Mamba recurrence, or transaction protocol.** Those remain separate implementation and validation boundaries, described in [qualification](docs/qualification.md#feasibility-and-inference-invariants).
+These requirements motivated native publication and host-mirror fixes. The new domains below prove abstract contracts beyond pure acceptance; **they do not prove the whole scheduler, CUDA memory model, Mamba recurrence, or native transaction implementation**.
+
+### Checked transaction, ownership, ABI and numerical domains
+
+Each domain separates its specification, executable pure implementation, laws and proofs; [PROOF.bend](PROOF.bend) imports all four proof modules.
+
+- **Transaction/publication/cancellation:** [specification](bend/transaction_spec.bend), [implementation](bend/transaction.bend), [laws](bend/transaction_laws.bend), [proofs](bend/transaction_proof.bend). `trace_refinement` and `trace_composition` cover arbitrary finite event traces and natural-number generations. Late producers invalidate snapshots; unchecked, stale or poisoned publication is rejected; `publish_all_refinement` requires current clean target and draft observations. `nonreset_poison` preserves nonzero failure unless a quiescent reset is granted—not bitwise monotonicity, since native `fill_(1)` can discard other bits. `failed_rearm_no_overwrite` retains an outstanding writer on failed synchronization; `cancellation_drains` and `no_undrained_release` forbid release before settlement. Graph/eager producer contracts reject duplicate or missing producers. Actual producer completeness and status generations remain native premises, not instrumented proof facts.
+- **Ownership/lifetime:** [specification](bend/ownership_spec.bend), [implementation](bend/ownership.bend), [laws](bend/ownership_laws.bend), [proofs](bend/ownership_proof.bend). Leases bind page, generation and allocation owner; `reuse_rejects_old_lease` excludes ABA reuse. References, readers and writers block release; reserved dummy pages are not reclaimed. Raw/preview/sealed representations distinguish holes, provisional and committed cells: committed cells cannot be restaged, discard invalidates previews, and `committed_page_seals` supplies a successful arbitrary-width witness. `observed_release_progress` explicitly requires exact observed counts. Native release does not supply these generation/refcount certificates; global free-list uniqueness, slot-map bijection and frontier completeness still require refinement.
+- **ABI bit transport:** [specification](bend/abi_spec.bend), [implementation](bend/abi.bend), [laws](bend/abi_laws.bend), [proofs](bend/abi_proof.bend). The four decision words, all block-eight output projections, bonus provenance and stride units are specified. `signed_transport`, `narrow_low_bits`, `signed_widen` and `wrapping_sequence` model int32/int64 bits, not just naturals. Logical sequence arithmetic requires `SafeAdvance` and the nonnegative/narrowing premises; `signed_overflow_preserved` demonstrates why a small increment alone is insufficient. These are not proofs of actual pointers, compiler lowering or CUDA storage lifetime.
+- **Numerical/quality contracts:** [specification](bend/numerical_spec.bend), [implementation](bend/numerical.bend), [laws](bend/numerical_laws.bend), [proofs](bend/numerical_proof.bend). Checked contracts distinguish finite encodings, ties-even from ties-away rounding, exact packed-code representation from lossy quantization, and bounded approximation. `strict_argmax` requires strict per-competitor separation (a gap greater than twice a shared error bound); current reports do not supply full-vocabulary, per-step witnesses. `complete_sound` requires identity-bound observations and rejects missing, unsupported or cancelled evidence. Native floating arithmetic, NumPy threshold equivalence, loaded-model recurrence and task quality remain outside these proofs. Numerical thresholds, graders and benchmark workloads are unchanged.
 
 ## 5. We connected proofs to programs that actually execute
 
-There are two execution stages. They must not be conflated.
+The historical baseline and the newly exercised production-code boundaries must not be conflated.
 
 ### Established baseline: compiled startup planner and policy
 
-The established integration runs original Bend-generated CPU programs for the startup plan, objective policy, and speculative policy. The planner's values and free-page sequence are consumed by native serving code. The speculative program computes all 128 decisions, whose policy is then consumed by the native GPU helper.
+The established integration ran original Bend-generated CPU programs for the startup plan, objective policy, and speculative policy. The planner's values and free-page sequence are consumed by native serving code. The speculative program computes all 128 decisions, whose policy was consumed by the baseline native GPU helper. The current artifact pipeline retains a fourth CPU program, [RUNTIME.bend](bend/RUNTIME.bend), for host mirror actions.
 
 That is genuine execution of Bend-derived decisions, but it is **not** the same as running a Bend acceptance function on the GPU for every step. The baseline GPU path consumes the generated policy table.
 
@@ -147,7 +156,7 @@ The laws also cover serialized output: all 38 plan fields, page ordering, and th
 
 Hashes prevent accidental substitution and stale evidence from being accepted as the same build. They do not mathematically prove the compiler correct or independently defeat an operator fabricating an entire evidence set.
 
-### Unfinished candidate: direct compiled Bend on the GPU
+### Now smoke-checked: direct compiled Bend on the GPU
 
 The candidate replaces the table lookup with `decide7`, taking seven scalar comparison flags and returning four decision fields. The fixed hot-path input is not a linked list. The independent specification can still use a clear mathematical list representation; the execution representation does not have to match it.
 
@@ -157,7 +166,13 @@ The candidate replaces the table lookup with `decide7`, taking seven scalar comp
 
 The wrapper still has real obligations: tensor widths, prefix strides, bounds, disjoint output storage, context/stream ownership, graph lifetime, and matching integer promotion behavior. Natural-number proofs do not automatically prove C/CUDA machine-word behavior.
 
-At this document's snapshot, the updated root proof and candidate Docker build have passed in the recorded work. **The new direct-GPU candidate's actual GPU smoke, full serving measurement, and performance gain remain unverified.** The earlier 128-mask GPU evidence belongs to the baseline policy-consuming helper, not automatically to this new launch path.
+The new direct-leaf GPU smoke now passes **128 masks, 5500 rows and 80 invocations** on the RTX 3090, including eager execution and graph replay, with zero policy uploads. This is separate evidence from the earlier policy-consuming helper. It does not exercise full worker/KV-write/Mamba integration, establish model accuracy, or measure serving throughput.
+
+### Now smoke-checked: compiled host mirror actions
+
+[RUNTIME.bend](bend/RUNTIME.bend) emits the proved `QWEN_RUNTIME_CONTROL_V1` tables; `free_policy_refinement`, `free_epoch_refinement`, `status_policy_refinement` and `wire_exact` connect their decisions and serialization to the independent specification. [The runtime-control patch](patches/kvarn-bend-runtime-control.patch) admits the compiled policy once through `native_bend_runtime()`. Actual pool methods `mirrored_tail_slots()` and `finish_status_mirror()` consume its actions: read a current completed mirror or recount; reject an unarmed status mirror, synchronize its event, then check status. There is no per-token subprocess or new production D2H transfer.
+
+The **18-case GPU smoke** exercised those migrated methods with real CUDA events and pending D2H writers: status values 0/1/2/4/6, unarmed rejection, rearm, stale epochs after writes/releases, exact recount, reset/drain and pinned-buffer reuse; cleanup passed. It used two small portable BF16 layers, not native-profile attention or the full worker graph. The eventless status branch was not exercised. These two executed boundaries—direct GPU acceptance and compiled host mirror actions—do not discharge native producer completeness, ownership generations/refcounts/frontiers, compiler/CUDA semantics or full-model numerical obligations. Exact image and evidence are recorded in [qualification](docs/qualification.md#checked-domains-and-direct-gpuruntime-control-smoke).
 
 ## 6. We made the proofs compositional instead of enormous computations
 
@@ -169,7 +184,7 @@ The 2056-page sequence is composed from trees of widths 2048 and 8. `trees_split
 
 This is the distinction between **proof complexity** and **inference complexity**. Better proof structure makes checking practical without weakening the property. A universal layout theorem is stronger than checking two examples, even when its proof is cheaper to check.
 
-The recorded original Bend 2.0.20 proof completed with a 1 GiB process stack limit and `BUN_JSC_maxPerThreadStackUsage=536870912`. That addressed checker resource requirements without patching the admitted checker or weakening the laws. The earlier checker-repair investigation is not the trusted basis of this baseline.
+The latest root proof passed with original, unmodified Bend 2.0.20 (`All terms check`, exit 0, **127.01 s**), a 1 GiB process stack limit, disabled core dumps and `BUN_JSC_maxPerThreadStackUsage=536870912`; the four isolated domains passed in **0.21–0.26 s** each. That addressed checker resource requirements without patching the admitted checker or weakening the laws. The earlier checker-repair investigation is not the trusted basis of this result.
 
 ## 7. We formalized what “better” means, not a promised tok/s number
 
@@ -201,11 +216,17 @@ The project combines different kinds of evidence rather than calling them all pr
 |---|---|---|
 | Root Bend proof | Stated planner, layout, serialization, objective and speculation laws | Not the compiler, CUDA, floating point, or whole model |
 | Baseline GPU helper probe | 128 masks, 5500 rows, 80 invocations across eager and graph paths | Not the new direct-leaf candidate or full recurrent state |
+| New domain proofs | Abstract transaction, ownership, ABI-bit and numerical/evidence laws | Native observations, machine semantics and full-model recurrence remain premises |
+| New direct-leaf GPU smoke | 128 masks, 5500 rows, 80 invocations; eager and graph replay | Not KV writes, worker integration, accuracy or throughput |
+| Compiled host mirror GPU smoke | 18 cases through migrated pool methods, real pending writers, cleanup | Small portable pool; no native-profile attention/full worker graph or eventless status case |
+| New-image native C1 serving smoke | Unchanged 1024/8192/32768 depths, one repetition, 1024 completion tokens each; exit 0 in 126.98 s | Not canonical primary-rate comparison, capacity or quality qualification |
 | Component numerical replay | 576 retained events across the declared component suites | Not loaded-model Mamba/projection/scheduler correctness or broad quality |
 | Near-native capacity run | 262014 submitted input tokens plus 128 output tokens completed | Not sustained long-session quality or a global peak-memory proof |
 | Tool-managed baseline run | About 92.70 math model-call tok/s, 54.92 C1 committed tok/s at 32K, reward 2/3 | Tiny repeatable measurement, not full native-context qualification |
 
 The two throughput values measure different intervals and workloads; they must not be treated as interchangeable. The failed math task exhausted its 32768-token generation budget without a final answer and remains a zero. We did not award credit based on internal reasoning.
+
+The best measured autoresearch run remains run 2: **93.0255 model-call tok/s versus 92.7021**, with tiny reward **2/3**. These are earlier measurements, not results for the new 31-patch image. Its completed C1 serving smoke does not establish a comparable canonical primary rate, new capacity or quality qualification, or a performance gain.
 
 The [qualification ledger](docs/qualification.md#latest-bendnative-evidence-and-completed-capacity) and [sanitized baseline record](bench/results/bend20-native-baseline-20260920.json) retain the numerical and capacity boundaries. The tool-managed baseline is recorded separately by the autoresearch session.
 
@@ -213,7 +234,7 @@ The safe experiment machinery adds operational evidence: exclusive ownership, an
 
 ## The distinction to remember
 
-We formalized **the legal decisions and resource relationships around GPU execution**, implemented selected decisions in executable Bend, and bound their artifacts to the native consumer. We specified broader ownership, temporal, numerical, and optimization obligations, but did not pretend those specifications were already complete proofs.
+We formalized **legal decisions and resource relationships around GPU execution**, proved the stated pure-domain contracts, implemented selected decisions in executable Bend, and bound their artifacts to native consumers. We did not confuse those checked abstractions or finite GPU observations with complete native ownership, temporal or numerical refinement.
 
 The resulting chain is:
 

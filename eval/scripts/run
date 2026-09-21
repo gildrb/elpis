@@ -10,6 +10,7 @@ repo=$(cd -- "$root/.." && pwd -P)
 usage() {
     printf '%s\n' 'Usage: eval/scripts/run PROFILE [TASKSET] [--dry-run] [--measure-power] [--output FRESH_DIRECTORY]' \
         '  tiny aime25                  Three native seed-0 shuffled math tasks; not full qualification.' \
+        '  diverse i3-logic             First native eligible logic task; separate 8192-token sentinel.' \
         '  --output FRESH_DIRECTORY     Exclusive-create the result group at this path.' \
         '  --measure-power              Collect board energy and per-environment task efficiency.' \
         '  --power-gpu=0                One GPU index, UUID or PCI bus ID (no power-policy changes).' \
@@ -22,7 +23,7 @@ usage() {
 if [[ ${1:-} == --help || ${1:-} == -h ]]; then usage; exit 0; fi
 profile=${1:?Usage: eval/scripts/run PROFILE [TASKSET] [--dry-run] [--measure-power] [--output FRESH_DIRECTORY]}
 shift
-case "$profile" in smoke|tiny|quick|full|agentic|agentic-full) ;; *) printf 'Unknown profile: %s\n' "$profile" >&2; exit 2 ;; esac
+case "$profile" in smoke|tiny|diverse|quick|full|agentic|agentic-full) ;; *) printf 'Unknown profile: %s\n' "$profile" >&2; exit 2 ;; esac
 selection=""
 dry=false
 measure=false
@@ -59,6 +60,9 @@ if [[ -n "$output" && ( -e "$output" || -L "$output" ) ]]; then
 fi
 if [[ "$profile" == tiny && -n "$selection" && "$selection" != aime25 ]]; then
     printf 'Tiny is sampled math only: aime25, 3 tasks, 1 rollout each\n' >&2; exit 2
+fi
+if [[ "$profile" == diverse && -n "$selection" && "$selection" != i3-logic ]]; then
+    printf 'Diverse is the separate logic sentinel only: i3-logic, 1 task, 1 rollout\n' >&2; exit 2
 fi
 if [[ -n "$selection" ]]; then
     configs=("$root/configs/$profile/$selection.toml")
@@ -223,6 +227,11 @@ for config in "${configs[@]}"; do
             qualification check-eval --profile tiny --environment aime25 \
                 --directory "$group/aime25" --identity "$before" \
                 --output "$group/provenance/aime25.sampled-math.json"
+        fi
+        if [[ "$profile" == diverse ]]; then
+            qualification check-eval --profile diverse --environment i3-logic \
+                --directory "$group/i3-logic" --identity "$before" \
+                --output "$group/provenance/i3-logic.logic-sentinel.json"
         fi
     fi
     if [[ "$status" -ne 0 ]]; then exit "$status"; fi

@@ -7,18 +7,24 @@ export LC_ALL=C
 umask 077
 root=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)
 eval_root=$(cd -- "$root/.." && pwd -P)
-profile=${1:?Usage: eval/direct/run smoke|quick|full [mrcr|graphwalks] [--dry-run]}
+profile=${1:?Usage: eval/direct/run smoke|quick|full|diverse [mrcr|graphwalks] [--dry-run] [--output-dir ABSENT_PATH]}
 shift
-case "$profile" in smoke|quick|full) ;; *) echo "Unknown direct profile." >&2; exit 2 ;; esac
+case "$profile" in smoke|quick|full|diverse) ;; *) echo "Unknown direct profile." >&2; exit 2 ;; esac
 selection=all
 dry=false
-for argument in "$@"; do
-  case "$argument" in
-    mrcr|graphwalks) [[ "$selection" == all ]] || exit 2; selection="$argument" ;;
-    --dry-run) dry=true ;;
+output=
+while (( $# )); do
+  case "$1" in
+    mrcr|graphwalks) [[ "$selection" == all ]] || exit 2; selection="$1"; shift ;;
+    --dry-run) dry=true; shift ;;
+    --output-dir) [[ -z "$output" && $# -ge 2 && -n "$2" ]] || exit 2; output="$2"; shift 2 ;;
     *) echo "Unknown direct evaluation argument." >&2; exit 2 ;;
   esac
 done
+if [[ "$profile" == diverse ]]; then
+  [[ "$selection" != mrcr ]] || { echo "Diverse contains only GraphWalks." >&2; exit 2; }
+  selection=graphwalks
+fi
 transport_args=()
 if [[ "${QWEN_EVAL_BASE_URL+x}" == x ]]; then
   case "$QWEN_EVAL_BASE_URL" in
@@ -46,9 +52,16 @@ if [[ "$dry" == false ]]; then
   export QWEN_API_KEY="$key"
   unset key
 fi
-[[ ! -L "$root/.runs" ]] || { echo "Refusing symlink run root." >&2; exit 1; }
-mkdir -p -- "$root/.runs"
-run=$(mktemp -d "$root/.runs/$profile.XXXXXXXX")
+if [[ -n "$output" ]]; then
+  [[ "$output" == /* && ! -e "$output" && ! -L "$output" ]] || { echo "Output must be a fresh absolute path." >&2; exit 2; }
+  [[ "$(realpath -m -- "$output")" == "$output" && -d "$(dirname -- "$output")" ]] || { echo "Output parent must exist and path must be canonical." >&2; exit 2; }
+  mkdir -m 700 -- "$output"
+  run="$output"
+else
+  [[ ! -L "$root/.runs" ]] || { echo "Refusing symlink run root." >&2; exit 1; }
+  mkdir -p -- "$root/.runs"
+  run=$(mktemp -d "$root/.runs/$profile.XXXXXXXX")
+fi
 mkdir -p -- "$run/work/openai" "$run/cache/datasets" "$run/home" "$run/provenance/effective-configs"
 ln -s -- "$eval_root/.cache/mrcr_v2" "$run/work/mrcr_v2"
 graph_revision=$(jq -er '.huggingface.graphwalks.revision | select(test("^[a-f0-9]{40}$"))' "$eval_root/datasets.lock")
@@ -72,8 +85,16 @@ for config in "$root/configs/$profile/"*.toml; do
   if [[ "$selection" != all && "$selection" != "$project" ]]; then continue; fi
   effective_config="$run/provenance/effective-configs/$(basename -- "$config")"
   uv run --project "$root/$project" --locked --no-sync python "$root/prepare_transport.py" "$config" "$effective_config" "${transport_args[@]}"
-  uv run --project "$root/$project" --locked --no-sync python "$root/inspect_dataset.py" "$effective_config"
-  if [[ "$dry" == false ]]; then
+  if [[ "$profile" == diverse ]]; then
+    native_args=()
+    if [[ "$dry" == true ]]; then native_args=(--dry-run); fi
+    # The CLI ignores client retry settings. Use its unchanged native runner
+    # with explicit ClientConfig(max_retries=0), never a patched dispatcher.
+    (cd -- "$eval_root/.." && uv run --project "$root/$project" --locked --no-sync python -m bench.direct_context execute --config "$effective_config" --run "$run" "${native_args[@]}")
+  else
+    uv run --project "$root/$project" --locked --no-sync python "$root/inspect_dataset.py" "$effective_config"
+  fi
+  if [[ "$dry" == false && "$profile" != diverse ]]; then
     uv run --project "$root/$project" --locked --no-sync vf-eval "$effective_config" --disable-tui --abbreviated-summary
   fi
 done
