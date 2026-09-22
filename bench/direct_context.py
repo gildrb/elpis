@@ -46,12 +46,16 @@ ENV_ARGS: dict[str, object] = {
 }
 SAMPLING: dict[str, object] = {
     "max_tokens": OUTPUT_TOKENS,
-    "temperature": 0.6,
-    "top_p": 0.95,
+    # Re-frozen for segment 1 (2026-09-22) together with
+    # eval/direct/configs/diverse/graphwalks-bfs.toml: the Bend-native DFLASH
+    # candidate admits greedy acceptance only, and the historical 0.6/0.95/20
+    # sampling crashed the scheduler on the first 178769-token request.
+    "temperature": 0.0,
+    "top_p": 1.0,
     "frequency_penalty": 0.0,
     "presence_penalty": 0.0,
     "extra_body": {
-        "top_k": 20,
+        "top_k": -1,
         "min_p": 0.0,
         "repetition_penalty": 1.0,
         "seed": 0,

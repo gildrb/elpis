@@ -14,15 +14,28 @@ def lt_self(+v: Nat) -> {Nat.is_lt(v, v) == False{} : Bool}:
       lt_self(p)
 
 def Laws.first_max_tie(i, j, v):
-  %lt_self(v) :
-    {Selector.better(Selector.Score{i, v}, Selector.Score{j, v}) == _ : Selector.Score}
-  {==}
+  step = Equal.cong(
+    Bool,
+    Selector.Score,
+    flag => Selector.better_pick(flag, Selector.Score{i, v}, Selector.Score{j, v}),
+    Nat.is_lt(v, v),
+    False{},
+    lt_self(v),
+  )
+  Equal.trans(
+    Selector.Score,
+    Selector.better_pick(Nat.is_lt(v, v), Selector.Score{i, v}, Selector.Score{j, v}),
+    Selector.better_pick(False{}, Selector.Score{i, v}, Selector.Score{j, v}),
+    Selector.Score{i, v},
+    step,
+    {==},
+  )
 
 def Laws.fold_order():
-  {==}
+  ({==}, {==})
 
 def Laws.round_arithmetic():
-  {==}
+  ({==}, ({==}, {==}))
 
 def Laws.rounds_definition():
-  {==}
+  ({==}, {==})

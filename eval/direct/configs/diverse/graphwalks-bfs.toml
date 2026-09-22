@@ -17,14 +17,19 @@ num_examples = 1
 rollouts_per_example = 1
 
 [sampling]
+# Re-frozen for segment 1 (2026-09-22): the historical 0.6/0.95/20 sampling is
+# incompatible with the Bend-native DFLASH candidate, which admits greedy
+# acceptance only and crashed the scheduler on the first 178769-token request
+# (demonstrated flaw; runner-parameter re-freeze per the bottleneck protocol).
+# Greedy removes the sampler from the measured path entirely.
 max_tokens = 8192
-temperature = 0.6
-top_p = 0.95
+temperature = 0.0
+top_p = 1.0
 frequency_penalty = 0.0
 presence_penalty = 0.0
 
 [sampling.extra_body]
-top_k = 20
+top_k = -1
 min_p = 0.0
 repetition_penalty = 1.0
 seed = 0
