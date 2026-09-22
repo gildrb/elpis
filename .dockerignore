@@ -19,6 +19,9 @@
 !bend/
 !bend/adapter.py
 !bend/build_toolchain.py
+!bend/native.py
+!bend/native_build.py
+!bend/native.cu
 !bend/*.bend
 !LAWS.bend
 !PROOF.bend

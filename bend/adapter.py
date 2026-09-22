@@ -12,7 +12,9 @@ bend/SELECT.bend, bend/SPECULATE.bend and bend/RUNTIME.bend. Compilation happens
 in the target runtime. Serving loads the planner, greedy speculation table and
 mirror action tables once per startup; qualification loads the objective table once.
 Retained hashes bind artifacts, not their trustworthiness: Bend's checker/compiler,
-Base intrinsics, foreign IO, clang and the host runtime remain trusted. This
+Base intrinsics, foreign IO, clang and the host runtime remain trusted. The checker
+runs the pinned upstream 2.0.20 TypeScript with one reviewed stack-safe comparator
+patch through the release ELF's BUN_BE_BUN source mode. This
 is not a CUDA/F32, capacity, quality, or compiler-correctness proof. Engine
 allocation validators remain mandatory.
 """
@@ -144,7 +146,13 @@ END = "END_QWEN_KVARN_PLAN\n"
 BEND_VERSION = "bend 2.0.20\n"
 PROOF_DIAGNOSTIC = "All terms check.\n"
 BEND_COMMAND = "./compiler/bin/bend"
-COMPILER_FILES = {"bin/bend"}
+COMPILER_FILES = {
+    "bin/bend",
+    "bin/bend-runtime",
+    "bend2/main.ts",
+    "bend2/comp.ts",
+    "bend2/bend.ts",
+}
 BASE_SHA256 = "b8c2734d45ec6b4ce70fee70ff06ef35e08fce885af8852d8eb77dbff020e946"
 RELEASE_RUNTIME_SHA256 = (
     "fab9e564c578a0a15880d5fea561ac1612dba01265a5a219906b5888f3381d8c"
@@ -156,6 +164,14 @@ NATIVE_RUNTIME_SHA256 = (
     RELEASE_RUNTIME_SHA256,
     SELECTED_RUNTIME_SHA256,
     "e38cda9ed7c2066a9d3335dd599bb2bcf7d3e5871b8ed0f2a789fbea2e57eb0d",
+)
+# Source-mode checker identity: immutable upstream 2.0.20 TS plus the reviewed
+# stack-safe comparator patch; the release ELF only interprets the entry.
+WRAPPER_SHA256 = "99a3a8c80a5b2906c398e2d5b7a10db3721ca745d20059042d7efe450d7cc82f"
+SOURCE_MAIN_SHA256 = "9db2123696fd8c40d0455dbf43730f51c03f1be73b02acaa570ee138be65309e"
+SOURCE_COMP_SHA256 = "1cf3b5ffea86697656f8ef4d6c26040f16ac512fd92485d164f8a14425871bd0"
+PATCHED_CHECKER_SHA256 = (
+    "180676f885557a6faf38acce10d48872ea3c01594f49af9139bafea2d3152ad9"
 )
 # Resource limits for the full proof, not compiler/checker semantic overrides.
 PROOF_COMMAND = [
@@ -206,6 +222,9 @@ SCOPE = (
     "Transaction, ownership, numerical and ABI laws are abstract contracts, not "
     "proofs of native events, epochs, ownership, machine arithmetic "
     "or device addressing. "
+    "The checker is the pinned upstream 2.0.20 TypeScript with one reviewed "
+    "stack-safe comparator patch (iterative term_compare); the patch changes "
+    "evaluation strategy, not proof semantics, and is hash-bound. "
     "Base intrinsics, foreign IO, both compilers and the host runtime are trusted, "
     "not proved. GPU completion, consumption and execution remain trusted native "
     "facts. No CUDA/F32, compiler-correctness, capacity, performance or quality claim."
@@ -611,9 +630,20 @@ def tree_files(root: Path) -> set[str]:
 
 
 def check_release_compiler(hashes: object) -> None:
-    """Admit only exact observed release or Nix-packaged Bend 2.0.20 native bytes."""
-    if not is_object(hashes) or hashes.get("bin/bend") not in NATIVE_RUNTIME_SHA256:
-        fail("Compiler is not a pinned native Bend 2.0.20 executable")
+    """Admit only the pinned source-mode 2.0.20 checker layout and bytes."""
+    if not is_object(hashes) or not set(COMPILER_FILES) <= set(hashes):
+        fail("Compiler layout is not the pinned source-mode Bend 2.0.20 closure")
+    if hashes.get("bin/bend") != WRAPPER_SHA256:
+        fail("Retained Bend launcher differs from the pinned source-mode wrapper")
+    if hashes.get("bin/bend-runtime") not in NATIVE_RUNTIME_SHA256:
+        fail("Bend runtime is not a pinned native 2.0.20 release executable")
+    if (
+        hashes.get("bend2/main.ts") != SOURCE_MAIN_SHA256
+        or hashes.get("bend2/comp.ts") != SOURCE_COMP_SHA256
+    ):
+        fail("Retained compiler entry modules differ from the pinned upstream source")
+    if hashes.get("bend2/bend.ts") != PATCHED_CHECKER_SHA256:
+        fail("Retained checker differs from the reviewed stack-safe 2.0.20 comparator")
 
 
 def generate(output: Path, bend: str) -> None:
@@ -646,6 +676,8 @@ def generate(output: Path, bend: str) -> None:
     compiler_hashes = snapshot(compiler_root, output / "compiler", compiler_names)
     check_release_compiler(compiler_hashes)
     (output / "compiler/bin/bend").chmod(0o755)
+    # copyfile drops modes; the interpreter ELF must stay executable too.
+    (output / "compiler/bin/bend-runtime").chmod(0o755)
     # Execute the copy so its realpath-selected Base is exactly the retained Base.
     version_command = [BEND_COMMAND, "version"]
     version = run(version_command, cwd=output, record=output / "logs/version.json")
@@ -678,7 +710,7 @@ def generate(output: Path, bend: str) -> None:
     write_json(
         output / "source.json",
         {
-            "schema": 6,
+            "schema": 7,
             "bend_version": BEND_VERSION.rstrip("\n"),
             "bend_origin": str(compiler),
             "sources": sources,
@@ -706,7 +738,7 @@ def source_identity(directory: Path) -> dict[str, object]:
             "scope",
         }
         or type(identity.get("schema")) is not int
-        or identity.get("schema") != 6
+        or identity.get("schema") != 7
         or identity.get("bend_version") != BEND_VERSION.rstrip("\n")
         or identity.get("scope") != SCOPE
     ):

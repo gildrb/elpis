@@ -226,7 +226,7 @@ def docker(*arguments: str, timeout: int = 30) -> str:
 
 
 def toolchain_identity(identity: dict[str, object]) -> None:
-    """Bind the selected release or exact installed package to retained compiler bytes."""
+    """Bind the pinned source-mode 2.0.20 checker to retained compiler bytes."""
     record = mapping(identity.get("bend_toolchain"))
     release, runtime = (mapping(record.get(name)) for name in ("release", "runtime"))
     require(
@@ -235,28 +235,48 @@ def toolchain_identity(identity: dict[str, object]) -> None:
             "schema",
             "claim",
             "release",
+            "source",
+            "checker",
+            "base_bend_sha256",
             "build_helper_sha256",
             "release_resources_sha256",
             "runtime",
             "execution",
             "installed_compiler_sha256",
         }
-        and record.get("schema") == 4
+        and record.get("schema") == 5
         and release
         == {
             "url": build_toolchain.RELEASE_URL,
             "sha256": build_toolchain.RELEASE_SHA256,
             "version": build_toolchain.VERSION.rstrip("\n"),
         }
+        and mapping(record.get("source"))
+        == {
+            "url": build_toolchain.SOURCE_URL,
+            "sha256": build_toolchain.SOURCE_SHA256,
+            "commit": build_toolchain.SOURCE_COMMIT,
+        }
+        and mapping(record.get("checker"))
+        == {
+            "unmodified_bend_ts_sha256": build_toolchain.UNMODIFIED_CHECKER_SHA256,
+            "patch_sha256": digest(ROOT / "patches/bend2-stack-safe-2.0.20.patch"),
+            "patched_bend_ts_sha256": build_toolchain.PATCHED_CHECKER_SHA256,
+            "main_ts_sha256": build_toolchain.SOURCE_MAIN_SHA256,
+            "comp_ts_sha256": build_toolchain.SOURCE_COMP_SHA256,
+            "launcher_sha256": build_toolchain.WRAPPER_SHA256,
+        }
+        and record.get("base_bend_sha256") == build_toolchain.BASE_SHA256
         and record.get("build_helper_sha256")
         == digest(ROOT / "bend/build_toolchain.py")
         and record.get("execution")
         == {
-            "mode": "release",
+            "mode": "source",
             "command_prefix": ["bin/bend"],
-            "environment": {"BEND_NO_TELEMETRY": "1"},
+            "interpreter": "bin/bend-runtime",
+            "environment": {"BEND_NO_TELEMETRY": "1", "BUN_BE_BUN": "1"},
         },
-        "Bend toolchain is not the pinned original 2.0.20 release",
+        "Bend toolchain is not the pinned source-mode 2.0.20 checker",
     )
     require(
         set(runtime)
@@ -265,10 +285,6 @@ def toolchain_identity(identity: dict[str, object]) -> None:
             "packaged_executable_sha256",
             "transport",
             "relocation_recipe_sha256",
-            "selected_package",
-            "selected_derivation",
-            "selected_derivation_sha256",
-            "selected_release",
         }
         and runtime.get("release_executable_sha256") == build_toolchain.RUNTIME_SHA256,
         "Unsupported Bend release transport identity",
@@ -277,7 +293,7 @@ def toolchain_identity(identity: dict[str, object]) -> None:
     names: set[str] = set(build_toolchain.COMPILER_NAMES)
     transport = runtime.get("transport")
     require(
-        transport in ("release", "nix-patchelf", "selected-installed"),
+        transport in ("release", "nix-patchelf"),
         "Unsupported Bend compiler transport",
     )
     native_sha256 = text(runtime.get("packaged_executable_sha256"))
@@ -290,37 +306,22 @@ def toolchain_identity(identity: dict[str, object]) -> None:
     else:
         require(
             runtime.get("relocation_recipe_sha256") is None
-            and native_sha256
-            == (
-                build_toolchain.SELECTED_RUNTIME_SHA256
-                if transport == "selected-installed"
-                else build_toolchain.RUNTIME_SHA256
-            ),
-            "Native Bend differs from the exact selected release or installation",
+            and native_sha256 == build_toolchain.RUNTIME_SHA256,
+            "Native Bend differs from the exact selected release",
         )
-    selected = transport == "selected-installed"
-    selected_origin = {
-        "selected_package": build_toolchain.SELECTED_PACKAGE,
-        "selected_derivation": build_toolchain.SELECTED_DERIVATION,
-        "selected_derivation_sha256": build_toolchain.SELECTED_DERIVATION_SHA256,
-        "selected_release": build_toolchain.SELECTED_RELEASE,
-    }
-    require(
-        all(
-            runtime.get(name) == (value if selected else None)
-            for name, value in selected_origin.items()
-        ),
-        "Selected installed Bend provenance differs from the inspected Nix derivation",
-    )
     artifacts = mapping(identity.get("bend_artifacts"))
     require(
         set(compiler) == names
-        and compiler.get("bin/bend") == native_sha256
+        and compiler.get("bin/bend") == build_toolchain.WRAPPER_SHA256
+        and compiler.get("bin/bend-runtime") == native_sha256
+        and compiler.get("bend2/bend.ts") == build_toolchain.PATCHED_CHECKER_SHA256
+        and compiler.get("bend2/main.ts") == build_toolchain.SOURCE_MAIN_SHA256
+        and compiler.get("bend2/comp.ts") == build_toolchain.SOURCE_COMP_SHA256
         and all(
             artifacts.get("compiler/" + name) == value
             for name, value in compiler.items()
         ),
-        "Bend retained compiler differs from the exact release or selected installation",
+        "Bend retained compiler differs from the pinned source-mode release",
     )
     resources = mapping(record.get("release_resources_sha256"))
     require(
