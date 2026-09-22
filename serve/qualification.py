@@ -16,6 +16,7 @@ import http.client
 import inspect
 import json
 import math
+import os
 import re
 import subprocess
 import sys
@@ -122,10 +123,26 @@ class Evidence:
     def tree(self, root: Path) -> dict[str, str]:
         require(root.is_dir(), f"Missing evidence directory: {root}")
         result: dict[str, str] = {}
+        base = root.resolve()
         for path in sorted(root.rglob("*")):
             if "__pycache__" in path.parts:
                 continue
-            require(not path.is_symlink(), f"Symlink in retained evidence: {path}")
+            if path.is_symlink():
+                # Native harnesses (verifiers) publish convenience pointers such
+                # as logs/latest. Retain the pointer itself as evidence instead
+                # of rejecting a complete raw-artifact closure over it.
+                target = os.readlink(path)
+                require(
+                    not Path(target).is_absolute(),
+                    f"Evidence symlink must be relative: {path}",
+                )
+                resolved = (path.parent / target).resolve(strict=True)
+                require(
+                    resolved.is_relative_to(base),
+                    f"Evidence symlink escapes its tree: {path}",
+                )
+                result[path.relative_to(root).as_posix()] = "symlink:" + target
+                continue
             if path.is_file():
                 retained = self.retain(path)
                 result[path.relative_to(root).as_posix()] = self.hashes[str(retained)]
