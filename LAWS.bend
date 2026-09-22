@@ -18,6 +18,7 @@ import ./bend/transaction_laws.bend as TransactionLaws
 import ./bend/ownership_laws.bend as OwnershipLaws
 import ./bend/abi_laws.bend as AbiLaws
 import ./bend/numerical_laws.bend as NumericalLaws
+import ./bend/selector_laws.bend as SelectorLaws
 
 # Balanced parallel decomposition preserves the independent ascending loop.
 law tree_is_seq:
