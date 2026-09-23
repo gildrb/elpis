@@ -37,6 +37,7 @@ RUN python3 -m pip --disable-pip-version-check install --no-index --no-deps \
 FROM bend-toolchain AS bend-build
 COPY bend/ /opt/qwen/source/bend/
 COPY LAWS.bend PROOF.bend /opt/qwen/source/
+COPY patches/marlin-bend-eight-stage.patch /opt/qwen/source/patches/
 RUN python3 /opt/qwen/source/bend/adapter.py generate \
       --output /opt/qwen/bend --bend /opt/bend-tools/bin/bend && \
     python3 /opt/qwen/source/bend/adapter.py compile --directory /opt/qwen/bend --cc /usr/bin/clang-19 && \

@@ -2,6 +2,7 @@
 # IO.print supplies the sole final newline after END_QWEN_RUNTIME_CONTROL.
 import Base
 import ./transaction.bend as Transaction
+import ./marlin_pipeline.bend as MarlinPipeline
 
 def rows(values: List<&2, Nat>) -> String:
   match values:
@@ -11,10 +12,12 @@ def rows(values: List<&2, Nat>) -> String:
       Nat.show(value) ++ "\n" ++ rows(rest)
 
 def protocol() -> String:
-  "QWEN_RUNTIME_CONTROL_V1\nFREE_MIRROR\n8\n" ++
+  "QWEN_RUNTIME_CONTROL_V2\nFREE_MIRROR\n8\n" ++
     rows(Transaction.free_table(3n, False{}, False{}, False{})) ++
     "STATUS\n8\n" ++
     rows(Transaction.status_table(3n, False{}, False{}, False{})) ++
+    "MARLIN_EIGHT_STAGE\n8\n" ++
+    rows(MarlinPipeline.table(3n, False{}, False{}, False{})) ++
     "END_QWEN_RUNTIME_CONTROL"
 
 def main() -> IO(Unit):

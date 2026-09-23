@@ -556,3 +556,57 @@ Startup seed705760395 matches run21. This falls within the prior
 95.12–95.38 range: migration validation, not a demonstrated speedup.
 Evidence: `bend26-control-benchmark-evidence-1/autoresearch`.
 Image: `sha256:00c941c0da65d99fddf5055d3aad809ece95445ac6d3d01dc23070b25edef5e2`.
+
+### Full-K Marlin grid rejected, run 24
+
+The candidate compiled a Bend policy into the native JIT template to choose
+one full-K CTA per N128 output tile for eligible wide M1–8 GEMMs. Nineteen
+policy/wire and conditional Nat geometry/partition laws passed on original
+Bend2.0.26; native integer/CUDA/F32 refinement remained external.
+Both real native JIT arms compiled, and 624 paired eager/graph dispatch records
+confirmed the intended grids. Of 624 paired output matrices, 544 were bit-exact;
+all unchanged classes and same-image graph/scratch checks were exact. Changed
+rounding reached maxabs0.125 and RMSE0.0005637403. No universal numerical
+equivalence or arbitrary tolerance was admitted.
+
+The frozen suite admitted99.893641 tok/s and math3/3, but short I3 reward fell
+1→0. The candidate exhausted8192 tokens without final-answer content; the
+control stopped at8170 with a final answer. Neither recorded a transport or
+grader error. This remains a failure under the unchanged budget, not grounds
+to alter the cap or scoring. The candidate was rejected as `checks_failed`;
+the retained best remains95.380797 tok/s. C1 was74.5257/68.7841/56.7554.
+
+Fresh bounded profiling found Marlin188.419 ms versus control184.553 ms,
+packed attention118.657 versus118.105 ms, and405.548 ms summed kernel duration.
+No isolated Marlin speedup was demonstrated. All three GPU windows restored
+authenticated FP8 and their guardians exited0. Evidence:
+`marlin-fullk-{baseline-evidence-2,candidate-evidence-1,comparison-evidence-1}`
+and `marlin-fullk-benchmark-evidence-1` under the temporary evidence root.
+Rejected image:
+`sha256:32da3de64f19ea9516656e7d1b40c93c18e0b7bb775c51f2d3f60bc56a458d59`.
+
+### Two-stage Marlin copy pipeline rejected, run 25
+
+The candidate kept grid, K stripes, reduction grouping, scratch and shared
+reservation unchanged, selecting only the guarded two-stage kernel pointer
+through a compiled Bend policy. Twenty policy/wire, period-two ring and
+ordered-MMA/recurrence laws passed; native async/memory/F32 remained external.
+All624 paired matrices were bit-exact, all624 eager/graph dispatch pairs
+matched, and graph/scratch checks passed. Actual native registers fell108→95,
+with zero reported stack/local storage; dynamic shared reservation stayed101376.
+
+The unchanged frozen suite nevertheless regressed to83.215596 tok/s,
+math3/3, short I3 reward0 versus control1. I3 ended with `length` at8192 tokens;
+no transport error was recorded. C1 fell to64.9038/61.6527/49.7093.
+This was rejected as `checks_failed`, not promoted on synthetic exactness.
+
+The fresh profile confirms1989 calls to the two-stage specialization:
+188.761 ms for that kernel and239.760 ms total Marlin versus control184.553.
+Packed attention stayed118.078 ms versus118.105; total kernels471.726 ms.
+Reduced register use did not compensate for the changed copy pipeline.
+This does not isolate a hardware stall cause or certify whole-model equivalence.
+All three guardians restored authenticated FP8 and exited0. Evidence:
+`marlin-two-stage-{baseline-evidence-2,candidate-evidence-1,comparison-evidence-1}`
+and `marlin-two-stage-benchmark-evidence-1` under the temporary evidence root.
+Rejected image:
+`sha256:eda60e70bb91b015f553e43136edd9bf8918e0fa2c0ae4c728e6994315554d8a`.

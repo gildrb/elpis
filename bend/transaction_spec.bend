@@ -7,6 +7,7 @@
 # Stream ordering, complete target/draft layer coverage, truthful observations,
 # no aliasing, and all-writer/reference quiescence remain external premises.
 import Base
+import ./marlin_pipeline_spec.bend as MarlinPipeline
 
 type Epoch is Data:
   InvalidEpoch{}
@@ -369,9 +370,18 @@ def status_rows(count: Nat, +index: Nat) -> String:
     case 1n+p:
       Nat.show(status_row(index)) ++ "\n" ++ status_rows(p, 1n+index)
 
+def marlin_rows(count: Nat, +index: Nat) -> String:
+  match count:
+    case 0n:
+      ""
+    case 1n+p:
+      Nat.show(MarlinPipeline.row(index)) ++ "\n" ++ marlin_rows(p, 1n+index)
+
 def protocol() -> String:
-  "QWEN_RUNTIME_CONTROL_V1\nFREE_MIRROR\n8\n" ++ free_rows(8n, 0n) ++
-    "STATUS\n8\n" ++ status_rows(8n, 0n) ++ "END_QWEN_RUNTIME_CONTROL"
+  "QWEN_RUNTIME_CONTROL_V2\nFREE_MIRROR\n8\n" ++ free_rows(8n, 0n) ++
+    "STATUS\n8\n" ++ status_rows(8n, 0n) ++
+    "MARLIN_EIGHT_STAGE\n8\n" ++ marlin_rows(8n, 0n) ++
+    "END_QWEN_RUNTIME_CONTROL"
 
 def published(state: State) -> Bool:
   match state:

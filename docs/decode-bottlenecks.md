@@ -199,3 +199,36 @@ A/B bench warmup). Three live-only integration bugs were fixed on the way
 device staging during capture; inference-mode pinned-mirror allocation).
 Fixtures cannot see this class — the staging contract needs a fixture with
 non-provisional commit rows before the flag can default on.
+
+## Guarded eight-stage Marlin: exact fixtures, performance pending
+
+The eight-stage candidate changes the retained four-stage copy pipeline only
+for guarded original M1–8 SM86 BF16/U4B8/group128 full-K inputs, without
+act-order/zero-points, using the already-selected128-thread M8/N128/K64 tile.
+K%128=0, group_blocks8, blocks_per_sm1, non-atomic reduction and a51200-byte
+conservative shared guard are required. Actual M8 addressing is43008 bytes;
+grid, K stripes, reduction grouping, scratch and launch reservation are unchanged.
+Only the compiled Bend policy selects stages8; otherwise stages4 remain.
+Admission binds source schema9, verified schema6 and runtime wireV2.
+
+The24 checked Bend2.0.26 laws establish policy/wire, period-two ring phase,
+ordered tile/MMA and symbolic recurrence contracts plus layout/schedule
+arithmetic—not CUDA async/memory safety, compiler refinement or native F32
+equivalence. The root proof passed67.69s; generation/compile/verify, four CPU
+consumers and the always-fallback-wire rejection passed. See the
+[qualification scope](qualification.md#guarded-eight-stage-marlin-candidate-sampled-exactness-benchmark-pending).
+
+Real candidate JIT passed231.13s. Fresh guarded captures and CPU comparison
+passed624/624 bit-exact output fixtures and624/624 eager/graph dispatch pairs,
+including graph/scratch checks. Observed registers108→117, stack0/local0,
+shared reservation101376 bytes and grid82 do not establish occupancy or speed.
+Image: `sha256:94d6dd975e406413ff8cdaa2bbccbaa181c3760379dbaeb50072e774e54e90e8`.
+Private evidence under `/tmp/litos-recovery-ops-id8q0yvb/`:
+`marlin-eight-stage-baseline-evidence-1`,
+`marlin-eight-stage-candidate-evidence-1`,
+`marlin-eight-stage-comparison-evidence-1`.
+
+**Frozen benchmark pending; no throughput claim or promotion.** Retained best
+remains95.380797 tok/s. Full-K-grid and two-stage candidates remain rejected:
+their frozen short-I3 reward fell1→0, despite the latter's624 exact fixtures.
+Sampled kernel parity is not whole-model equivalence or quality admission.

@@ -13,6 +13,7 @@ import ./bend/ownership_proof.bend as OwnershipProof
 import ./bend/abi_proof.bend as AbiProof
 import ./bend/numerical_proof.bend as NumericalProof
 import ./bend/selector_proof.bend as SelectorProof
+import ./bend/marlin_pipeline_proof.bend as MarlinPipelineProof
 
 def add_succ(n: Nat, -i: Nat) -> {Nat.add(n, 1n+i) == 1n+Nat.add(n, i) : Nat}:
   match n:

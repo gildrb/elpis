@@ -29,3 +29,4 @@ f9cc7e68fbe3a26f5a1e24ef19cefc0c2a900aea53e21b396b8f011ab59b258e  kvarn-mirror-v
 8b3b34cae9c0086435d6d532e8d2cb10e60f9c3a4a130eecb362a9aaf6f1b01e  kvarn-query-prefix-clear.patch
 c19199d089c4aff166933de8cd036fe511776a97c603282c0932e807ec58a1d7  kvarn-response-metadata-compat.patch
 5237729d001e70773e32757e9d2ef5115f226f614554ce058e1143346497b079  marlin-sm86-small-m-k64.patch
+bb4184e7fb7b204ce168cb9a2bb84aae7a2545602b4b842a3d486a3af1347f84  marlin-bend-eight-stage.patch

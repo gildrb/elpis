@@ -10,7 +10,8 @@
 Generation checks the actual root PROOF.bend, then emits C from bend/PLAN.bend,
 bend/SELECT.bend, bend/SPECULATE.bend and bend/RUNTIME.bend. Compilation happens
 in the target runtime. Serving loads the planner, greedy speculation table and
-mirror action tables once per startup; qualification loads the objective table once.
+mirror action tables once per startup; Marlin loads the stage policy at JIT
+construction, and qualification loads the objective table once.
 Retained hashes bind artifacts, not their trustworthiness: Bend's checker/compiler,
 Base intrinsics, foreign IO, clang and the host runtime remain trusted. The checker
 runs the unmodified pinned upstream 2.0.26 release executable with explicit OS
@@ -69,6 +70,10 @@ SOURCE_NAMES = (
     "bend/abi_laws.bend",
     "bend/abi_proof.bend",
     "bend/RUNTIME.bend",
+    "bend/marlin_pipeline.bend",
+    "bend/marlin_pipeline_spec.bend",
+    "bend/marlin_pipeline_laws.bend",
+    "bend/marlin_pipeline_proof.bend",
     "bend/selector.bend",
     "bend/selector_spec.bend",
     "bend/selector_laws.bend",
@@ -77,6 +82,7 @@ SOURCE_NAMES = (
     "bend/native_build.py",
     "bend/native.py",
     "bend/native.cu",
+    "patches/marlin-bend-eight-stage.patch",
 )
 OFFSET_NAMES = (
     "k_packed",
@@ -141,7 +147,7 @@ POLICY_HEADER = "QWEN_OBJECTIVE_POLICY_V1\nROLES\n"
 POLICY_END = "END_QWEN_OBJECTIVE_POLICY\n"
 SPECULATION_HEADER = "QWEN_DFLASH_GREEDY_V1\n8\n128\n4\n"
 SPECULATION_END = "END_QWEN_DFLASH_GREEDY\n"
-RUNTIME_HEADER = "QWEN_RUNTIME_CONTROL_V1\nFREE_MIRROR\n8\n"
+RUNTIME_HEADER = "QWEN_RUNTIME_CONTROL_V2\nFREE_MIRROR\n8\n"
 RUNTIME_END = "END_QWEN_RUNTIME_CONTROL\n"
 U32_MAX = (1 << 32) - 1
 HEADER = "QWEN_KVARN_PLAN_V2\n"
@@ -202,10 +208,13 @@ BUILD_LOGS = ("compiler-version.json",) + tuple(log for _, log in COMPILATIONS)
 SCOPE = (
     "Bend2 checks the filled root PROOF.bend and its transitive local laws; "
     "the CPU planner, objective policy, greedy block8 speculation decisions and "
-    "host mirror action tables are compiled from bend/PLAN.bend, bend/SELECT.bend, "
+    "runtime action tables are compiled from bend/PLAN.bend, bend/SELECT.bend, "
     "bend/SPECULATE.bend and bend/RUNTIME.bend. Speculation acceptance and wire "
     "equivalence are proved against an independent Bend specification. Runtime "
-    "tables select native host free-mirror and status-mirror actions only. "
+    "tables select native host free-mirror/status-mirror actions and one guarded "
+    "Marlin eight-stage copy-pipeline specialization through a compiled action mask. "
+    "The consumer patch is source-bound; native class/safety/determinism "
+    "observations, compilation and same-order CUDA arithmetic remain trusted. "
     "Transaction, ownership, numerical and ABI laws are abstract contracts, not "
     "proofs of native events, epochs, ownership, machine arithmetic "
     "or device addressing. "
@@ -293,14 +302,19 @@ class SpeculationPolicy:
 
 @dataclass(frozen=True, slots=True)
 class RuntimePolicy:
-    """Compiled host actions; event/epoch observations remain the caller's trust boundary."""
+    """Compiled actions; native observations remain the caller's trust boundary."""
 
     free_mirror: tuple[int, ...]
     status: tuple[int, ...]
+    marlin_eight_stage: tuple[int, ...]
 
     def __post_init__(self) -> None:
-        """Require immutable complete tables and the two bounded action alphabets."""
-        for values, maximum in ((self.free_mirror, 1), (self.status, 2)):
+        """Require immutable complete tables and their bounded action alphabets."""
+        for values, maximum in (
+            (self.free_mirror, 1),
+            (self.status, 2),
+            (self.marlin_eight_stage, 1),
+        ):
             if (
                 type(values) is not tuple
                 or len(values) != 8
@@ -330,6 +344,13 @@ class RuntimePolicy:
         ):
             fail("Runtime status-mirror observations must be exact booleans")
         return self.status[armed | (event_exists << 1) | (event_ready << 2)]
+
+    @property
+    def marlin_eight_stage_mask(self) -> int:
+        """Serialize compiled LSB-first rows as one byte, without redeciding policy."""
+        return sum(
+            action << index for index, action in enumerate(self.marlin_eight_stage)
+        )
 
 
 def digest(path: Path) -> str:
@@ -693,7 +714,7 @@ def generate(output: Path, bend: str) -> None:
     write_json(
         output / "source.json",
         {
-            "schema": 8,
+            "schema": 9,
             "bend_version": BEND_VERSION.rstrip("\n"),
             "bend_origin": str(compiler),
             "sources": sources,
@@ -721,7 +742,7 @@ def source_identity(directory: Path) -> dict[str, object]:
             "scope",
         }
         or type(identity.get("schema")) is not int
-        or identity.get("schema") != 8
+        or identity.get("schema") != 9
         or identity.get("bend_version") != BEND_VERSION.rstrip("\n")
         or identity.get("scope") != SCOPE
     ):
@@ -941,20 +962,29 @@ def parse_runtime(text: str) -> RuntimePolicy:
     if not text.startswith(RUNTIME_HEADER) or not text.endswith(RUNTIME_END):
         fail("Missing or malformed Bend2 runtime control protocol")
     rows = text[len(RUNTIME_HEADER) : -len(RUNTIME_END)].split("\n")
-    if len(rows) != 19 or rows[8:10] != ["STATUS", "8"] or rows[-1] != "":
+    if (
+        len(rows) != 29
+        or rows[8:10] != ["STATUS", "8"]
+        or rows[18:20] != ["MARLIN_EIGHT_STAGE", "8"]
+        or rows[-1] != ""
+    ):
         fail("Bend2 runtime action count or marker mismatch")
-    free_mirror, status = rows[:8], rows[10:-1]
-    if any(re.fullmatch(r"[01]", row) is None for row in free_mirror) or any(
-        re.fullmatch(r"[0-2]", row) is None for row in status
+    free_mirror, status, marlin_eight_stage = rows[:8], rows[10:18], rows[20:-1]
+    if (
+        any(re.fullmatch(r"[01]", row) is None for row in free_mirror)
+        or any(re.fullmatch(r"[0-2]", row) is None for row in status)
+        or any(re.fullmatch(r"[01]", row) is None for row in marlin_eight_stage)
     ):
         fail("Bend2 runtime control contains invalid action codes")
     return RuntimePolicy(
-        tuple(int(row) for row in free_mirror), tuple(int(row) for row in status)
+        tuple(int(row) for row in free_mirror),
+        tuple(int(row) for row in status),
+        tuple(int(row) for row in marlin_eight_stage),
     )
 
 
 def read_runtime(directory: Path, *, record: Path | None = None) -> RuntimePolicy:
-    """Execute the original compiled CPU runtime table once, never per mirror access."""
+    """Execute the compiled CPU runtime table at startup/JIT construction, never per GEMM."""
     evidence = run(RUNTIME_COMMAND, cwd=directory, record=record)
     return parse_runtime(successful_output(evidence, RUNTIME_COMMAND))
 
@@ -962,9 +992,10 @@ def read_runtime(directory: Path, *, record: Path | None = None) -> RuntimePolic
 def runtime_record(policy: RuntimePolicy) -> dict[str, object]:
     """Retain compiled actions without recreating the decision algebra in Python."""
     return {
-        "schema": 1,
+        "schema": 2,
         "free_mirror": list(policy.free_mirror),
         "status": list(policy.status),
+        "marlin_eight_stage": list(policy.marlin_eight_stage),
     }
 
 
@@ -1144,7 +1175,7 @@ def verify(directory: Path) -> None:
 def verification_identity(directory: Path) -> dict[str, object]:
     """Bind all four retained executions to the complete source, proof and build chain."""
     return {
-        "schema": 5,
+        "schema": 6,
         "build_sha256": digest(directory / "build.json"),
         "source_sha256": digest(directory / "source.json"),
         "proof_sha256": digest(directory / "logs/proof.json"),

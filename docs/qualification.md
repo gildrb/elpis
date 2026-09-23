@@ -404,6 +404,52 @@ was removed. That source correction is not itself capacity evidence. The earlier
 startup reports below retain their original identities and chronology; one later
 completed request and sampled math measurement do not establish full qualification.
 
+### Guarded eight-stage Marlin candidate: sampled exactness, benchmark pending
+
+The candidate image is
+`sha256:94d6dd975e406413ff8cdaa2bbccbaa181c3760379dbaeb50072e774e54e90e8`.
+It selects eight copy stages instead of the retained four only for original
+M1–8, full-K, SM86 BF16/U4B8/group128 inputs without act-order or zero-points,
+after the existing selector chooses 128 threads and an M8/N128/K64 tile.
+The remaining guards require K divisible by128, group_blocks8, one block per SM,
+non-atomic reduction and the existing shared reservation at least **51200 bytes**.
+That conservative padded-M16 guard exceeds the selected M8 layout's **43008
+addressed bytes**; neither number replaces the unchanged launch reservation.
+The compiled Bend policy is the sole stage-selection authority; unmet guards
+retain four stages. Grid, K stripes, reduction grouping and scratch are unchanged.
+Artifact admission uses source schema9, verified schema6 and runtime wireV2
+(`MARLIN_EIGHT_STAGE`); an always-fallback wire is rejected, not accepted as proof
+that the new path ran.
+
+The original Bend2.0.26 root proof passed in **67.69 s**, including **24**
+[pipeline model laws](../bend/marlin_pipeline_laws.bend). Generation, compilation,
+verification and four CPU consumers passed. The checked statements cover policy
+and exact wire ordering, period-two ring phase through arbitrary wraps, complete
+ordered tile/MMA traces including short tails, symbolic previous-accumulator
+recurrence, and shared-layout/schedule arithmetic. They do **not** prove native
+CUDA execution or F32 equivalence: integer/address refinement, operands and
+scale addressing, async commit/wait and barriers, ring reuse/predication/drain,
+compiler/foreign-IO fidelity, actual instruction rounding and intra/inter-CTA
+reduction order remain external obligations. Seven primed groups and
+`wait_group<6>` are checked arithmetic parameters, not a CUDA ordering theorem.
+
+The real candidate JIT passed in **231.13 s**. Fresh guarded baseline/candidate
+captures and their CPU comparison passed **624/624 bit-exact output fixtures**
+and **624/624 eager/graph dispatch pairs**, with graph/scratch checks passing.
+The observed selected kernel used117 registers versus108 for four stages;
+both reported stack0/local0. Dynamic shared reservation101376 bytes and grid82
+were unchanged. These are sampled compiled/GPU observations, not universal
+numerical or model equivalence, occupancy evidence, or a throughput result.
+Private evidence is retained under `/tmp/litos-recovery-ops-id8q0yvb/`:
+`marlin-eight-stage-baseline-evidence-1`,
+`marlin-eight-stage-candidate-evidence-1` and
+`marlin-eight-stage-comparison-evidence-1`.
+
+**The frozen benchmark is pending; no promotion is claimed.** The retained best
+remains95.380797 tok/s. The full-K-grid and two-stage-pipeline candidates remain
+rejected for their frozen-suite quality failures; synthetic kernel exactness
+does not supersede those decisions (see [patch notes](../patches/NOTES.md)).
+
 ### Checked domains and direct GPU/runtime-control smoke
 
 The subsequent root proof passed with **original, unmodified Bend 2.0.20**
