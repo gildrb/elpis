@@ -418,3 +418,93 @@ This is not uninstrumented timing or pure-decode attribution: model-role
 correlations and explicit cache-hit telemetry were unavailable. Trace and
 control receipts are in `profiling-cached32k-1` beside that run.
 Restore serial query execution; retain the required Bend 2.0.25 migration.
+
+### Serial Bend 2.0.25 control, run 19
+
+After removing query tiling, the unchanged frozen suite admitted
+**93.238516 tok/s**, with math reward 2/3, in 1846.031 seconds.
+The 0.29% increase over 92.97 tok/s is marginal (one observed noise floor),
+not an established speedup. C1 at 1024/8192/32768 was
+83.7953/74.4049/55.2521 tok/s; short I3 was 91.7270 tok/s and native
+178769-token GraphWalks was 13.2681 tok/s. The serial control was retained.
+
+Evidence: `bend25-serial-benchmark-evidence-1/autoresearch` under the same
+temporary evidence root. Immutable image:
+`sha256:cbdb2935ec6f127e3ecadaaf641dff273adeb97f370367a00693946a93cb4407`.
+The guardian restored the authenticated FP8 baseline and exited 0.
+
+The fresh bounded profile beside that run passed all capture gates:
+Marlin totaled 184.052 ms (44.94%) and `_packed_attention_split` 117.287 ms
+(28.64%), out of 409.588 ms summed kernel duration. Marlin time was
+essentially unchanged from the rejected tiled profile; packed attention
+fell substantially. The 851.365 ms instrumented GPU envelope and
+397.658 ms busy union do not establish CPU-gap causality, model-role
+attribution, or cache reuse.
+
+### Local EXL3 same-three quality comparison
+
+The independently measured EXL3 stack returned **99.037852 tok/s, reward
+3/3**, versus the retained run17 SGLang stack's 92.971308 tok/s, reward
+2/3. Both used the same three ordered native AIME25 tasks, graders,
+greedy sampling and 32768-token output budget. The actual EXL3 renderer
+matched the reconstructed baseline token sequences exactly (162/304/296).
+This was not the full frozen suite or SGLang/Bend admission.
+
+All calls were included: EXL3 generated 23127 tokens in 233.517 seconds,
+versus 37726 in 405.781 seconds. In particular, dataset index10 completed
+correctly in 18443 tokens on EXL3, while SGLang exhausted 32768 tokens.
+Different quantization/cache and generated trajectories prevent treating
+the pooled rate difference as an isolated engine or kernel speedup.
+Three tasks do not establish general quality superiority.
+
+The private HTTP overlay collects accumulated `full_completion`, not the
+upstream terminal delta, and preserves unfinished reasoning outside the
+grader-visible answer channel. Real GPU smoke verified completed and
+length-capped responses. SSE is explicitly buffered until completion:
+whole-call timing is meaningful, token TTFT and C1 are not compared.
+Native262144 was configured; this comparison did not exercise long inputs.
+
+Evidence: `exl3-native-comparison-evidence-1/comparison.json` and
+`exl3-native-provenance-1.json` under the temporary evidence root.
+Image: `sha256:b35314f48c7684b4c9cf3d59f4c21395316aa1fc0925db782f460005aa2602ff`.
+Actual native extension SHA256:
+`6d30690fdb76b3c4ad3fb5e69f0479707e410fc9b6194e2a5e32f4d7fe1fd8b3`.
+The guardian restored the authenticated FP8 baseline and exited 0.
+
+### Marlin small-M K64 candidate, run 20
+
+`marlin-sm86-small-m-k64.patch` selects the existing 128-thread
+M8/N128/K64 kernel only for actual SM86 BF16 symmetric U4B8/group128
+M1–8, with no act order. Other classes retain their dispatch. The
+actual-device capability is passed through the private native ABI;
+the public Python signature and production Bend artifacts are unchanged.
+
+The complete frozen suite admitted **95.380797 tok/s**, math reward
+3/3 and short I3 reward1, in 1764.732 seconds. C1 at 1024/8192/32768
+was 76.4811/71.0396/55.2843 tok/s; the smaller depths regressed.
+Short I3 throughput was 92.9936 and long GraphWalks 14.0391 tok/s.
+This is a pooled model-call improvement with changed generated
+trajectories, not an established GEMM speedup; an unchanged repeat is
+required to assess reproducibility.
+
+Paired real-checkpoint numerical evidence covers 12 representative
+linears, M1–8 and larger-M controls, eager execution and graph replay.
+432/624 cross-arm outputs were bit-exact; all 240 larger-M controls were
+exact, with no observed nonfinite, graph or scratch failures. Small-M
+accumulation order differs. No arbitrary tolerance or unconditional IEEE
+error bound was admitted; these observations do not prove numerical
+equivalence. The paired image also selected asymmetric U4, which was
+removed before serving: the benchmark image changes only actual U4B8.
+The first fixture rejected valid signed scales before any kernel; its
+failure and the evidence-backed finite-only correction are retained.
+
+The fresh bounded profile confirms the intended 128-thread specialization.
+Marlin totaled 184.612 ms versus serial184.052 ms; packed attention was
+119.506 ms versus117.287 ms, out of413.405 ms summed kernel duration.
+No kernel-time win was demonstrated. Role/cache attribution remains
+unresolved, as in earlier profiles.
+
+Evidence: `marlin-k64-benchmark-evidence-1/autoresearch` and adjacent
+`profiling-cached32k-1`; paired evidence in `marlin-k64-comparison-1`,
+all under the temporary evidence root. Benchmark image:
+`sha256:fb50cb0af06c78017dc37ff2ee069fd61dc28f2a2dfeb37025ebf4b46ec675e9`.
