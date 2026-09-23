@@ -73,10 +73,6 @@ SOURCE_NAMES = (
     "bend/selector_spec.bend",
     "bend/selector_laws.bend",
     "bend/selector_proof.bend",
-    "bend/query_tiles.bend",
-    "bend/query_tiles_spec.bend",
-    "bend/query_tiles_laws.bend",
-    "bend/query_tiles_proof.bend",
     "bend/adapter.py",
     "bend/native_build.py",
     "bend/native.py",
@@ -94,36 +90,27 @@ OFFSET_NAMES = (
     "end",
 )
 FIELDS = (
-    (
-        "context",
-        "headroom",
-        "pool",
-        "page_size",
-        "pages",
-        "tail_slots",
-        "write_tokens",
-        "query_tokens",
-        "commit_tokens",
-        "write_span_pages",
-        "admission_free_slots",
-        "target_visible",
-        "draft_window",
-        "draft_visible",
-        "target_dim",
-        "target_kv_heads",
-        "target_layers",
-        "draft_dim",
-        "draft_kv_heads",
-        "draft_layers",
-    )
-    + tuple(f"{role}_{name}" for role in ("target", "draft") for name in OFFSET_NAMES)
-    + (
-        "verify_tile_tokens",
-        "verify_tile_count",
-        "verify_tile_start_0",
-        "verify_tile_start_1",
-    )
-)
+    "context",
+    "headroom",
+    "pool",
+    "page_size",
+    "pages",
+    "tail_slots",
+    "write_tokens",
+    "query_tokens",
+    "commit_tokens",
+    "write_span_pages",
+    "admission_free_slots",
+    "target_visible",
+    "draft_window",
+    "draft_visible",
+    "target_dim",
+    "target_kv_heads",
+    "target_layers",
+    "draft_dim",
+    "draft_kv_heads",
+    "draft_layers",
+) + tuple(f"{role}_{name}" for role in ("target", "draft") for name in OFFSET_NAMES)
 Plan: TypeAlias = dict[str, int | list[int]]
 ObjectiveFamily: TypeAlias = Literal["quality", "throughput", "first_token", "energy"]
 ObjectiveOrder: TypeAlias = Literal["better", "same", "worse", "missing"]
@@ -157,7 +144,7 @@ SPECULATION_END = "END_QWEN_DFLASH_GREEDY\n"
 RUNTIME_HEADER = "QWEN_RUNTIME_CONTROL_V1\nFREE_MIRROR\n8\n"
 RUNTIME_END = "END_QWEN_RUNTIME_CONTROL\n"
 U32_MAX = (1 << 32) - 1
-HEADER = "QWEN_KVARN_PLAN_V3\n"
+HEADER = "QWEN_KVARN_PLAN_V2\n"
 FREE = "FREE_PAGES\n"
 END = "END_QWEN_KVARN_PLAN\n"
 BEND_VERSION = "bend 2.0.25\n"
@@ -855,7 +842,7 @@ def compile_programs(directory: Path, cc: str) -> None:
 
 
 def parse_plan(text: str) -> Plan:
-    """Decode every byte: 42 fields, every ordered free ID, and one final newline."""
+    """Decode every byte: 38 fields, every ordered free ID, and one final newline."""
     if not text.startswith(HEADER) or not text.endswith(END):
         fail("Missing or malformed Bend2 plan protocol")
     rows = text[len(HEADER) : -len(END)].split("\n")
@@ -870,7 +857,7 @@ def parse_plan(text: str) -> Plan:
         fail("Bend2 plan contains noncanonical decimal integers")
     values = [exact_int(int(row), "wire value") for row in numeric]
     plan: Plan = dict(zip(FIELDS, values[: len(FIELDS)], strict=True))
-    plan["schema"] = 3
+    plan["schema"] = 2
     plan["free_pages"] = values[len(FIELDS) :]
     return plan
 
@@ -987,7 +974,7 @@ def validate_request(plan: Plan, context: int, pool: int, page_size: int) -> Non
         fail("Unexpected plan fields")
     for name in FIELDS:
         _ = exact_int(plan[name], name)
-    if exact_int(plan["schema"], "schema") != 3:
+    if exact_int(plan["schema"], "schema") != 2:
         fail("Unsupported plan schema")
 
     def field(name: str) -> int:
@@ -1027,13 +1014,6 @@ def validate_request(plan: Plan, context: int, pool: int, page_size: int) -> Non
         field("commit_tokens"),
     ) != (8, 128, 32, 8):
         fail("Unsupported bounded tail/write/query/commit geometry")
-    if (
-        field("verify_tile_tokens"),
-        field("verify_tile_count"),
-        field("verify_tile_start_0"),
-        field("verify_tile_start_1"),
-    ) != (4, 2, 0, 4):
-        fail("Unsupported native target verify query partition")
     if (
         field("write_span_pages") != 2
         or field("admission_free_slots") != field("write_span_pages") + 2

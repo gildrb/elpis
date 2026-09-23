@@ -65,8 +65,7 @@ def fields() -> List<&2, Nat>:
     8n, 128n, 32n, 8n, 2n, 4n, 128n, 2184n, 2304n,
     256n, 4n, 16n, 128n, 8n, 5n] : List<&2, Nat>}
   List.append(&2, Nat, geometry,
-    List.append(&2, Nat,
-      List.append(&2, Nat, offsets(256n), offsets(128n)), [4n, 2n, 0n, 4n]))
+    List.append(&2, Nat, offsets(256n), offsets(128n)))
 
 def native() -> Control.Plan:
   Control.Plan{fields(), seq(2056n, 1n)}
@@ -91,5 +90,5 @@ def rows(xs: List<&2, Nat>) -> String:
       Nat.show(h) ++ "\n" ++ rows(t)
 
 def protocol() -> String:
-  "QWEN_KVARN_PLAN_V3\n" ++ rows(fields()) ++ "FREE_PAGES\n" ++
+  "QWEN_KVARN_PLAN_V2\n" ++ rows(fields()) ++ "FREE_PAGES\n" ++
     rows(seq(2056n, 1n)) ++ "END_QWEN_KVARN_PLAN"

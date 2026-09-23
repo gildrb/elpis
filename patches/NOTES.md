@@ -396,3 +396,25 @@ Immutable candidate image:
 `sha256:e7e1f8999ad5cc10deb845921f21795d41631d0832351103e8d3d109a2936241`.
 The parity guardian restored the authenticated FP8 baseline and exited 0.
 Frozen-suite throughput and a fresh bottleneck profile remain required.
+
+### Query-tile run 18: rejected
+
+The complete frozen suite admitted **82.997237 tok/s**, versus the
+92.97 tok/s baseline (10.7% slower). Math reward remained 2/3. C1 committed
+throughput at 1024/8192/32768 was 83.2688/69.3283/45.9121 tok/s; the
+178769-token GraphWalks lane was 10.9649 tok/s. Total suite time was
+2051.999 seconds. The candidate was discarded, not promoted.
+
+Evidence: `bend25-querytiles-benchmark-evidence-2/autoresearch` under the
+same temporary evidence root. The first startup attempt sent no benchmark
+requests: its historical private GPU probe still required source schema7.
+A separately retained schema8 probe admitted the second launch.
+
+A fresh bounded post-benchmark profile exported successfully with no
+redundant stop request. In its instrumented GPU-kernel envelope,
+`_packed_attention_split` accounted for 194.116 ms (39.9%) and Marlin
+for 184.034 ms (37.8%), out of 486.582 ms summed kernel duration.
+This is not uninstrumented timing or pure-decode attribution: model-role
+correlations and explicit cache-hit telemetry were unavailable. Trace and
+control receipts are in `profiling-cached32k-1` beside that run.
+Restore serial query execution; retain the required Bend 2.0.25 migration.

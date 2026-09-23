@@ -13,7 +13,7 @@ def rows(xs: List<&2, Nat>) -> String:
 def render(plan: Control.Plan) -> String:
   match plan:
     case Control.Plan{fields, free_pages}:
-      "QWEN_KVARN_PLAN_V3\n" ++ rows(fields) ++ "FREE_PAGES\n" ++
+      "QWEN_KVARN_PLAN_V2\n" ++ rows(fields) ++ "FREE_PAGES\n" ++
         rows(free_pages) ++ "END_QWEN_KVARN_PLAN"
 
 def accepted(result: Maybe<&2, Control.Plan>) -> String:
