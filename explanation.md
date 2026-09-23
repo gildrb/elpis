@@ -152,7 +152,7 @@ That is genuine execution of Bend-derived decisions, but it is **not** the same 
 
 The laws also cover serialized output: all 38 plan fields, page ordering, and the protocol string. Proving a correct internal value would be insufficient if the wire encoder changed it before consumption. `rows_semantics` and `native_wire` bridge that gap up to the explicit trusted IO boundary.
 
-[bend/adapter.py](bend/adapter.py) binds retained source, compiler, Base library, proof logs, emitted C, compiled programs, and execution evidence. The selected authority is original **Bend 2.0.20**, not merely any executable named `bend`. The [Docker build](Dockerfile) packages the checked artifacts with the native patch series.
+[bend/adapter.py](bend/adapter.py) binds retained source, compiler, Base library, proof logs, emitted C, compiled programs, and execution evidence. The authority is the latest stable upstream release, currently original **Bend 2.0.25**, with exact project pins and hashes updated together; an arbitrary executable named `bend` is not sufficient. The [Docker build](Dockerfile) packages the checked artifacts with the native patch series.
 
 Hashes prevent accidental substitution and stale evidence from being accepted as the same build. They do not mathematically prove the compiler correct or independently defeat an operator fabricating an entire evidence set.
 
@@ -184,7 +184,7 @@ The 2056-page sequence is composed from trees of widths 2048 and 8. `trees_split
 
 This is the distinction between **proof complexity** and **inference complexity**. Better proof structure makes checking practical without weakening the property. A universal layout theorem is stronger than checking two examples, even when its proof is cheaper to check.
 
-The latest root proof passed with original, unmodified Bend 2.0.20 (`All terms check`, exit 0, **127.01 s**), a 1 GiB process stack limit, disabled core dumps and `BUN_JSC_maxPerThreadStackUsage=536870912`; the four isolated domains passed in **0.21–0.26 s** each. That addressed checker resource requirements without patching the admitted checker or weakening the laws. The earlier checker-repair investigation is not the trusted basis of this result.
+The historical root proof passed with original, unmodified Bend 2.0.20 (`All terms check`, exit 0, **127.01 s**), a 1 GiB process stack limit, disabled core dumps and `BUN_JSC_maxPerThreadStackUsage=536870912`; the four isolated domains passed in **0.21–0.26 s** each. During the 2.0.25 migration, the unchanged root proof also passed with the original 2.0.25 release, a 1 GiB process stack and `JSC_maxPerThreadStackUsage=536870912`. The default-stack invocation overflowed. Increasing resource limits did not modify the checker or weaken any law; this proof result alone does not qualify newly compiled serving artifacts or GPU throughput.
 
 ## 7. We formalized what “better” means, not a promised tok/s number
 

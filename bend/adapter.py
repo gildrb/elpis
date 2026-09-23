@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Check Bend 2.0.20 proofs and retain four CPU serving-policy programs.
+"""Check Bend 2.0.25 proofs and retain four CPU serving-policy programs.
 
   python3 bend/adapter.py generate --output /tmp/qwen-bend --bend /path/to/bend
   python3 bend/adapter.py compile --directory /tmp/qwen-bend --cc clang-19
@@ -13,8 +13,8 @@ in the target runtime. Serving loads the planner, greedy speculation table and
 mirror action tables once per startup; qualification loads the objective table once.
 Retained hashes bind artifacts, not their trustworthiness: Bend's checker/compiler,
 Base intrinsics, foreign IO, clang and the host runtime remain trusted. The checker
-runs the pinned upstream 2.0.20 TypeScript with one reviewed stack-safe comparator
-patch through the release ELF's BUN_BE_BUN source mode. This
+runs the unmodified pinned upstream 2.0.25 release executable with explicit OS
+and JavaScriptCore stack limits, not compiler/checker semantic overrides. This
 is not a CUDA/F32, capacity, quality, or compiler-correctness proof. Engine
 allocation validators remain mandatory.
 """
@@ -73,6 +73,10 @@ SOURCE_NAMES = (
     "bend/selector_spec.bend",
     "bend/selector_laws.bend",
     "bend/selector_proof.bend",
+    "bend/query_tiles.bend",
+    "bend/query_tiles_spec.bend",
+    "bend/query_tiles_laws.bend",
+    "bend/query_tiles_proof.bend",
     "bend/adapter.py",
     "bend/native_build.py",
     "bend/native.py",
@@ -90,27 +94,36 @@ OFFSET_NAMES = (
     "end",
 )
 FIELDS = (
-    "context",
-    "headroom",
-    "pool",
-    "page_size",
-    "pages",
-    "tail_slots",
-    "write_tokens",
-    "query_tokens",
-    "commit_tokens",
-    "write_span_pages",
-    "admission_free_slots",
-    "target_visible",
-    "draft_window",
-    "draft_visible",
-    "target_dim",
-    "target_kv_heads",
-    "target_layers",
-    "draft_dim",
-    "draft_kv_heads",
-    "draft_layers",
-) + tuple(f"{role}_{name}" for role in ("target", "draft") for name in OFFSET_NAMES)
+    (
+        "context",
+        "headroom",
+        "pool",
+        "page_size",
+        "pages",
+        "tail_slots",
+        "write_tokens",
+        "query_tokens",
+        "commit_tokens",
+        "write_span_pages",
+        "admission_free_slots",
+        "target_visible",
+        "draft_window",
+        "draft_visible",
+        "target_dim",
+        "target_kv_heads",
+        "target_layers",
+        "draft_dim",
+        "draft_kv_heads",
+        "draft_layers",
+    )
+    + tuple(f"{role}_{name}" for role in ("target", "draft") for name in OFFSET_NAMES)
+    + (
+        "verify_tile_tokens",
+        "verify_tile_count",
+        "verify_tile_start_0",
+        "verify_tile_start_1",
+    )
+)
 Plan: TypeAlias = dict[str, int | list[int]]
 ObjectiveFamily: TypeAlias = Literal["quality", "throughput", "first_token", "energy"]
 ObjectiveOrder: TypeAlias = Literal["better", "same", "worse", "missing"]
@@ -144,39 +157,22 @@ SPECULATION_END = "END_QWEN_DFLASH_GREEDY\n"
 RUNTIME_HEADER = "QWEN_RUNTIME_CONTROL_V1\nFREE_MIRROR\n8\n"
 RUNTIME_END = "END_QWEN_RUNTIME_CONTROL\n"
 U32_MAX = (1 << 32) - 1
-HEADER = "QWEN_KVARN_PLAN_V2\n"
+HEADER = "QWEN_KVARN_PLAN_V3\n"
 FREE = "FREE_PAGES\n"
 END = "END_QWEN_KVARN_PLAN\n"
-BEND_VERSION = "bend 2.0.20\n"
+BEND_VERSION = "bend 2.0.25\n"
 PROOF_DIAGNOSTIC = "All terms check.\n"
 BEND_COMMAND = "./compiler/bin/bend"
-COMPILER_FILES = {
-    "bin/bend",
-    "bin/bend-runtime",
-    "bend2/main.ts",
-    "bend2/comp.ts",
-    "bend2/bend.ts",
-}
-BASE_SHA256 = "b8c2734d45ec6b4ce70fee70ff06ef35e08fce885af8852d8eb77dbff020e946"
+COMPILER_FILES = {"bin/bend", "bin/bend-runtime"}
+BASE_SHA256 = "e5639663177f2de93ef34867c029698aa4e68a98d46629f0b15452b67b99d798"
 RELEASE_RUNTIME_SHA256 = (
-    "fab9e564c578a0a15880d5fea561ac1612dba01265a5a219906b5888f3381d8c"
-)
-SELECTED_RUNTIME_SHA256 = (
-    "2736371e69c65e0e519491a8165dec2de577c752e1d8779290e59c1d0781a95c"
+    "d9c0dad1f77be6a13dd8dcc16aef4f59047a956a2744f25d5c220cb8de384693"
 )
 NATIVE_RUNTIME_SHA256 = (
     RELEASE_RUNTIME_SHA256,
-    SELECTED_RUNTIME_SHA256,
-    "e38cda9ed7c2066a9d3335dd599bb2bcf7d3e5871b8ed0f2a789fbea2e57eb0d",
+    "353382319d45c809f47f9b83d6c8030a3da8015fc55f9c7d6cc68ed3bda7247f",
 )
-# Source-mode checker identity: immutable upstream 2.0.20 TS plus the reviewed
-# stack-safe comparator patch; the release ELF only interprets the entry.
-WRAPPER_SHA256 = "99a3a8c80a5b2906c398e2d5b7a10db3721ca745d20059042d7efe450d7cc82f"
-SOURCE_MAIN_SHA256 = "9db2123696fd8c40d0455dbf43730f51c03f1be73b02acaa570ee138be65309e"
-SOURCE_COMP_SHA256 = "1cf3b5ffea86697656f8ef4d6c26040f16ac512fd92485d164f8a14425871bd0"
-PATCHED_CHECKER_SHA256 = (
-    "180676f885557a6faf38acce10d48872ea3c01594f49af9139bafea2d3152ad9"
-)
+WRAPPER_SHA256 = "47bf30b09528337d9ff4ecfddafa30d62de872ac5b243d8c569cd9256210f5b5"
 # Resource limits for the full proof, not compiler/checker semantic overrides.
 PROOF_COMMAND = [
     "prlimit",
@@ -226,9 +222,8 @@ SCOPE = (
     "Transaction, ownership, numerical and ABI laws are abstract contracts, not "
     "proofs of native events, epochs, ownership, machine arithmetic "
     "or device addressing. "
-    "The checker is the pinned upstream 2.0.20 TypeScript with one reviewed "
-    "stack-safe comparator patch (iterative term_compare); the patch changes "
-    "evaluation strategy, not proof semantics, and is hash-bound. "
+    "The checker is the unmodified pinned upstream 2.0.25 release executable; "
+    "explicit OS and JavaScriptCore stack limits are resource settings only. "
     "Base intrinsics, foreign IO, both compilers and the host runtime are trusted, "
     "not proved. GPU completion, consumption and execution remain trusted native "
     "facts. No CUDA/F32, compiler-correctness, capacity, performance or quality claim."
@@ -413,10 +408,10 @@ def executable(name: str) -> Path:
 
 
 def command_environment(command: list[str]) -> dict[str, str]:
-    """Record the approved proof-only VM stack setting and ordinary execution environment."""
+    """Record the release checker's approved VM stack and ordinary execution environment."""
     environment = {"BEND_NO_TELEMETRY": "1"}
-    if command == PROOF_COMMAND:
-        environment["BUN_JSC_maxPerThreadStackUsage"] = "536870912"
+    if command == PROOF_COMMAND or (command and command[0] == BEND_COMMAND):
+        environment["JSC_maxPerThreadStackUsage"] = "536870912"
     return environment
 
 
@@ -425,10 +420,9 @@ def run(
 ) -> dict[str, object]:
     """Run without a shell or stdin and preserve exact bytes as UTF-8, not CRLF translation."""
     for name in os.environ:
-        if name.startswith("BUN_JSC_") or name in (
+        if name.startswith(("BUN_JSC_", "JSC_")) or name in (
             "BUN_OPTIONS",
             "NODE_OPTIONS",
-            "JSC_OPTIONS",
             "BUN_BE_BUN",
         ):
             fail(
@@ -505,9 +499,10 @@ def local_file(root: Path, path: Path) -> Path:
 def source_closure(root: Path, base_root: Path) -> tuple[set[str], set[str]]:
     """Mirror Bend2's local import preamble; forbid packages and local foreign code.
 
-    Only the installed Base is privileged by Bend2 (realpath equality, not its
-    spelling). Scan it too: trusted intrinsic declarations are not permission
-    to admit @unsafe. All its foreign .c/.js inputs are retained conservatively.
+    Only the authenticated installed Base is privileged by Bend2 (realpath
+    equality, not its spelling). Local @unsafe annotations remain forbidden.
+    Exact proof and emission diagnostics reject reachable Base unsafe terms;
+    unused declarations and all Base foreign .c/.js inputs remain retained.
     """
     local: set[str] = set()
     trusted: set[str] = set()
@@ -556,8 +551,12 @@ def source_closure(root: Path, base_root: Path) -> tuple[set[str], set[str]]:
                 fail(f"Proof entrypoint and trusted Base must be proof-only: {path}")
             if token.startswith("#"):
                 continue
-            if previous == "@" and token == "unsafe":
-                fail(f"Unsafe annotation in proof/compiler inputs: {path}")
+            if (
+                previous == "@"
+                and token == "unsafe"
+                and not (base and name == "base.bend")
+            ):
+                fail(f"Unsafe annotation outside authenticated Base: {path}")
             if previous == "import":
                 if not base or not token.startswith('"') or not token.endswith('"'):
                     fail(f"Foreign code is restricted to retained Base IO: {path}")
@@ -634,20 +633,13 @@ def tree_files(root: Path) -> set[str]:
 
 
 def check_release_compiler(hashes: object) -> None:
-    """Admit only the pinned source-mode 2.0.20 checker layout and bytes."""
-    if not is_object(hashes) or not set(COMPILER_FILES) <= set(hashes):
-        fail("Compiler layout is not the pinned source-mode Bend 2.0.20 closure")
+    """Admit only the pinned upstream 2.0.25 release launcher and native runtime."""
+    if not is_object(hashes) or not COMPILER_FILES <= set(hashes):
+        fail("Compiler layout is not the pinned Bend 2.0.25 release closure")
     if hashes.get("bin/bend") != WRAPPER_SHA256:
-        fail("Retained Bend launcher differs from the pinned source-mode wrapper")
+        fail("Retained Bend launcher differs from the pinned release wrapper")
     if hashes.get("bin/bend-runtime") not in NATIVE_RUNTIME_SHA256:
-        fail("Bend runtime is not a pinned native 2.0.20 release executable")
-    if (
-        hashes.get("bend2/main.ts") != SOURCE_MAIN_SHA256
-        or hashes.get("bend2/comp.ts") != SOURCE_COMP_SHA256
-    ):
-        fail("Retained compiler entry modules differ from the pinned upstream source")
-    if hashes.get("bend2/bend.ts") != PATCHED_CHECKER_SHA256:
-        fail("Retained checker differs from the reviewed stack-safe 2.0.20 comparator")
+        fail("Bend runtime is not a pinned native 2.0.25 release executable")
 
 
 def generate(output: Path, bend: str) -> None:
@@ -658,8 +650,8 @@ def generate(output: Path, bend: str) -> None:
             "Bend must be the installed bin/bend executable with adjacent release resources"
         )
     compiler_root = compiler.parent.parent
-    # Nix exposes a public makeWrapper script; retain the actual release ELF.
-    # Only the selected package layout is recognized, never legacy source mode.
+    # Nix exposes a public makeWrapper script; retain the release launcher and ELF.
+    # Only the selected package layout is recognized.
     nix_root = compiler_root / "libexec/bend"
     direct = (compiler_root / "bend2/base.bend").is_file()
     nix = (nix_root / "bin/bend").is_file() and (nix_root / "bend2/base.bend").is_file()
@@ -669,7 +661,7 @@ def generate(output: Path, bend: str) -> None:
         compiler = local_file(compiler_root, nix_root / "bin/bend")
         compiler_root = nix_root
     if digest(compiler_root / "bend2/base.bend") != BASE_SHA256:
-        fail("Bend Base differs from the selected 2.0.20 release")
+        fail("Bend Base differs from the selected 2.0.25 release")
     base_root = compiler_root / "bend2"
     source_root = Path(__file__).resolve().parent.parent
     local, trusted = source_closure(source_root, base_root)
@@ -680,13 +672,13 @@ def generate(output: Path, bend: str) -> None:
     compiler_hashes = snapshot(compiler_root, output / "compiler", compiler_names)
     check_release_compiler(compiler_hashes)
     (output / "compiler/bin/bend").chmod(0o755)
-    # copyfile drops modes; the interpreter ELF must stay executable too.
+    # copyfile drops modes; the release ELF must stay executable too.
     (output / "compiler/bin/bend-runtime").chmod(0o755)
     # Execute the copy so its realpath-selected Base is exactly the retained Base.
     version_command = [BEND_COMMAND, "version"]
     version = run(version_command, cwd=output, record=output / "logs/version.json")
     if successful_output(version, version_command) != BEND_VERSION:
-        fail("Generation requires exactly bend 2.0.20")
+        fail("Generation requires exactly bend 2.0.25")
     base_command = [BEND_COMMAND, "base"]
     base = run(base_command, cwd=output, record=output / "logs/base.json")
     if (
@@ -714,7 +706,7 @@ def generate(output: Path, bend: str) -> None:
     write_json(
         output / "source.json",
         {
-            "schema": 7,
+            "schema": 8,
             "bend_version": BEND_VERSION.rstrip("\n"),
             "bend_origin": str(compiler),
             "sources": sources,
@@ -742,7 +734,7 @@ def source_identity(directory: Path) -> dict[str, object]:
             "scope",
         }
         or type(identity.get("schema")) is not int
-        or identity.get("schema") != 7
+        or identity.get("schema") != 8
         or identity.get("bend_version") != BEND_VERSION.rstrip("\n")
         or identity.get("scope") != SCOPE
     ):
@@ -767,7 +759,7 @@ def source_identity(directory: Path) -> dict[str, object]:
     }:
         fail("Retained dependency closure differs from generation")
     if digest(directory / "compiler/bend2/base.bend") != BASE_SHA256:
-        fail("Retained Base differs from the selected 2.0.20 release")
+        fail("Retained Base differs from the selected 2.0.25 release")
     if check_hashes(directory, identity.get("c")) != {
         f"{name}.c" for name in PROGRAM_NAMES
     }:
@@ -863,7 +855,7 @@ def compile_programs(directory: Path, cc: str) -> None:
 
 
 def parse_plan(text: str) -> Plan:
-    """Decode every byte: 38 fields, every ordered free ID, and one final newline."""
+    """Decode every byte: 42 fields, every ordered free ID, and one final newline."""
     if not text.startswith(HEADER) or not text.endswith(END):
         fail("Missing or malformed Bend2 plan protocol")
     rows = text[len(HEADER) : -len(END)].split("\n")
@@ -878,7 +870,7 @@ def parse_plan(text: str) -> Plan:
         fail("Bend2 plan contains noncanonical decimal integers")
     values = [exact_int(int(row), "wire value") for row in numeric]
     plan: Plan = dict(zip(FIELDS, values[: len(FIELDS)], strict=True))
-    plan["schema"] = 2
+    plan["schema"] = 3
     plan["free_pages"] = values[len(FIELDS) :]
     return plan
 
@@ -995,7 +987,7 @@ def validate_request(plan: Plan, context: int, pool: int, page_size: int) -> Non
         fail("Unexpected plan fields")
     for name in FIELDS:
         _ = exact_int(plan[name], name)
-    if exact_int(plan["schema"], "schema") != 2:
+    if exact_int(plan["schema"], "schema") != 3:
         fail("Unsupported plan schema")
 
     def field(name: str) -> int:
@@ -1035,6 +1027,13 @@ def validate_request(plan: Plan, context: int, pool: int, page_size: int) -> Non
         field("commit_tokens"),
     ) != (8, 128, 32, 8):
         fail("Unsupported bounded tail/write/query/commit geometry")
+    if (
+        field("verify_tile_tokens"),
+        field("verify_tile_count"),
+        field("verify_tile_start_0"),
+        field("verify_tile_start_1"),
+    ) != (4, 2, 0, 4):
+        fail("Unsupported native target verify query partition")
     if (
         field("write_span_pages") != 2
         or field("admission_free_slots") != field("write_span_pages") + 2

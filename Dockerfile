@@ -1,24 +1,22 @@
 # Digest-pinned runtime plus the Qwen packed-embedding/KVarN experimental series.
 # Native262144 with full verify and commit graphs remains an unqualified candidate.
-# Bend 2.0.20 only. The original release checker/compiler is a build dependency;
+# Bend 2.0.25 only. The original release checker/compiler is a build dependency;
 # the serving layer receives the proved program and its reproducible evidence.
 FROM lmsysorg/sglang:v0.5.19@sha256:d6e7288627be8b02be88e4bba38e73f6d50e2826869f753c13a4c4385ab3eda9 AS bend-toolchain
 ENV BEND_NO_TELEMETRY=1
 RUN apt-get update && \
-    apt-get install -y --no-install-recommends clang-19 util-linux patch && \
+    apt-get install -y --no-install-recommends clang-19 util-linux && \
     rm -rf /var/lib/apt/lists/*
 COPY bend/build_toolchain.py /tmp/bend-toolchain/
-COPY patches/bend2-stack-safe-2.0.20.patch /tmp/bend-toolchain/
 RUN curl --proto '=https' --tlsv1.2 -fsSL \
-      https://github.com/bendlang/bend/releases/download/v2.0.20/bend-2.0.20-linux-x64.tar.gz \
+      https://github.com/bendlang/bend/releases/download/v2.0.25/bend-2.0.25-linux-x64.tar.gz \
       -o /tmp/bend.tar.gz && \
     curl --proto '=https' --tlsv1.2 -fsSL \
-      https://codeload.github.com/bendlang/bend/tar.gz/a5269a6b2c5ccd6752b66df4bc6f60678b4f49bc \
+      https://codeload.github.com/bendlang/bend/tar.gz/c65bcb788dbfb298bb434c1d858b47c193841dc0 \
       -o /tmp/bend-source.tar.gz && \
     python3 /tmp/bend-toolchain/build_toolchain.py build \
       /tmp/bend.tar.gz \
       /tmp/bend-source.tar.gz \
-      /tmp/bend-toolchain/bend2-stack-safe-2.0.20.patch \
       /opt/bend-tools /opt/bend-toolchain.json && \
     rm -rf /tmp/bend.tar.gz /tmp/bend-source.tar.gz /tmp/bend-toolchain
 

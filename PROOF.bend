@@ -13,6 +13,7 @@ import ./bend/ownership_proof.bend as OwnershipProof
 import ./bend/abi_proof.bend as AbiProof
 import ./bend/numerical_proof.bend as NumericalProof
 import ./bend/selector_proof.bend as SelectorProof
+import ./bend/query_tiles_proof.bend as QueryTilesProof
 
 def add_succ(n: Nat, -i: Nat) -> {Nat.add(n, 1n+i) == 1n+Nat.add(n, i) : Nat}:
   match n:
@@ -152,15 +153,15 @@ def Laws.rows_semantics(xs):
 # the native fields or thousands of pages just to establish congruence.
 def render_reference(+fields: List<&2, Nat>, +pages: List<&2, Nat>)
   -> {Wire.render(Control.Plan{fields, pages}) ==
-    "QWEN_KVARN_PLAN_V2\n" ++ Spec.rows(fields) ++ "FREE_PAGES\n" ++
+    "QWEN_KVARN_PLAN_V3\n" ++ Spec.rows(fields) ++ "FREE_PAGES\n" ++
       Spec.rows(pages) ++ "END_QWEN_KVARN_PLAN" : String}:
   %Laws.rows_semantics(fields) :
     {Wire.render(Control.Plan{fields, pages}) ==
-      "QWEN_KVARN_PLAN_V2\n" ++ _ ++ "FREE_PAGES\n" ++
+      "QWEN_KVARN_PLAN_V3\n" ++ _ ++ "FREE_PAGES\n" ++
         Spec.rows(pages) ++ "END_QWEN_KVARN_PLAN" : String}
   %Laws.rows_semantics(pages) :
     {Wire.render(Control.Plan{fields, pages}) ==
-      "QWEN_KVARN_PLAN_V2\n" ++ Wire.rows(fields) ++ "FREE_PAGES\n" ++
+      "QWEN_KVARN_PLAN_V3\n" ++ Wire.rows(fields) ++ "FREE_PAGES\n" ++
         _ ++ "END_QWEN_KVARN_PLAN" : String}
   {==}
 
@@ -168,11 +169,11 @@ def accepted_reference(-actual: Maybe<&2, Control.Plan>,
     +fields: List<&2, Nat>, +pages: List<&2, Nat>,
     equal: {actual == Some{Control.Plan{fields, pages}} : Maybe<&2, Control.Plan>})
   -> {Wire.accepted(actual) ==
-    "QWEN_KVARN_PLAN_V2\n" ++ Spec.rows(fields) ++ "FREE_PAGES\n" ++
+    "QWEN_KVARN_PLAN_V3\n" ++ Spec.rows(fields) ++ "FREE_PAGES\n" ++
       Spec.rows(pages) ++ "END_QWEN_KVARN_PLAN" : String}:
   Equal.trans(String, Wire.accepted(actual),
     Wire.render(Control.Plan{fields, pages}),
-    "QWEN_KVARN_PLAN_V2\n" ++ Spec.rows(fields) ++ "FREE_PAGES\n" ++
+    "QWEN_KVARN_PLAN_V3\n" ++ Spec.rows(fields) ++ "FREE_PAGES\n" ++
       Spec.rows(pages) ++ "END_QWEN_KVARN_PLAN",
     Equal.cong(Maybe<&2, Control.Plan>, String, Wire.accepted,
       actual, Some{Control.Plan{fields, pages}}, equal),

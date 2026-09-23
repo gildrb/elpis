@@ -159,8 +159,14 @@ class Admission:
             if token in TYPES:
                 kind = self.take()
                 name = self.take()
+                # Bend 2.0.25 comp.ts:name_local strips leading underscores
+                # from the cleaned base, then emits "_" + base + "_" + n.
+                # ABI names (e, o, rN, wpoll) are not generated locals.
                 if (
-                    re.fullmatch(r"[A-Za-z_][A-Za-z_0-9]*", name) is None
+                    re.fullmatch(
+                        r"_(?:[A-Za-z0-9][A-Za-z0-9_]*)?_(?:0|[1-9][0-9]*)", name
+                    )
+                    is None
                     or name in self.variables
                     or name in self.arrays
                     or name in ("e", "o", "wpoll")

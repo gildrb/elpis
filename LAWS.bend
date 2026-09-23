@@ -19,6 +19,7 @@ import ./bend/ownership_laws.bend as OwnershipLaws
 import ./bend/abi_laws.bend as AbiLaws
 import ./bend/numerical_laws.bend as NumericalLaws
 import ./bend/selector_laws.bend as SelectorLaws
+import ./bend/query_tiles_laws.bend as QueryTilesLaws
 
 # Balanced parallel decomposition preserves the independent ascending loop.
 law tree_is_seq:
@@ -46,7 +47,7 @@ law layout_shapes:
   {Spec.bounded(Control.offsets(Control.dimension(shape)), Spec.tile_bytes(shape)) == True{} : Bool} &
   {List.last(&2, Nat, Control.offsets(Control.dimension(shape))) == Some{Spec.tile_bytes(shape)} : Maybe<&2, Nat>}
 
-# All 38 emitted fields, including heads/layers, visibility and packed lengths.
+# All 42 emitted fields, including geometry, visibility and query-tile partition.
 law native_fields:
   {Control.fields() == Spec.fields() : List<&2, Nat>}
 

@@ -243,7 +243,7 @@ def docker(*arguments: str, timeout: int = 30) -> str:
 
 
 def toolchain_identity(identity: dict[str, object]) -> None:
-    """Bind the pinned source-mode 2.0.20 checker to retained compiler bytes."""
+    """Bind the pinned upstream 2.0.25 release to retained compiler bytes."""
     record = mapping(identity.get("bend_toolchain"))
     release, runtime = (mapping(record.get(name)) for name in ("release", "runtime"))
     require(
@@ -261,7 +261,8 @@ def toolchain_identity(identity: dict[str, object]) -> None:
             "execution",
             "installed_compiler_sha256",
         }
-        and record.get("schema") == 5
+        and type(record.get("schema")) is int
+        and record.get("schema") == 6
         and release
         == {
             "url": build_toolchain.RELEASE_URL,
@@ -277,8 +278,6 @@ def toolchain_identity(identity: dict[str, object]) -> None:
         and mapping(record.get("checker"))
         == {
             "unmodified_bend_ts_sha256": build_toolchain.UNMODIFIED_CHECKER_SHA256,
-            "patch_sha256": digest(ROOT / "patches/bend2-stack-safe-2.0.20.patch"),
-            "patched_bend_ts_sha256": build_toolchain.PATCHED_CHECKER_SHA256,
             "main_ts_sha256": build_toolchain.SOURCE_MAIN_SHA256,
             "comp_ts_sha256": build_toolchain.SOURCE_COMP_SHA256,
             "launcher_sha256": build_toolchain.WRAPPER_SHA256,
@@ -288,12 +287,16 @@ def toolchain_identity(identity: dict[str, object]) -> None:
         == digest(ROOT / "bend/build_toolchain.py")
         and record.get("execution")
         == {
-            "mode": "source",
+            "mode": "release",
             "command_prefix": ["bin/bend"],
             "interpreter": "bin/bend-runtime",
-            "environment": {"BEND_NO_TELEMETRY": "1", "BUN_BE_BUN": "1"},
+            "environment": {
+                "BEND_NO_TELEMETRY": "1",
+                "JSC_maxPerThreadStackUsage": "536870912",
+            },
+            "stack_limit_bytes": 1073741824,
         },
-        "Bend toolchain is not the pinned source-mode 2.0.20 checker",
+        "Bend toolchain is not the pinned upstream 2.0.25 release",
     )
     require(
         set(runtime)
@@ -331,14 +334,11 @@ def toolchain_identity(identity: dict[str, object]) -> None:
         set(compiler) == names
         and compiler.get("bin/bend") == build_toolchain.WRAPPER_SHA256
         and compiler.get("bin/bend-runtime") == native_sha256
-        and compiler.get("bend2/bend.ts") == build_toolchain.PATCHED_CHECKER_SHA256
-        and compiler.get("bend2/main.ts") == build_toolchain.SOURCE_MAIN_SHA256
-        and compiler.get("bend2/comp.ts") == build_toolchain.SOURCE_COMP_SHA256
         and all(
             artifacts.get("compiler/" + name) == value
             for name, value in compiler.items()
         ),
-        "Bend retained compiler differs from the pinned source-mode release",
+        "Bend retained compiler differs from the pinned upstream release",
     )
     resources = mapping(record.get("release_resources_sha256"))
     require(

@@ -62,7 +62,7 @@ at `unix:///run/user/1000/docker.sock`, and clears Docker context/TLS overrides.
 The supervised worker launches with
 `nix develop --offline --no-write-lock-file -c <prepared-python> -m bench.autoresearch --worker`.
 GPU/runtime variables are not changed. The healthy owned service must be native
-262144 at `http://127.0.0.1:18020`, RTX 3090/280 W, using Bend 2.0.20. The command
+262144 at `http://127.0.0.1:18020`, RTX 3090/280 W, using Bend 2.0.25. The command
 does not install dependencies, start a service, change power policy or recover it.
 
 The whole-command deadline is the earlier of 2400 seconds from start and the
@@ -356,9 +356,13 @@ remains a real limitation. Enabling vision code does not prove memory capacity.
 
 ## Latest Bend/native evidence and completed capacity
 
-The only admitted compiler is the pinned original **Bend 2.0.20** release, with
-its retained compiler/toolchain identity; an arbitrary installed version is not
-equivalent. The earlier root `PROOF.bend` check passed (`All terms check`, exit 0,
+The current compiler authority is the latest stable upstream release, pinned to
+original **Bend 2.0.25** with its exact retained compiler/toolchain identity.
+The unchanged root proof passes on 2.0.25 with a 1073741824-byte process stack
+and `JSC_maxPerThreadStackUsage=536870912`; the default stack overflows.
+No comparator patch is required. Rebuild and re-admit production artifacts
+after a compiler update; historical GPU evidence does not qualify a new build.
+The earlier 2.0.20 root `PROOF.bend` check passed (`All terms check`, exit 0,
 99.59 s) under the recorded resource settings: a 1073741824-byte stack limit,
 disabled core dumps and `BUN_JSC_maxPerThreadStackUsage=536870912`, with telemetry
 disabled. This used the original release, not a patched checker.
@@ -413,7 +417,7 @@ The root [proof entry point](../PROOF.bend) imports their proof modules.
 
 The exact **31-patch** image is
 `sha256:e40fc9cbb0323826646d72bb497887e9328cc0781a5aaca0a66b3c063c97e4d5`.
-[Dockerfile](../Dockerfile) uses the original `bend-2.0.20-linux-x64` release,
+That historical image used the original `bend-2.0.20-linux-x64` release,
 `/usr/bin/clang-19` for retained CPU artifacts and
 `/usr/local/cuda/lib64/libnvrtc.so` for the SM86 CUDA artifact, on the pinned
 SGLang v0.5.19 base

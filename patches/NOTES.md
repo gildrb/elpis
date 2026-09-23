@@ -368,3 +368,31 @@ redundant dual raw+packed computation: 984 vs 1810 us/launch at 230 pages.
 `next_power_of_2(count)` (audit F6). Measured 5-rep medians vs stage21:
 90.9 (+12.7%) @1k, 76.9 (+9.6%) @8k, 57.1 (+26.9%) @32k
 (`bench/results/decode-c1-stage22-off.json`).
+
+## Bend 2.0.25 query tiles (candidate, not performance-qualified)
+
+`kvarn-bend-query-tiles.patch` executes the compiled Bend V3 plan's two
+four-query partitions, starts `[0, 4]`, on the target native Q8 verify grid.
+Other launch modes remain serial. The plan has 42 fields; the original
+38 allocation fields are unchanged. The stable two-int32 GPU partition
+uses eight bytes charged against the existing workspace reserve.
+
+The unmodified Bend 2.0.25 checker passes the complete root proof
+(`All terms check.`, 67.51 seconds). Universal laws prove exact ordered
+coverage of the emitted starts; they do not prove Python, Triton, CUDA,
+floating-point lowering, or hardware correctness. The candidate image's
+four retained CPU programs and native plan consumer passed startup smoke.
+
+On the RTX3090, the temporary paired producer passed 600/600 exact
+serial-versus-tiled comparisons: 300 eager and 300 graph-replay pairs,
+including padding, inactive rows, sticky fault status, poisoned scratch,
+packed/raw/sink/preview/provisional representations, and a native262144
+repeated-packed-prototype fixture. All returned output bytes and statuses
+matched. This is single-layer refinement evidence, not model quality or
+throughput evidence.
+
+Evidence: `/tmp/litos-recovery-ops-id8q0yvb/bend25-querytiles-parity-evidence-1/`.
+Immutable candidate image:
+`sha256:e7e1f8999ad5cc10deb845921f21795d41631d0832351103e8d3d109a2936241`.
+The parity guardian restored the authenticated FP8 baseline and exited 0.
+Frozen-suite throughput and a fresh bottleneck profile remain required.

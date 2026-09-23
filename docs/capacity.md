@@ -13,7 +13,7 @@ The current interface captures the actual running container before and after the
 request through `serve.qualification capture`; it does not accept an operator's
 `--runtime-identity` declaration or `--confirm-runtime-identity`. Admission requires
 actual context 262144, a backed pool of at least 263168, the prepared packed
-Qwen/DFlash2 pair, RTX 3090 at 280 W, and the pinned original Bend 2.0.20 release.
+Qwen/DFlash2 pair, RTX 3090 at 280 W, and the pinned original Bend 2.0.25 release.
 Captured identity binds the full container ID and start time, immutable image,
 model inventories, Bend/compiler artifacts, runtime components and configuration
 digests. Raw Docker Env/Cmd, server arguments and credentials are not evidence to

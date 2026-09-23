@@ -2,19 +2,18 @@
 
 let
   buildHelper = ../bend/build_toolchain.py;
-  checkerPatch = ../patches/bend2-stack-safe-2.0.20.patch;
   source = pkgs.fetchurl {
-    url = "https://codeload.github.com/bendlang/bend/tar.gz/a5269a6b2c5ccd6752b66df4bc6f60678b4f49bc";
-    sha256 = "f2949ac7a1fc83ccdb7e42801c74f00481207026aef8667b3c8539d358b8b13f";
+    url = "https://codeload.github.com/bendlang/bend/tar.gz/c65bcb788dbfb298bb434c1d858b47c193841dc0";
+    sha256 = "9aedd12a3036fc548df2d84b40c3b81e37f587ccb7933ab8480687017b697696";
   };
 in
 pkgs.stdenv.mkDerivation {
   pname = "bend";
-  version = "2.0.20";
+  version = "2.0.25";
 
   src = pkgs.fetchurl {
-    url = "https://github.com/bendlang/bend/releases/download/v2.0.20/bend-2.0.20-linux-x64.tar.gz";
-    sha256 = "dca589832e1645500ad258d27171ed6b5a30812bcc3088c9aedf437059be41e1";
+    url = "https://github.com/bendlang/bend/releases/download/v2.0.25/bend-2.0.25-linux-x64.tar.gz";
+    sha256 = "91c0e2640f8d2e3e73fd3dd62ed4d178ce9a6f7ce8f8980b4dc4abf7a6f9ccd4";
   };
   inherit source;
   dontUnpack = true;
@@ -27,13 +26,13 @@ pkgs.stdenv.mkDerivation {
   dontConfigure = true;
   # Match the selected package's working ELF relocation; never rebuild its bundle.
   dontStrip = true;
-  # The source-mode launcher is hash-pinned byte-for-byte; /bin/sh exists at runtime.
+  # The release launcher is hash-pinned byte-for-byte; /bin/sh exists at runtime.
   dontPatchShebangs = true;
 
   buildPhase = ''
     runHook preBuild
     python3 ${buildHelper} build \
-      "$src" "$source" ${checkerPatch} \
+      "$src" "$source" \
       staged toolchain.json --nix-relocation
     runHook postBuild
   '';
@@ -51,13 +50,13 @@ pkgs.stdenv.mkDerivation {
   postPhases = [ "recordToolchainPhase" ];
   recordToolchainPhase = ''
     python3 ${buildHelper} record-relocated \
-      "$src" "$source" ${checkerPatch} "$out/libexec/bend" \
+      "$src" "$source" "$out/libexec/bend" \
       "$out/share/bend/toolchain.json" ${./bend.nix}
   '';
 
 
   meta = {
-    description = "Bend 2.0.20 source-mode checker/compiler (reviewed comparator patch) and Base";
+    description = "Unmodified Bend 2.0.25 release checker/compiler and Base";
     homepage = "https://github.com/bendlang/bend";
     license = pkgs.lib.licenses.asl20;
     platforms = [ "x86_64-linux" ];

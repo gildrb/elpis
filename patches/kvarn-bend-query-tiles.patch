@@ -1,0 +1,313 @@
+diff --git a/python/sglang/kernels/ops/kvarn/decode.py b/python/sglang/kernels/ops/kvarn/decode.py
+--- a/python/sglang/kernels/ops/kvarn/decode.py
++++ b/python/sglang/kernels/ops/kvarn/decode.py
+@@ -1,13 +1,13 @@
+ # SPDX-License-Identifier: Apache-2.0
+ # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+ # Adapted from syv-ai KVarN 18349177b7962ef1d699dc154844f9c04317a474.
+-"""Bounded eager packed attention. Shared-query verify optimization is absent.
+-
+-Stage 15 retiles the native split kernel: one program serves every query row of
+-the microbatch and all grouped heads of one KV head, so each packed page is
+-dequantized once per program and scores/updates run through tensor-core dots
+-with fp32 accumulation. Semantics (bounds, raw/packed/preview/sink selection,
+-status bits, empty rows) match the per-query kernel bit for policy.
++"""Bounded packed attention with a proved native target-verify query partition.
++
++The native split kernel serves four-query tiles and all grouped heads of one
++KV head with tensor-core dots and fp32 accumulation. Target-native verify
++dispatches its two independent tiles from the checked Bend plan on grid axis2;
++other modes retain the serial tile loop. Bounds, representation selection,
++per-row arithmetic, status bits and empty-row handling are unchanged.
+ """
+ from math import isfinite
+ import torch
+@@ -124,6 +124,7 @@
+ def _packed_attention_split(
+     Q, Table, RequestIds, Lower, Upper, Packed, RawK, RawV, PageToSlot,
+     Committed, Provisional, Preview, Sink, Partial, Lse, Status, Scale, N,
++    VerifyQueryStarts,
+     Q_STRIDE: tl.constexpr, Q_HEAD_STRIDE: tl.constexpr,
+     TABLE_STRIDE: tl.constexpr, TABLE_WIDTH: tl.constexpr, REQUESTS: tl.constexpr,
+     PARTIAL_Q_STRIDE: tl.constexpr, PARTIAL_H_STRIDE: tl.constexpr,
+@@ -134,10 +135,11 @@
+     K_SCALE: tl.constexpr, K_ZERO: tl.constexpr, K_TOKEN: tl.constexpr,
+     V_PACKED: tl.constexpr, V_CHANNEL: tl.constexpr, V_SCALE: tl.constexpr,
+     V_ZERO: tl.constexpr,
++    TARGET_NATIVE_VERIFY: tl.constexpr, QUERY_TILE: tl.constexpr,
+ ):
+-    # One program covers up to 32 query rows as 4-query tiles, the grouped-head
+-    # slice of one KV head, and one split-KV page range. A runtime 32-token
+-    # subloop per page feeds tensor-core dots. All rows share one page-table row.
++    # Target-native verify assigns one proved four-query tile to each axis2
++    # program. Other modes loop over those same tiles serially. Both paths keep
++    # the per-row page/subloop order and share one page-table row.
+     kv_head = tl.program_id(0)
+     split = tl.program_id(1)
+     group: tl.constexpr = HQ // H
+@@ -146,8 +148,15 @@
+     d = tl.arange(0, D)
+     token = tl.arange(0, BLOCK)
+     request = tl.load(RequestIds)
+-    tile: tl.constexpr = 4
+-    for q_base in range(0, N, tile):
++    tile: tl.constexpr = QUERY_TILE
++    if TARGET_NATIVE_VERIFY:
++        q_start = tl.load(VerifyQueryStarts + tl.program_id(2))
++        query_tiles = 1
++    else:
++        q_start = 0
++        query_tiles = tl.cdiv(N, tile)
++    for tile_index in range(0, query_tiles):
++        q_base = q_start + tile_index * tile
+         qi = q_base + row // group
+         row_real = ((row // group) < tile) & (qi < N)
+         head = kv_head * group + g
+@@ -345,7 +354,9 @@
+ 
+ 
+ def packed_attention_out_nosync(Q, view, request_page_table, query_request_ids,
+-                                lower_bounds, upper_bounds, scale, fixedworkspace):
++                                lower_bounds, upper_bounds, scale, fixedworkspace, *,
++                                target_native_verify: bool = False,
++                                verify_tile_tokens: int | None = None):
+     """Sync-free verify/decode launch: fixed SPLITS-way grid, no host reads.
+ 
+     Every .item() in the launch path stalls the pipeline once per layer per
+@@ -354,6 +365,9 @@
+     weight zero), so launching all splits unconditionally is bit-compatible
+     with the counted launch and removes the syncs entirely. Grid shape is
+     static per deployment, which also makes this path CUDA-graph ready.
++    Parallel query tiles require explicit native target-verify selection; an
++    eight-row input alone never selects it. The pool owns the immutable starts
++    tensor for its lifetime, so capture/replay consume the same device address.
+     """
+     if Q.ndim != 3 or Q.shape[2] != view.layout.head_dim:
+         raise ValueError("native query shape mismatch")
+@@ -370,13 +384,27 @@
+     partial, lse = fixedworkspace.native_partial_output, fixedworkspace.native_partial_lse
+     kv_heads = view.layout.kv_heads
+     group = heads // kv_heads
+-    tile = 4
+-    rows = triton.next_power_of_2(tile * group)
++    tile = verify_tile_tokens if target_native_verify else 4
+     splits = partial.shape[2]
+     # Graph capture pads the token dimension beyond the metadata vectors;
+     # only the first n rows carry real bounds. Rows past n stay neutral
+     # (zero partial, -inf LSE) and are zeroed in the output below.
+     n = min(int(upper.numel()), queries)
++    verify_query_starts = None
++    grid = (kv_heads, splits)
++    if target_native_verify:
++        verify_query_starts = fixedworkspace.native_verify_query_starts
++        if queries != 8 or tile != 4 or (d, kv_heads, heads) != (256, 4, 24):
++            raise ValueError("native target verify requires the proved eight-row/two-tile plan")
++        if (verify_query_starts is None or verify_query_starts.shape != (2,)
++                or verify_query_starts.dtype != torch.int32
++                or verify_query_starts.device != Q.device
++                or not verify_query_starts.is_contiguous()):
++            raise ValueError("native target verify requires pool-owned int32 Bend query starts")
++        grid = (kv_heads, splits, verify_query_starts.numel())
++        # Short metadata is graph padding: qi < n masks both proved tiles, and
++        # the existing query-prefix clear keeps all unvisited rows neutral.
++    rows = triton.next_power_of_2(tile * group)
+     o = KVarNOffsets.from_layout(view.layout)
+     # No host early-return here: a .item() sync invalidates CUDA graph
+     # capture. Empty rows produce all-(-inf) LSE, the reducer's zero
+@@ -389,11 +417,11 @@
+     # Keep all heads/splits neutral; rows beyond queries are not consumed.
+     fixedworkspace.native_partial_output[:queries].zero_()
+     fixedworkspace.native_partial_lse[:queries].fill_(float("-inf"))
+-    _packed_attention_split[(kv_heads, splits)](
++    _packed_attention_split[grid](
+         Q, table, request_ids, lower, upper,
+         view.packed, view.raw_keys, view.raw_values, view.page_to_tail_slot,
+         view.committed_mask, view.provisional_mask, view.preview_ready, view.sink_pages,
+-        partial, lse, fixedworkspace.native_status, scale, n,
++        partial, lse, fixedworkspace.native_status, scale, n, verify_query_starts,
+         Q_STRIDE=Q.stride(0), Q_HEAD_STRIDE=Q.stride(1),
+         TABLE_STRIDE=table.stride(0), TABLE_WIDTH=table.shape[1], REQUESTS=table.shape[0],
+         PARTIAL_Q_STRIDE=partial.stride(0), PARTIAL_H_STRIDE=partial.stride(1),
+@@ -401,6 +429,7 @@
+         D=d, H=kv_heads, HQ=heads, PAGES=view.packed.shape[0],
+         SLOTS=view.raw_keys.shape[0], TILE_BYTES=view.layout.tile_bytes,
+         SPLITS=splits, ROWS=rows, BLOCK=32,
++        TARGET_NATIVE_VERIFY=target_native_verify, QUERY_TILE=tile,
+         K_SCALE=o.k_scale, K_ZERO=o.k_zero, K_TOKEN=o.k_token,
+         V_PACKED=o.v_packed, V_CHANNEL=o.v_channel, V_SCALE=o.v_scale, V_ZERO=o.v_zero,
+         num_warps=4, num_stages=1)
+@@ -468,7 +497,7 @@
+         Q, table, request_ids, lower, upper,
+         view.packed, view.raw_keys, view.raw_values, view.page_to_tail_slot,
+         view.committed_mask, view.provisional_mask, view.preview_ready, view.sink_pages, partial, lse,
+-        fixedworkspace.native_status, scale, queries,
++        fixedworkspace.native_status, scale, queries, None,
+         Q_STRIDE=Q.stride(0), Q_HEAD_STRIDE=Q.stride(1),
+         TABLE_STRIDE=table.stride(0), TABLE_WIDTH=table.shape[1], REQUESTS=table.shape[0],
+         PARTIAL_Q_STRIDE=partial.stride(0), PARTIAL_H_STRIDE=partial.stride(1),
+@@ -476,6 +505,7 @@
+         D=d, H=view.layout.kv_heads, HQ=heads, PAGES=view.packed.shape[0],
+         SLOTS=view.raw_keys.shape[0], TILE_BYTES=view.layout.tile_bytes,
+         SPLITS=splits, ROWS=rows, BLOCK=32,
++        TARGET_NATIVE_VERIFY=False, QUERY_TILE=tile,
+         K_SCALE=o.k_scale, K_ZERO=o.k_zero, K_TOKEN=o.k_token,
+         V_PACKED=o.v_packed, V_CHANNEL=o.v_channel, V_SCALE=o.v_scale,
+         V_ZERO=o.v_zero, num_warps=4, num_stages=1)
+diff --git a/python/sglang/srt/mem_cache/kvarn_bend_plan.py b/python/sglang/srt/mem_cache/kvarn_bend_plan.py
+--- a/python/sglang/srt/mem_cache/kvarn_bend_plan.py
++++ b/python/sglang/srt/mem_cache/kvarn_bend_plan.py
+@@ -52,7 +52,12 @@
+     "draft_dim",
+     "draft_kv_heads",
+     "draft_layers",
+-) + tuple(f"{role}_{name}" for role in ("target", "draft") for name in _OFFSET_NAMES)
++) + tuple(f"{role}_{name}" for role in ("target", "draft") for name in _OFFSET_NAMES) + (
++    "verify_tile_tokens",
++    "verify_tile_count",
++    "verify_tile_start_0",
++    "verify_tile_start_1",
++)
+ 
+ 
+ @dataclass(frozen=True, slots=True)
+@@ -86,6 +91,8 @@
+     draft: BendPoolLayout
+     free_pages: tuple[int, ...]
+     speculation: SpeculationPolicy
++    verify_tile_tokens: int
++    verify_query_starts: tuple[int, ...]
+ 
+     def require_request(self, context: int, pool: int, page_size: int) -> None:
+         if any(type(value) is not int for value in (context, pool, page_size)):
+@@ -121,8 +128,8 @@
+     _ = native_bend_runtime()
+     if set(decoded) != {*_FIELDS, "schema", "free_pages"}:
+         raise ValueError("KVarN Bend plan has missing or unexpected fields")
+-    if _integer(decoded["schema"], "schema") != 2:
+-        raise ValueError("KVarN requires the Bend 2 schema2 allocation plan")
++    if _integer(decoded["schema"], "schema") != 3:
++        raise ValueError("KVarN requires the Bend 2 schema3 allocation plan")
+     values = {name: _integer(decoded[name], name) for name in _FIELDS}
+     if (values["context"], values["headroom"], values["page_size"]) != (
+         262144,
+@@ -163,6 +170,18 @@
+         or values["admission_free_slots"] != values["write_span_pages"] + 2
+     ):
+         raise ValueError("KVarN Bend plan changes write/sink/COW admission bounds")
++    verify_query_starts = (
++        values["verify_tile_start_0"],
++        values["verify_tile_start_1"],
++    )
++    if (
++        values["verify_tile_tokens"] != 4
++        or values["verify_tile_count"] != len(verify_query_starts)
++        or verify_query_starts != (0, 4)
++        or values["verify_tile_tokens"] * values["verify_tile_count"]
++        != values["commit_tokens"]
++    ):
++        raise ValueError("KVarN Bend plan changes the two-tile verify partition")
+     if (
+         values["target_visible"] != page_size
+         or values["draft_window"] != 2048 + page_size + values["commit_tokens"]
+@@ -221,4 +240,6 @@
+         draft=layouts[1],
+         free_pages=free_pages,
+         speculation=speculation,
++        verify_tile_tokens=values["verify_tile_tokens"],
++        verify_query_starts=verify_query_starts,
+     )
+diff --git a/python/sglang/srt/mem_cache/kvarn/types.py b/python/sglang/srt/mem_cache/kvarn/types.py
+--- a/python/sglang/srt/mem_cache/kvarn/types.py
++++ b/python/sglang/srt/mem_cache/kvarn/types.py
+@@ -83,14 +83,19 @@
+     native_status: torch.Tensor
+     native_seal_pages: torch.Tensor
+     native_rotated_keys: torch.Tensor
++    native_verify_query_starts: torch.Tensor | None = None
+ 
+     @property
+     def allocation_bytes(self) -> int:
+-        return sum(t.numel() * t.element_size() for t in (self.keys, self.values, self.output, self.native_partial_output, self.native_partial_lse, self.native_status, self.native_seal_pages, self.native_rotated_keys)) + self.eager_reserve_bytes
++        total = sum(t.numel() * t.element_size() for t in (self.keys, self.values, self.output, self.native_partial_output, self.native_partial_lse, self.native_status, self.native_seal_pages, self.native_rotated_keys)) + self.eager_reserve_bytes
++        if self.native_verify_query_starts is not None:
++            total += self.native_verify_query_starts.numel() * self.native_verify_query_starts.element_size()
++        return total
+ 
+     @classmethod
+     def create(cls, layout: KVarNLayout, capacity: KVarNCapacity,
+-               dtype: torch.dtype, device: str, max_query_heads: int) -> KVarNWorkspace:
++               dtype: torch.dtype, device: str, max_query_heads: int, *,
++               verify_query_starts: tuple[int, ...] | None = None) -> KVarNWorkspace:
+         if max_query_heads < layout.kv_heads or max_query_heads % layout.kv_heads != 0:
+             raise ValueError("query heads must be a positive multiple of KV heads")
+         # The gather bound is TOTAL rows, not rows per batch item.
+@@ -103,6 +108,10 @@
+         qn = capacity.max_query_tokens
+         native_bytes = (qn * max_query_heads * 16 * (layout.head_dim + 1) * 4 + 4 + capacity.tail_slots * 4
+                         + capacity.tail_slots * layout.kv_heads * layout.head_dim * 128 * 4)
++        # The checked target plan owns this immutable, capture-stable int32 pair.
++        # Charge its eight bytes against the same 64 MiB arena, not on top of it.
++        if verify_query_starts is not None:
++            native_bytes += len(verify_query_starts) * torch.int32.itemsize
+         required = (2 * capacity.max_visible_tokens * layout.kv_heads * layout.head_dim
+                     + capacity.max_query_tokens * max_query_heads * layout.head_dim) * dtype.itemsize + reserve + native_bytes
+         if required > capacity.workspace_bytes:
+@@ -116,4 +125,6 @@
+                    torch.empty((qn, max_query_heads, 16), dtype=torch.float32, device=device),
+                    torch.zeros((1,), dtype=torch.int32, device=device),
+                    torch.full((capacity.tail_slots,), -1, dtype=torch.int32, device=device),
+-                   torch.empty((capacity.tail_slots, layout.kv_heads, layout.head_dim, 128), dtype=torch.float32, device=device))
++                   torch.empty((capacity.tail_slots, layout.kv_heads, layout.head_dim, 128), dtype=torch.float32, device=device),
++                   None if verify_query_starts is None else torch.tensor(
++                       verify_query_starts, dtype=torch.int32, device=device))
+diff --git a/python/sglang/srt/mem_cache/kvarn/pool.py b/python/sglang/srt/mem_cache/kvarn/pool.py
+--- a/python/sglang/srt/mem_cache/kvarn/pool.py
++++ b/python/sglang/srt/mem_cache/kvarn/pool.py
+@@ -65,7 +65,10 @@
+         self.num_pages = pages
+         self.kv_cache_layout = "kvarn_k4v2_g128"
+         self.workspace = KVarNWorkspace.create(layout, capacity, dtype, device,
+-            max_query_heads)
++            max_query_heads, verify_query_starts=(
++                bend_plan.verify_query_starts
++                if bend_plan is not None and role is bend_plan.target else None
++            ))
+         self._views: dict[int, KVarNLayerView] = {}
+         self._owners: dict[int, list[int]] = {}
+         for layer in layout.layer_ids:
+@@ -656,6 +659,13 @@
+             (ws.native_seal_pages, (8,), torch.int32),
+             (ws.native_rotated_keys, (8, kv_heads, head_dim, 128), torch.float32),
+         )
++        if self.bend_plan is not None and profile == "target_sm86_bf16":
++            starts = ws.native_verify_query_starts
++            if starts is None:
++                raise ValueError("native target verify requires the Bend query partition")
++            expected_workspace += (
++                (starts, (len(self.bend_plan.verify_query_starts),), torch.int32),
++            )
+         for tensor, shape, dtype in expected_workspace:
+             if tensor.shape != shape or tensor.dtype != dtype or tensor.device != device or not tensor.is_contiguous():
+                 raise ValueError("workspace does not match reviewed fixed native storage")
+diff --git a/python/sglang/srt/layers/attention/kvarn_backend.py b/python/sglang/srt/layers/attention/kvarn_backend.py
+--- a/python/sglang/srt/layers/attention/kvarn_backend.py
++++ b/python/sglang/srt/layers/attention/kvarn_backend.py
+@@ -227,6 +227,9 @@
+         else:
+             attention = packed_attention_out if self.pool.native_enabled else packed_attention
+             if self.pool.native_enabled and provisional:
++                bend_plan = self.pool.bend_plan
++                if bend_plan is None:
++                    raise ValueError("native target verify requires the checked Bend query plan")
+                 for start in range(0, queries.shape[0], self.pool.capacity.max_write_tokens):
+                     stop = min(start + self.pool.capacity.max_write_tokens, queries.shape[0])
+                     self.pool.begin_write(
+@@ -237,6 +240,8 @@
+                     queries, view, metadata.request_page_table, metadata.query_request_ids,
+                     metadata.lower_bounds, metadata.upper_bounds, layer.scaling,
+                     self.pool.workspace,
++                    target_native_verify=True,
++                    verify_tile_tokens=bend_plan.verify_tile_tokens,
+                 )
+                 self.pool.finish_attention(local_layer)
+                 return result.reshape(-1, layer.tp_q_head_num * layer.v_head_dim)

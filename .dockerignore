@@ -9,6 +9,7 @@
 !serve/healthcheck.py
 !patches/
 !patches/**
+patches/bend2-stack-safe-*.patch
 !prepare/
 !prepare/verify-models.py
 !prepare/manifest.json

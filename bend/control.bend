@@ -2,6 +2,7 @@
 # Production consumes both fields and free_pages; transactions stay native.
 import Base
 import ./range.bend as Range
+import ./query_tiles.bend as QueryTiles
 
 type Shape is Data:
   Target{}
@@ -70,13 +71,15 @@ def write_span() -> Nat:
 def admission_slots() -> Nat:
   Nat.add(write_span(), 2n)
 
-# The 38 wire fields; adapter.py maps names, but does not supply their values.
+# The 42 wire fields; adapter.py maps names, but does not supply their values.
 def fields() -> List<&2, Nat>:
   geometry = {[context(), headroom(), pool(), page_size(), pages(),
     8n, page_size(), 32n, 8n, write_span(), admission_slots(), page_size(), draft_window(), draft_visible(),
     dimension(Target{}), heads(Target{}), layers(Target{}),
     dimension(Draft{}), heads(Draft{}), layers(Draft{})] : List<&2, Nat>}
-  tiles = List.append(&2, Nat, offsets(dimension(Target{})), offsets(dimension(Draft{})))
+  verify = {QueryTiles.tile_tokens() <> QueryTiles.tile_count() <> QueryTiles.native_starts() : List<&2, Nat>}
+  tiles = List.append(&2, Nat, offsets(dimension(Target{})),
+    List.append(&2, Nat, offsets(dimension(Draft{})), verify))
   List.append(&2, Nat, geometry, tiles)
 
 def native() -> Plan:
