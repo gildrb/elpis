@@ -523,3 +523,36 @@ The fresh profile again passed capture gates: Marlin184.828 ms,
 packed attention118.333 ms, summed kernels412.182 ms. No Marlin
 kernel-time improvement was demonstrated. Evidence:
 `marlin-k64-benchmark-evidence-2` under the temporary evidence root.
+
+### Eight-warp attention rejected, run 22
+
+The serial split kernel's unchanged algorithm with eight rather than four
+warps passed1125 exact output/status pairs on RTX3090, including graph
+replay and a repeated-prototype native262144 fixture. Offline spill loads
+fell584→348 bytes, but the frozen suite regressed to92.814774 tok/s;
+math remained3/3 and short I3 reward1. C1 was74.8838/69.8536/51.9800.
+The fresh profile showed112 packed-split calls totaling141.173 ms versus
+run21's118.333 ms; Marlin remained184.526 ms. The patch was discarded.
+Evidence: `attention-warps8-parity-evidence-1` and
+`attention-warps8-benchmark-evidence-1` under the temporary root.
+
+The preceding guarded metadata-hoist candidate was rejected before GPU:
+compiled spill loads increased584→1292 bytes. Neither reduced source
+loads nor reduced static spills establish better serving performance.
+
+### Latest stable Bend 2.0.26 control, run 23
+
+The required toolchain-only migration retains the34-patch serving stack,
+all laws and the frozen benchmark. The new release's Bun1.4.0 needs
+`BUN_JSC_maxPerThreadStackUsage`; the old prefix overflowed even with
+larger OS limits. The original unmodified release passes with the same
+1GiB OS/512MiB JSC stack budget and the corrected environment prefix.
+Fresh proof, four CPU artifact consumers, native admission/build and
+actual GPU consumer validation pass. No checker patch or proof weakening.
+
+The full suite admits95.246430 tok/s, math3/3, short I3 reward1, elapsed
+1766.171s. C1 is74.9461/71.0863/55.2307; TTFT1.2806/9.2350/40.8665s.
+Startup seed705760395 matches run21. This falls within the prior
+95.12–95.38 range: migration validation, not a demonstrated speedup.
+Evidence: `bend26-control-benchmark-evidence-1/autoresearch`.
+Image: `sha256:00c941c0da65d99fddf5055d3aad809ece95445ac6d3d01dc23070b25edef5e2`.

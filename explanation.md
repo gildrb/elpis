@@ -152,7 +152,7 @@ That is genuine execution of Bend-derived decisions, but it is **not** the same 
 
 The laws also cover serialized output: all 38 plan fields, page ordering, and the protocol string. Proving a correct internal value would be insufficient if the wire encoder changed it before consumption. `rows_semantics` and `native_wire` bridge that gap up to the explicit trusted IO boundary.
 
-[bend/adapter.py](bend/adapter.py) binds retained source, compiler, Base library, proof logs, emitted C, compiled programs, and execution evidence. The authority is the latest stable upstream release, currently original **Bend 2.0.25**, with exact project pins and hashes updated together; an arbitrary executable named `bend` is not sufficient. The [Docker build](Dockerfile) packages the checked artifacts with the native patch series.
+[bend/adapter.py](bend/adapter.py) binds retained source, compiler, Base library, proof logs, emitted C, compiled programs, and execution evidence. The authority is the latest stable upstream release, currently original **Bend 2.0.26**, with exact project pins and hashes updated together; an arbitrary executable named `bend` is not sufficient. The [Docker build](Dockerfile) packages the checked artifacts with the native patch series.
 
 Hashes prevent accidental substitution and stale evidence from being accepted as the same build. They do not mathematically prove the compiler correct or independently defeat an operator fabricating an entire evidence set.
 

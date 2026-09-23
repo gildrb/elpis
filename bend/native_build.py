@@ -159,7 +159,7 @@ class Admission:
             if token in TYPES:
                 kind = self.take()
                 name = self.take()
-                # Bend 2.0.25 comp.ts:name_local strips leading underscores
+                # Bend 2.0.26 comp.ts:name_local strips leading underscores
                 # from the cleaned base, then emits "_" + base + "_" + n.
                 # ABI names (e, o, rN, wpoll) are not generated locals.
                 if (

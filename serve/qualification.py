@@ -243,7 +243,7 @@ def docker(*arguments: str, timeout: int = 30) -> str:
 
 
 def toolchain_identity(identity: dict[str, object]) -> None:
-    """Bind the pinned upstream 2.0.25 release to retained compiler bytes."""
+    """Bind the pinned upstream 2.0.26 release to retained compiler bytes."""
     record = mapping(identity.get("bend_toolchain"))
     release, runtime = (mapping(record.get(name)) for name in ("release", "runtime"))
     require(
@@ -292,11 +292,11 @@ def toolchain_identity(identity: dict[str, object]) -> None:
             "interpreter": "bin/bend-runtime",
             "environment": {
                 "BEND_NO_TELEMETRY": "1",
-                "JSC_maxPerThreadStackUsage": "536870912",
+                "BUN_JSC_maxPerThreadStackUsage": "536870912",
             },
             "stack_limit_bytes": 1073741824,
         },
-        "Bend toolchain is not the pinned upstream 2.0.25 release",
+        "Bend toolchain is not the pinned upstream 2.0.26 release",
     )
     require(
         set(runtime)

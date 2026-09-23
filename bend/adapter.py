@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Check Bend 2.0.25 proofs and retain four CPU serving-policy programs.
+"""Check Bend 2.0.26 proofs and retain four CPU serving-policy programs.
 
   python3 bend/adapter.py generate --output /tmp/qwen-bend --bend /path/to/bend
   python3 bend/adapter.py compile --directory /tmp/qwen-bend --cc clang-19
@@ -13,7 +13,7 @@ in the target runtime. Serving loads the planner, greedy speculation table and
 mirror action tables once per startup; qualification loads the objective table once.
 Retained hashes bind artifacts, not their trustworthiness: Bend's checker/compiler,
 Base intrinsics, foreign IO, clang and the host runtime remain trusted. The checker
-runs the unmodified pinned upstream 2.0.25 release executable with explicit OS
+runs the unmodified pinned upstream 2.0.26 release executable with explicit OS
 and JavaScriptCore stack limits, not compiler/checker semantic overrides. This
 is not a CUDA/F32, capacity, quality, or compiler-correctness proof. Engine
 allocation validators remain mandatory.
@@ -147,19 +147,19 @@ U32_MAX = (1 << 32) - 1
 HEADER = "QWEN_KVARN_PLAN_V2\n"
 FREE = "FREE_PAGES\n"
 END = "END_QWEN_KVARN_PLAN\n"
-BEND_VERSION = "bend 2.0.25\n"
+BEND_VERSION = "bend 2.0.26\n"
 PROOF_DIAGNOSTIC = "All terms check.\n"
 BEND_COMMAND = "./compiler/bin/bend"
 COMPILER_FILES = {"bin/bend", "bin/bend-runtime"}
-BASE_SHA256 = "e5639663177f2de93ef34867c029698aa4e68a98d46629f0b15452b67b99d798"
+BASE_SHA256 = "319f1457429f12c17ed9ac283514800ad5add8129b1c13e2c9ee67c26e982f5b"
 RELEASE_RUNTIME_SHA256 = (
-    "d9c0dad1f77be6a13dd8dcc16aef4f59047a956a2744f25d5c220cb8de384693"
+    "c73f589be2560330a2698aa2c8fed54921abd9d1010c447265119bd1e1bdb1e9"
 )
 NATIVE_RUNTIME_SHA256 = (
     RELEASE_RUNTIME_SHA256,
-    "353382319d45c809f47f9b83d6c8030a3da8015fc55f9c7d6cc68ed3bda7247f",
+    "0b7bcf9c0c057ce764286fdcecb2dedb711a26f1059fa32505a2fef735df2e27",
 )
-WRAPPER_SHA256 = "47bf30b09528337d9ff4ecfddafa30d62de872ac5b243d8c569cd9256210f5b5"
+WRAPPER_SHA256 = "437f2f10c027d4b1a68d86b08d372a0bc32786b2304b658b5d07eefb79de437d"
 # Resource limits for the full proof, not compiler/checker semantic overrides.
 PROOF_COMMAND = [
     "prlimit",
@@ -209,7 +209,7 @@ SCOPE = (
     "Transaction, ownership, numerical and ABI laws are abstract contracts, not "
     "proofs of native events, epochs, ownership, machine arithmetic "
     "or device addressing. "
-    "The checker is the unmodified pinned upstream 2.0.25 release executable; "
+    "The checker is the unmodified pinned upstream 2.0.26 release executable; "
     "explicit OS and JavaScriptCore stack limits are resource settings only. "
     "Base intrinsics, foreign IO, both compilers and the host runtime are trusted, "
     "not proved. GPU completion, consumption and execution remain trusted native "
@@ -398,7 +398,7 @@ def command_environment(command: list[str]) -> dict[str, str]:
     """Record the release checker's approved VM stack and ordinary execution environment."""
     environment = {"BEND_NO_TELEMETRY": "1"}
     if command == PROOF_COMMAND or (command and command[0] == BEND_COMMAND):
-        environment["JSC_maxPerThreadStackUsage"] = "536870912"
+        environment["BUN_JSC_maxPerThreadStackUsage"] = "536870912"
     return environment
 
 
@@ -620,13 +620,13 @@ def tree_files(root: Path) -> set[str]:
 
 
 def check_release_compiler(hashes: object) -> None:
-    """Admit only the pinned upstream 2.0.25 release launcher and native runtime."""
+    """Admit only the pinned upstream 2.0.26 release launcher and native runtime."""
     if not is_object(hashes) or not COMPILER_FILES <= set(hashes):
-        fail("Compiler layout is not the pinned Bend 2.0.25 release closure")
+        fail("Compiler layout is not the pinned Bend 2.0.26 release closure")
     if hashes.get("bin/bend") != WRAPPER_SHA256:
         fail("Retained Bend launcher differs from the pinned release wrapper")
     if hashes.get("bin/bend-runtime") not in NATIVE_RUNTIME_SHA256:
-        fail("Bend runtime is not a pinned native 2.0.25 release executable")
+        fail("Bend runtime is not a pinned native 2.0.26 release executable")
 
 
 def generate(output: Path, bend: str) -> None:
@@ -648,7 +648,7 @@ def generate(output: Path, bend: str) -> None:
         compiler = local_file(compiler_root, nix_root / "bin/bend")
         compiler_root = nix_root
     if digest(compiler_root / "bend2/base.bend") != BASE_SHA256:
-        fail("Bend Base differs from the selected 2.0.25 release")
+        fail("Bend Base differs from the selected 2.0.26 release")
     base_root = compiler_root / "bend2"
     source_root = Path(__file__).resolve().parent.parent
     local, trusted = source_closure(source_root, base_root)
@@ -665,7 +665,7 @@ def generate(output: Path, bend: str) -> None:
     version_command = [BEND_COMMAND, "version"]
     version = run(version_command, cwd=output, record=output / "logs/version.json")
     if successful_output(version, version_command) != BEND_VERSION:
-        fail("Generation requires exactly bend 2.0.25")
+        fail("Generation requires exactly bend 2.0.26")
     base_command = [BEND_COMMAND, "base"]
     base = run(base_command, cwd=output, record=output / "logs/base.json")
     if (
@@ -746,7 +746,7 @@ def source_identity(directory: Path) -> dict[str, object]:
     }:
         fail("Retained dependency closure differs from generation")
     if digest(directory / "compiler/bend2/base.bend") != BASE_SHA256:
-        fail("Retained Base differs from the selected 2.0.25 release")
+        fail("Retained Base differs from the selected 2.0.26 release")
     if check_hashes(directory, identity.get("c")) != {
         f"{name}.c" for name in PROGRAM_NAMES
     }:

@@ -62,7 +62,7 @@ at `unix:///run/user/1000/docker.sock`, and clears Docker context/TLS overrides.
 The supervised worker launches with
 `nix develop --offline --no-write-lock-file -c <prepared-python> -m bench.autoresearch --worker`.
 GPU/runtime variables are not changed. The healthy owned service must be native
-262144 at `http://127.0.0.1:18020`, RTX 3090/280 W, using Bend 2.0.25. The command
+262144 at `http://127.0.0.1:18020`, RTX 3090/280 W, using Bend 2.0.26. The command
 does not install dependencies, start a service, change power policy or recover it.
 
 The whole-command deadline is the earlier of 2400 seconds from start and the
@@ -357,9 +357,15 @@ remains a real limitation. Enabling vision code does not prove memory capacity.
 ## Latest Bend/native evidence and completed capacity
 
 The current compiler authority is the latest stable upstream release, pinned to
-original **Bend 2.0.25** with its exact retained compiler/toolchain identity.
-The unchanged root proof passes on 2.0.25 with a 1073741824-byte process stack
-and `JSC_maxPerThreadStackUsage=536870912`; the default stack overflows.
+original **Bend 2.0.26** with its exact retained compiler/toolchain identity.
+The unchanged root proof passed on the 2.0.26 release runtime in **65.65 s** with
+a 1073741824-byte process stack and
+`BUN_JSC_maxPerThreadStackUsage=536870912`. Its bundled Bun 1.4.0 needs this
+prefix: the former `JSC_maxPerThreadStackUsage` invocation overflowed, including
+with a 2 GiB process stack and a requested 1 GiB JSC stack. Only the resource
+environment changed; the release checker and proof sources stayed unmodified.
+The earlier unchanged root proof passed on 2.0.25 with a 1073741824-byte process
+stack and `JSC_maxPerThreadStackUsage=536870912`; the default stack overflowed.
 No comparator patch is required. Rebuild and re-admit production artifacts
 after a compiler update; historical GPU evidence does not qualify a new build.
 The earlier 2.0.20 root `PROOF.bend` check passed (`All terms check`, exit 0,
