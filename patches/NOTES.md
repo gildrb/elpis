@@ -508,3 +508,18 @@ Evidence: `marlin-k64-benchmark-evidence-1/autoresearch` and adjacent
 `profiling-cached32k-1`; paired evidence in `marlin-k64-comparison-1`,
 all under the temporary evidence root. Benchmark image:
 `sha256:fb50cb0af06c78017dc37ff2ee069fd61dc28f2a2dfeb37025ebf4b46ec675e9`.
+
+### Unchanged Marlin repeat, run 21
+
+The same immutable image passed the full frozen suite again:
+**95.117027 tok/s**, math reward3/3, short I3 reward1, elapsed1806.978s.
+Runs20–21 span95.12–95.38 tok/s versus the serial control93.24;
+this confirms the sampled pooled-rate/quality result, not a general
+quality guarantee or isolated kernel speedup. C1 was
+75.3566/71.2652/55.5312 tok/s, repeating the smaller-depth regressions.
+Long GraphWalks varied to13.0852 tok/s with reward0.
+
+The fresh profile again passed capture gates: Marlin184.828 ms,
+packed attention118.333 ms, summed kernels412.182 ms. No Marlin
+kernel-time improvement was demonstrated. Evidence:
+`marlin-k64-benchmark-evidence-2` under the temporary evidence root.
