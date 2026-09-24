@@ -16,7 +16,7 @@
     "path": "/opt/venv/lib/python3.13/site-packages/exllamav3_ext.cpython-313-x86_64-linux-gnu.so",
     "base_sha256": "6d30690fdb76b3c4ad3fb5e69f0479707e410fc9b6194e2a5e32f4d7fe1fd8b3"
   },
-  "series_sha256": "55bb4c6ad7fda46053db6acdf1c5c0d4f30a18e34fc0c1d5ee3a03cda7ddf1cb",
+  "series_sha256": "8201a31a81729d74193e0495fb3aeb6ae31e6bd4c560fd4ea159c2221f52e4f2",
   "patches": [
     {
       "name": "0001-gdn-shared-carveout.patch",
@@ -43,6 +43,10 @@
       "sha256": "610b04b44f477dc2456716a01a695c6508c672f881ca1e7e41208cdd506d8710"
     },
     {
+      "name": "5001-gdn-small-fusions.patch",
+      "sha256": "a8f0a96067910604846302506493fd6d41d5d2582fe1f401f64413b43aa0b6f6"
+    },
+    {
       "name": "2001-gemm-m16-swapab.patch",
       "sha256": "0da35574e67eca7a487be3e4b36cd1c9ff835863f1ad8ff4dc628d89509396b2"
     }
@@ -54,15 +58,15 @@
     },
     "exllamav3_ext/gdn.cu": {
       "pre": "a06effe57ac621eea19d908796b4848135f675438d5b3eedbd3c4e67d336eaf0",
-      "post": "33711a435f4477d0f56f6f2d1d42cce957a095168264eafbc37b67f2170623d3"
+      "post": "9c7981d3e309839d54ec5cfce5d9093cddcee16c665a2c2fbe29072ad071759f"
     },
     "exllamav3_ext/gdn.cuh": {
       "pre": "c64e35c29d7ebc40b7b10b64d4015dff7a5ab1409865f7ebf8cd38a903ab05fd",
-      "post": "b9ca25522a96c638043653826c7e41dfe01100261525716ee33e92e3501fd288"
+      "post": "3816d088a1ced5a6893f1a4b80a05bdadd19f29d8686875f508fd96b9bc7d05f"
     },
     "exllamav3_ext/libtorch/gated_delta_net.cpp": {
       "pre": "d8a31ef61e42ce753f7a9ee2a55c7e25a1c51e0a0a8d148d6058f9d96120dfef",
-      "post": "27596c4cc88cbe725ea39e940c24d3657a08f8854cb678d462d7e685709f398e"
+      "post": "166b2ed3208834464be64d1120fa649fd2af14910eb0114dd13c70c34e12b3f5"
     },
     "exllamav3_ext/libtorch/gated_delta_net.h": {
       "pre": "57e460d9e8d5097f647b59b6d20c8be5162386e11ec168ced7903471f4b4205f",

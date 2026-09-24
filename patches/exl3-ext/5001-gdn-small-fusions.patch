@@ -1,0 +1,963 @@
+--- a/exllamav3_ext/gdn.cu
++++ b/exllamav3_ext/gdn.cu
+@@ -882,7 +882,11 @@
+ //                 state RULE_HISTORY would have stored in row `steps`
+ enum { RULE_INPLACE = 0, RULE_HISTORY = 1, RULE_VERIFY = 2, RULE_COMMIT = 3 };
+ 
+-template <int MODE>
++// GROUPS > 1 runs GROUPS v chunks of one head side by side in a block of GROUPS * 128 threads
++// (chunk = threadIdx.x / 128, v_chunk ignored), each chunk with its own shared scratch and the
++// exact per-thread arithmetic of the one-chunk block, and puts the bf16 outputs in sh_out
++// ([steps, 128], shared) instead of core_attn_out
++template <int MODE, int GROUPS = 1>
+ __device__ __forceinline__ void gated_delta_rule_128_reg
+ (
+     const bfloat16* __restrict__ mixed_qkv,     // this batch row's [seqlen, (k_dim + k_dim + v_dim)]
+@@ -896,7 +900,8 @@
+     const float scale,
+     const size_t state_size,
+     const int head,
+-    const int v_chunk
++    const int v_chunk,
++    bfloat16* __restrict__ sh_out = nullptr
+ )
+ {
+     constexpr int HEAD_DIM = 128;
+@@ -906,17 +911,23 @@
+     constexpr size_t HEAD_STATE_SIZE = HEAD_DIM * HEAD_DIM;
+ 
+     int group = num_v_heads / num_k_heads;
+-    int t = threadIdx.x;        // q/k element; lane = v column, warp = k-slice
++    const int grp = GROUPS == 1 ? 0 : threadIdx.x / HEAD_DIM;
++    int t = threadIdx.x - grp * HEAD_DIM;  // q/k element; lane = v column, warp = k-slice
+     int lane = t % 32;
+     int warp = t / 32;
+     int k_head = head / group;
+-    int v_start = v_chunk * V_CHUNK_DIM;
+-
+-    __shared__ float sh_red[2][HEAD_DIM / 32];
+-    __shared__ float sh_k[HEAD_DIM];
+-    __shared__ float sh_q[HEAD_DIM];
+-    __shared__ float sh_dot1[SUBK][V_CHUNK_DIM];
+-    __shared__ float sh_dot2[SUBK][V_CHUNK_DIM];
++    int v_start = (GROUPS == 1 ? v_chunk : grp) * V_CHUNK_DIM;
++
++    __shared__ float sh_red_g[GROUPS][2][HEAD_DIM / 32];
++    __shared__ float sh_k_g[GROUPS][HEAD_DIM];
++    __shared__ float sh_q_g[GROUPS][HEAD_DIM];
++    __shared__ float sh_dot1_g[GROUPS][SUBK][V_CHUNK_DIM];
++    __shared__ float sh_dot2_g[GROUPS][SUBK][V_CHUNK_DIM];
++    auto& sh_red = sh_red_g[grp];
++    auto& sh_k = sh_k_g[grp];
++    auto& sh_q = sh_q_g[grp];
++    auto& sh_dot1 = sh_dot1_g[grp];
++    auto& sh_dot2 = sh_dot2_g[grp];
+ 
+     // This thread's elements: k rows warp * BTS + j, v column v_start + lane
+     const size_t elem = head * HEAD_STATE_SIZE + (size_t) warp * BTS * HEAD_DIM + v_start + lane;
+@@ -1004,7 +1015,8 @@
+             float v_out = 0.0f;
+             #pragma unroll
+             for (int i = 0; i < SUBK; ++i) v_out += sh_dot2[i][lane];
+-            out[lane] = __float2bfloat16_rz(v_out * scale);
++            if constexpr (GROUPS == 1) out[lane] = __float2bfloat16_rz(v_out * scale);
++            else sh_out[s * HEAD_DIM + v_start + lane] = __float2bfloat16_rz(v_out * scale);
+         }
+ 
+         mixed_qkv +=        2 * HEAD_DIM * num_k_heads + HEAD_DIM * num_v_heads;
+@@ -1059,6 +1071,170 @@
+         mixed_qkv, g, beta, slot_state, core_attn_out, seqlen,
+         num_k_heads, num_v_heads, scale, state_size, blockIdx.y, blockIdx.z
+     );
++}
++
++// Copies of norm.cu's gated_rms_norm_kernel element helpers (same source, same TU flags)
++__device__ inline void gdn_norm_read_bfloat164(float4& f4, const bfloat164* addr)
++{
++    bfloat164 h4;
++    READ64(h4, addr);
++    f4.x = __bfloat162float(__low2bfloat16(h4.x));
++    f4.y = __bfloat162float(__high2bfloat16(h4.x));
++    f4.z = __bfloat162float(__low2bfloat16(h4.y));
++    f4.w = __bfloat162float(__high2bfloat16(h4.y));
++}
++
++__device__ inline void gdn_norm_read_float4(float4& f4, const float4* addr)
++{
++    READ128(f4, addr);
++}
++
++__device__ inline void gdn_norm_write_half4(const float4& f4, half4* addr)
++{
++    half4 h4
++    (
++        __halves2half2(__float2half_rn(f4.x), __float2half_rn(f4.y)),
++        __halves2half2(__float2half_rn(f4.z), __float2half_rn(f4.w))
++    );
++    WRITE64(addr, h4);
++}
++
++__device__ inline float gdn_norm_sum_sq4(float lsum, const float4& f4)
++{
++    lsum = fma(f4.x, f4.x, lsum);
++    lsum = fma(f4.y, f4.y, lsum);
++    lsum = fma(f4.z, f4.z, lsum);
++    lsum = fma(f4.w, f4.w, lsum);
++    return lsum;
++}
++
++__device__ inline void gdn_norm_apply4(float4& x4, const float4& w4, const float rmf)
++{
++    x4.x = x4.x * w4.x * rmf;
++    x4.y = x4.y * w4.y * rmf;
++    x4.z = x4.z * w4.z * rmf;
++    x4.w = x4.w * w4.w * rmf;
++}
++
++__device__ __forceinline__ float gdn_norm_silu(float x)
++{
++    float e     = __expf(-x);
++    float recip = __fdividef(1.0f, 1.0f + e);
++    return x * recip;
++}
++
++__device__ __forceinline__ float gdn_norm_sigmoid_f(float x)
++{
++    return __fdividef(1.0f, 1.0f + __expf(-x));
++}
++
++#define RULE_NORM_GROUPS 4
++#define RULE_NORM_MAX_S 16
++
++// cuda_recurrent_gated_delta_rule_kernel_128_reg followed by gated_rms_norm_kernel<32, half,
++// norm_w_T, float> (gate_first off, one weight row), in one launch. A block runs all four
++// 32-column chunks of one head (gated_delta_rule_128_reg<MODE, 4>: per-thread arithmetic of the
++// 128-thread block, unchanged), keeps the head's __float2bfloat16_rz outputs in shared memory,
++// then warp w normalizes token rows w, w + 16, ... with the norm kernel's own 32-lane code: lane
++// l owns elements 4l..4l+3, one sum_sq4, the same xor-shuffle tree, rsqrtf(sum / dim + eps),
++// apply4, gate, fp16 round. Parameters 0..15 are the rule kernel's (3 = state, 12 = slots are
++// patched); core_attn_out (4) is not written.
++template <int MODE, typename norm_w_T>
++__global__ __launch_bounds__(32 * SUBK * RULE_NORM_GROUPS)
++void cuda_recurrent_gated_delta_rule_kernel_128_reg_norm
++(
++    const bfloat16* __restrict__ mixed_qkv,     // [bsz, seqlen, (k_dim + k_dim + v_dim)]
++    const float* __restrict__ g,                // [bsz, seqlen, (group * num_k_heads)]
++    const bfloat16* __restrict__ beta,          // [bsz, seqlen, (group * num_k_heads)]
++    float* __restrict__ recurrent_state,        // [num_slots, max_history + 1, (group * num_k_heads), 128, 128]
++    bfloat16* __restrict__ core_attn_out,       // unused
++    const int bsz,
++    const int seqlen,
++    const int num_k_heads,
++    const int num_v_heads,
++    const int k_head_dim,
++    const int v_head_dim,
++    const float scale,
++    const int* __restrict__ slots,              // [bsz]
++    const int history_stride,                   // max_history + 1
++    const float* __restrict__ D,                // unused
++    const norm_w_T* __restrict__ norm_w,        // [128]
++    const float* __restrict__ gate,             // [bsz, seqlen, num_v_heads, 128]
++    half* __restrict__ y,                       // [bsz, seqlen, num_v_heads * 128]
++    const float epsilon,
++    const float constant_bias,
++    const int gate_act,                         // 0 = silu, 1 = sigmoid
++    const int dim                               // 128, a runtime value as in the norm kernel
++)
++{
++    static_assert(MODE != RULE_COMMIT, "commits run through batched_state_replay_kernel");
++    constexpr int HEAD_DIM = 128;
++    constexpr bool weight_bf16 = std::is_same_v<norm_w_T, bfloat16>;
++    __shared__ __align__(16) bfloat16 sh_out[RULE_NORM_MAX_S][HEAD_DIM];
++
++    int group = num_v_heads / num_k_heads;
++    const size_t state_size = group * num_k_heads * (size_t) (HEAD_DIM * HEAD_DIM);
++    const size_t slot_size = (size_t) history_stride * state_size;
++
++    int bi = blockIdx.x;
++    int head = blockIdx.y;
++    mixed_qkv +=        bi * seqlen * (3 * HEAD_DIM * num_k_heads + HEAD_DIM * (num_v_heads - num_k_heads));
++    g +=                (size_t) bi * seqlen * (group * num_k_heads);
++    beta +=             bi * seqlen * (group * num_k_heads);
++    int state_slot = slots ? slots[bi] : bi;
++    float* slot_state = recurrent_state + (size_t) state_slot * slot_size;
++
++    gated_delta_rule_128_reg<MODE, RULE_NORM_GROUPS>
++    (
++        mixed_qkv, g, beta, slot_state, nullptr, seqlen,
++        num_k_heads, num_v_heads, scale, state_size, head, 0, &sh_out[0][0]
++    );
++    __syncthreads();
++
++    int warp_id = threadIdx.x / 32;
++    int lane_id = threadIdx.x % 32;
++    for (int s = warp_id; s < seqlen; s += RULE_NORM_GROUPS * SUBK)
++    {
++        const size_t row_off = ((size_t) (bi * seqlen + s) * num_v_heads + head) * dim;
++        int column = lane_id;
++
++        float sum = 0.0f;
++        {
++            float4 x4;
++            gdn_norm_read_bfloat164(x4, ((const bfloat164*) sh_out[s]) + column);
++            sum = gdn_norm_sum_sq4(sum, x4);
++        }
++        for (int offset = warpSize / 2; offset > 0; offset /= 2) sum += __shfl_xor_sync(0xffffffff, sum, offset);
++
++        float rmf = rsqrtf(sum / (float) dim + epsilon);
++
++        float4 x4;
++        float4 w4;
++        float4 g4;
++        gdn_norm_read_bfloat164(x4, ((const bfloat164*) sh_out[s]) + column);
++        if constexpr (weight_bf16) gdn_norm_read_bfloat164(w4, ((const bfloat164*) norm_w) + column);
++        else                       gdn_norm_read_float4   (w4, ((const float4*)    norm_w) + column);
++        gdn_norm_read_float4(g4, ((const float4*) (gate + row_off)) + column);
++
++        if (constant_bias != 0.0f)
++        {
++            w4.x += constant_bias;
++            w4.y += constant_bias;
++            w4.z += constant_bias;
++            w4.w += constant_bias;
++        }
++
++        gdn_norm_apply4(x4, w4, rmf);
++
++        #define _gate_fn(v) (gate_act == 1 ? gdn_norm_sigmoid_f(v) : gdn_norm_silu(v))
++        x4.x *= _gate_fn(g4.x);
++        x4.y *= _gate_fn(g4.y);
++        x4.z *= _gate_fn(g4.z);
++        x4.w *= _gate_fn(g4.w);
++        #undef _gate_fn
++
++        gdn_norm_write_half4(x4, ((half4*) (y + row_off)) + column);
++    }
+ }
+ 
+ void cuda_recurrent_gated_delta_rule_gr
+@@ -1228,6 +1404,133 @@
+     #undef KERNEL_ARGS
+ 
+     cuda_check(cudaPeekAtLastError());
++}
++
++bool cuda_recurrent_gated_delta_rule_norm_gr
++(
++    const at::Tensor& mixed_qkv,
++    const at::Tensor& g,
++    const at::Tensor& beta,
++    at::Tensor& recurrent_state,
++    int num_k_heads,
++    int num_v_heads,
++    int k_head_dim,
++    int v_head_dim,
++    const c10::optional<at::Tensor>& slots,
++    bool history,
++    Graph* graph,
++    bool replay_verify,
++    const at::Tensor& norm_w,
++    const at::Tensor& gate,
++    at::Tensor& y,
++    float epsilon,
++    float constant_bias,
++    int gate_act
++)
++{
++    int bsz = mixed_qkv.size(0);
++    int seqlen = mixed_qkv.size(1);
++    bool norm_w_fp32 = norm_w.dtype() == at::kFloat;
++    bool norm_w_bf16 = norm_w.dtype() == at::kBFloat16;
++
++    // Shapes the fused kernel covers; anything else runs the two separate launches
++    if (k_head_dim != 128 || v_head_dim != 128 || g.dim() != 3 || seqlen > RULE_NORM_MAX_S ||
++        num_v_heads % num_k_heads != 0 || (!norm_w_fp32 && !norm_w_bf16) || norm_w.numel() != 128 ||
++        !norm_w.is_contiguous() || gate.dtype() != at::kFloat || y.dtype() != at::kHalf ||
++        gate.numel() != (int64_t) bsz * seqlen * num_v_heads * 128 || y.numel() != gate.numel() ||
++        !gate.is_contiguous() || !y.is_contiguous() || gate.size(-1) != 128)
++        return false;
++
++    const at::cuda::OptionalCUDAGuard device_guard(mixed_qkv.device());
++    cudaStream_t stream = graph ? graph->capture_stream : at::cuda::getCurrentCUDAStream().stream();
++    TORCH_CHECK(!graph || slots.has_value(), "cuda_recurrent_gated_delta_rule: graph capture requires slots");
++    TORCH_CHECK(!replay_verify || history, "cuda_recurrent_gated_delta_rule: replay_verify needs a history launch");
++    TORCH_CHECK(mixed_qkv.size(2) == 2 * num_k_heads * 128 + num_v_heads * 128,
++                "mixed_qkv must be [bsz, seqlen, 2*num_k_heads*k_head_dim + num_v_heads*v_head_dim]");
++    TORCH_CHECK(g.size(0) == bsz && g.size(1) == seqlen && g.size(2) == num_v_heads,
++                "g must be [bsz, seqlen, num_v_heads]");
++    TORCH_CHECK(beta.dim() == 3 && beta.size(0) == bsz && beta.size(1) == seqlen && beta.size(2) == num_v_heads,
++                "beta must be [bsz, seqlen, num_v_heads]");
++    TORCH_CHECK(recurrent_state.dim() == 5 &&
++                recurrent_state.size(0) >= (slots.has_value() ? 1 : bsz) &&
++                recurrent_state.size(1) >= (history ? seqlen : 1) &&
++                recurrent_state.size(2) == num_v_heads &&
++                recurrent_state.size(3) == 128 &&
++                recurrent_state.size(4) == 128,
++                "recurrent_state must be [num_slots, max_history + 1, num_v_heads, k_head_dim, v_head_dim]");
++    TORCH_CHECK_DTYPE(mixed_qkv, kBFloat16);
++    TORCH_CHECK_DTYPE(g, kFloat);
++    TORCH_CHECK_DTYPE(beta, kBFloat16);
++    TORCH_CHECK_DTYPE(recurrent_state, kFloat);
++    TORCH_CHECK_DTYPE_OPT(slots, kInt);
++
++    const int* slots_ptr = (const int*) OPTPTR(slots);
++    if (slots_ptr)
++    {
++        TORCH_CHECK(slots.value().dim() == 1 && slots.value().size(0) == bsz, "slots must be [bsz]");
++        TORCH_CHECK(slots.value().device() == mixed_qkv.device(), "slots must be on the same device as mixed_qkv");
++    }
++
++    dim3 blocks(bsz, num_v_heads);
++    dim3 threads(32 * SUBK * RULE_NORM_GROUPS);
++    int history_stride = recurrent_state.size(1);
++    float scale = 1.0f / sqrtf(k_head_dim);
++
++    #define KERNEL_ARGS(norm_w_T)                   \
++        (const bfloat16*) mixed_qkv.data_ptr(),     \
++        (const float*) g.data_ptr(),                \
++        (const bfloat16*) beta.data_ptr(),          \
++        (float*) recurrent_state.data_ptr(),        \
++        nullptr,                                    \
++        bsz,                                        \
++        seqlen,                                     \
++        num_k_heads,                                \
++        num_v_heads,                                \
++        k_head_dim,                                 \
++        v_head_dim,                                 \
++        scale,                                      \
++        slots_ptr,                                  \
++        history_stride,                             \
++        nullptr,                                    \
++        (const norm_w_T*) norm_w.data_ptr(),        \
++        (const float*) gate.data_ptr(),             \
++        (half*) y.data_ptr(),                       \
++        epsilon,                                    \
++        constant_bias,                              \
++        gate_act,                                   \
++        128
++
++    // recurrent_state is kernel param 3 and slots is param 12, as in the rule kernels
++    #define LAUNCH_RULE(mode, norm_w_T)                                                   \
++    {                                                                                     \
++        auto kernel = &cuda_recurrent_gated_delta_rule_kernel_128_reg_norm<mode, norm_w_T>; \
++        gdn_max_shared_carveout((const void*) kernel);                                    \
++        kernel<<<blocks, threads, 0, stream>>>(KERNEL_ARGS(norm_w_T));                    \
++        if (graph)                                                                        \
++        {                                                                                 \
++            graph->record_param((void*) kernel, GP_gdn_rule_state, 3);                    \
++            graph->record_param((void*) kernel, GP_gdn_rule_slots, 12);                   \
++            graph->record_param((void*) kernel, GP_end, 0);                               \
++        }                                                                                 \
++    }
++
++    if (norm_w_fp32)
++    {
++        if (replay_verify) LAUNCH_RULE(RULE_VERIFY, float)
++        else if (history)  LAUNCH_RULE(RULE_HISTORY, float)
++        else               LAUNCH_RULE(RULE_INPLACE, float)
++    }
++    else
++    {
++        if (replay_verify) LAUNCH_RULE(RULE_VERIFY, bfloat16)
++        else if (history)  LAUNCH_RULE(RULE_HISTORY, bfloat16)
++        else               LAUNCH_RULE(RULE_INPLACE, bfloat16)
++    }
++    #undef LAUNCH_RULE
++    #undef KERNEL_ARGS
++
++    cuda_check(cudaPeekAtLastError());
++    return true;
+ }
+ 
+ void cuda_recurrent_gated_delta_rule
+@@ -1938,6 +2241,382 @@
+     cuda_check(cudaPeekAtLastError());
+ }
+ 
++// Split-projection (Qwen3.5) decode front end as ONE launch, replacing gdn_ba_gemv_kernel,
++// gated_delta_net_fused_op_3_kernel and conv1d_update_kernel<true, HISTORY>. Every value is
++// computed by the same arithmetic, in the same order and with the same rounding points as those
++// three kernels; only the thread mapping and the memory traffic change:
++//
++//   blocks [0, H)   b/a GEMV and beta/g for v head h. Warp w computes output (w & 1) * H + h
++//                   for CONV_BA_ROWS rows at once, each row's sum being the original warp's: lane
++//                   l accumulates half2 elements l, l + 32, ... in ascending order with the same
++//                   two fmaf per element, then the same __shfl_down_sync tree, then the bias. The
++//                   loads are hoisted CONV_BA_UNROLL elements ahead (addresses only), and the
++//                   weight row is read once for all rows instead of once per row. beta/g use the
++//                   fused_op_3 formula on the fp32 sums (still stored to ba, bit-identical).
++//   other blocks    causal conv1d update, one thread per (batch row, channel), reading the fp32
++//                   qkv projection directly: trunc_bf16 (the value fused_op_3 stored to
++//                   mixed_qkv) then __bfloat162float (the value conv1d_update read back), so the
++//                   conv sees identical inputs without the [B,F,S] round trip. The window FMA
++//                   chain, activation and rounding are conv1d_update_kernel's. The state window
++//                   (bf16 values, stored unchanged) is staged in shared memory and written back
++//                   channel-contiguously instead of as per-thread strided 2-byte stores.
++//
++// Kernel params 0 (ba x), 1 (conv_state) and 2 (slots) are patched when replaying a graph, in the
++// order the three replaced launches recorded them.
++
++#define CONV_BA_THREADS 128
++#define CONV_BA_MAX_S 16
++#define CONV_BA_MAX_R 128
++#define CONV_BA_ROWS 4
++#define CONV_BA_UNROLL 16
++#define CONV_BA_MAX_K 4
++#define CONV_BA_SEQ (CONV_BA_MAX_K + CONV_BA_MAX_S + 1)
++
++template <bool HISTORY, typename a_log_T, int K>
++__global__ __launch_bounds__(CONV_BA_THREADS)
++void gdn_conv_ba_kernel
++(
++    const half* __restrict__ ba_x,              // [R, k] half, R = B * S
++    bfloat16* __restrict__ conv_state,          // (num_slots, F, state_size)
++    const int* __restrict__ slots,              // (B) or null (identity)
++    const float* __restrict__ qkv,              // [B, S, F] float
++    const bfloat16* __restrict__ conv_weight,   // [F, K]
++    const bfloat16* __restrict__ conv_bias,     // [F] or null
++    bfloat16* __restrict__ conv_out,            // [B, S, F]
++    const half* __restrict__ ba_w,              // [2H, k]
++    const half* __restrict__ ba_bias,           // [2H] or null
++    float* __restrict__ ba_out,                 // [R, 2H]
++    const bfloat16* __restrict__ dt_bias,       // [H]
++    const a_log_T* __restrict__ a_log,          // [H]
++    bfloat16* __restrict__ out_beta,            // [R, H]
++    float* __restrict__ out_g,                  // [R, H]
++    const int B,
++    const int S,
++    const int F,
++    const int state_size,
++    const int k,
++    const int H,
++    const float beta_scale
++)
++{
++    if (blockIdx.x < H)
++    {
++        __shared__ float sh_ba[2][CONV_BA_MAX_R];
++        const int R = B * S;
++        const int n = 2 * H;
++        const int h = blockIdx.x;
++        const int warp = threadIdx.x / 32;
++        const int lane = threadIdx.x % 32;
++        const int ab = warp & 1;
++        const int o = ab * H + h;
++        const int k2 = k / 2;
++        const half2* w2 = (const half2*) (ba_w + (size_t) o * k);
++
++        for (int r0 = (warp >> 1) * CONV_BA_ROWS; r0 < R; r0 += (CONV_BA_THREADS / 64) * CONV_BA_ROWS)
++        {
++            const half2* x2[CONV_BA_ROWS];
++            float sum[CONV_BA_ROWS];
++            #pragma unroll
++            for (int i = 0; i < CONV_BA_ROWS; ++i)
++            {
++                x2[i] = (const half2*) (ba_x + (size_t) min(r0 + i, R - 1) * k);
++                sum[i] = 0.0f;
++            }
++
++            for (int j0 = lane; j0 < k2; j0 += 32 * CONV_BA_UNROLL)
++            {
++                half2 wv[CONV_BA_UNROLL];
++                half2 xv[CONV_BA_ROWS][CONV_BA_UNROLL];
++                #pragma unroll
++                for (int u = 0; u < CONV_BA_UNROLL; ++u)
++                {
++                    int j = j0 + u * 32;
++                    if (j < k2)
++                    {
++                        wv[u] = w2[j];
++                        #pragma unroll
++                        for (int i = 0; i < CONV_BA_ROWS; ++i) xv[i][u] = x2[i][j];
++                    }
++                }
++                #pragma unroll
++                for (int u = 0; u < CONV_BA_UNROLL; ++u)
++                {
++                    int j = j0 + u * 32;
++                    if (j < k2)
++                    {
++                        float2 wf = __half22float2(wv[u]);
++                        #pragma unroll
++                        for (int i = 0; i < CONV_BA_ROWS; ++i)
++                        {
++                            float2 xf = __half22float2(xv[i][u]);
++                            sum[i] = fmaf(xf.x, wf.x, sum[i]);
++                            sum[i] = fmaf(xf.y, wf.y, sum[i]);
++                        }
++                    }
++                }
++            }
++
++            #pragma unroll
++            for (int i = 0; i < CONV_BA_ROWS; ++i)
++                for (int offset = 16; offset > 0; offset >>= 1)
++                    sum[i] += __shfl_down_sync(0xffffffff, sum[i], offset);
++
++            if (lane == 0)
++            {
++                #pragma unroll
++                for (int i = 0; i < CONV_BA_ROWS; ++i)
++                {
++                    if (r0 + i < R)
++                    {
++                        float v = sum[i];
++                        if (ba_bias) v += __half2float(ba_bias[o]);
++                        ba_out[(size_t) (r0 + i) * n + o] = v;
++                        sh_ba[ab][r0 + i] = v;
++                    }
++                }
++            }
++        }
++        __syncthreads();
++
++        for (int row = threadIdx.x; row < R; row += CONV_BA_THREADS)
++        {
++            float bv = sh_ba[0][row];
++            float av = sh_ba[1][row];
++            float beta = _sigmoid_fast_exp(bv) * beta_scale;
++            float dtb = as_float(dt_bias[h]);
++            float gv = -softplus(av + dtb) * __expf(as_float(a_log[h]));
++
++            out_beta[(size_t) row * H + h] = trunc_bf16(beta);
++            out_g[(size_t) row * H + h] = gv;
++        }
++        return;
++    }
++
++    __shared__ bfloat16 sh_seq[CONV_BA_THREADS][CONV_BA_SEQ];
++    const int conv_bpb = CEIL_DIVIDE(F, CONV_BA_THREADS);
++    const int cb = blockIdx.x - H;
++    const int b = cb / conv_bpb;
++    const int d0 = (cb - b * conv_bpb) * CONV_BA_THREADS;
++    const int d = d0 + threadIdx.x;
++    const int slot = slots ? slots[b] : b;
++    bfloat16* state_c = conv_state + ((size_t) slot * F + d0) * state_size;
++
++    if (d < F)
++    {
++        const bfloat16* state_d = state_c + (size_t) threadIdx.x * state_size;
++        const float* x_d = qkv + (size_t) b * S * F + d;
++        bfloat16* seq = sh_seq[threadIdx.x];
++
++        float w[K];
++        #pragma unroll
++        for (int kk = 0; kk < K; ++kk)
++            w[kk] = __bfloat162float(conv_weight[(size_t) d * K + kk]);
++
++        float bias_d = conv_bias ? __bfloat162float(conv_bias[d]) : 0.0f;
++
++        // Previous window; win[K-1] slot is filled with the current input each step
++        float old_state[K];
++        float win[K];
++        #pragma unroll
++        for (int kk = 0; kk < K; ++kk)
++        {
++            bfloat16 v = state_d[kk];
++            seq[kk] = v;
++            old_state[kk] = __bfloat162float(v);
++        }
++        #pragma unroll
++        for (int kk = 0; kk < K - 1; ++kk)
++            win[kk] = old_state[kk + 1];
++
++        // All inputs of the sequence up front: mixed_qkv[b, d, s] as fused_op_3 stored it
++        bfloat16 xb[CONV_BA_MAX_S];
++        #pragma unroll
++        for (int s = 0; s < CONV_BA_MAX_S; ++s)
++            if (s < S) xb[s] = trunc_bf16(x_d[(size_t) s * F]);
++
++        #pragma unroll
++        for (int s = 0; s < CONV_BA_MAX_S; ++s)
++        {
++            if (s < S)
++            {
++                seq[K + s] = xb[s];
++                win[K - 1] = __bfloat162float(xb[s]);
++
++                float acc = bias_d;
++                #pragma unroll
++                for (int kk = 0; kk < K; ++kk)
++                    acc = fmaf(w[kk], win[kk], acc);
++
++                acc *= _sigmoid_fast_exp(acc);
++
++                conv_out[((size_t) b * S + s) * F + d] = __float2bfloat16_rn(acc);
++
++                #pragma unroll
++                for (int kk = 0; kk < K - 1; ++kk)
++                    win[kk] = win[kk + 1];
++            }
++        }
++    }
++    __syncthreads();
++
++    // Window write-back, channel-contiguous: the last write_size inputs of each channel (history:
++    // the rewindable tail of the buffer; otherwise the K-wide head). Every read of this block's
++    // state rows happened before the barrier, no other block touches them
++    const int total = K + S;
++    const int write_size = HISTORY ? (state_size < total ? state_size : total) : K;
++    const int dst_start = HISTORY ? state_size - write_size : 0;
++    const int src_start = total - write_size;
++    const int channels = min(CONV_BA_THREADS, F - d0);
++    for (int e = threadIdx.x; e < channels * write_size; e += CONV_BA_THREADS)
++    {
++        int c = e / write_size;
++        int j = e - c * write_size;
++        state_c[(size_t) c * state_size + dst_start + j] = sh_seq[c][src_start + j];
++    }
++}
++
++bool gdn_conv_ba_gr
++(
++    const at::Tensor& x,
++    const at::Tensor& ba_w,
++    const c10::optional<at::Tensor>& ba_bias,
++    at::Tensor& ba,
++    const at::Tensor& qkv,
++    const at::Tensor& dt_bias,
++    const at::Tensor& a_log,
++    at::Tensor& beta,
++    at::Tensor& g,
++    const float beta_scale,
++    at::Tensor& conv_state,
++    const c10::optional<at::Tensor>& slots,
++    const at::Tensor& conv_weight,
++    const c10::optional<at::Tensor>& conv_bias,
++    at::Tensor& conv_out,
++    bool history,
++    Graph* graph
++)
++{
++    // Conv widths the kernel is instantiated for; others run the three separate launches
++    int K = conv_weight.size(1);
++    if (K < 1 || K > CONV_BA_MAX_K) return false;
++
++    const at::cuda::OptionalCUDAGuard device_guard(x.device());
++    cudaStream_t stream = graph ? graph->capture_stream : at::cuda::getCurrentCUDAStream().stream();
++    TORCH_CHECK(!graph || slots.has_value(), "gdn_conv_ba: graph capture requires slots");
++
++    TORCH_CHECK_DTYPE(x, kHalf);
++    TORCH_CHECK_DTYPE(ba_w, kHalf);
++    TORCH_CHECK_DTYPE_OPT(ba_bias, kHalf);
++    TORCH_CHECK_DTYPE(ba, kFloat);
++    TORCH_CHECK_DTYPE(qkv, kFloat);
++    TORCH_CHECK_DTYPE(dt_bias, kBFloat16);
++    TORCH_CHECK_DTYPE(beta, kBFloat16);
++    TORCH_CHECK_DTYPE(g, kFloat);
++    TORCH_CHECK_DTYPE(conv_state, kBFloat16);
++    TORCH_CHECK_DTYPE_OPT(slots, kInt);
++    TORCH_CHECK_DTYPE(conv_weight, kBFloat16);
++    TORCH_CHECK_DTYPE_OPT(conv_bias, kBFloat16);
++    TORCH_CHECK_DTYPE(conv_out, kBFloat16);
++
++    int B = qkv.size(0);
++    int S = qkv.size(1);
++    int F = qkv.size(2);
++    int R = B * S;
++    int k = x.size(-1);
++    int H = beta.size(-1);
++    int state_size = conv_state.size(2);
++
++    TORCH_CHECK(S <= CONV_BA_MAX_S && R <= CONV_BA_MAX_R, "gdn_conv_ba: too many rows");
++    TORCH_CHECK(x.numel() == (int64_t) R * k && k % 2 == 0, "gdn_conv_ba: x must be [B, S, k], k even");
++    TORCH_CHECK(ba_w.dim() == 2 && ba_w.size(0) == 2 * H && ba_w.size(1) == k, "gdn_conv_ba: ba_w must be [2H, k]");
++    TORCH_CHECK(!ba_bias.has_value() || ba_bias.value().numel() == 2 * H, "gdn_conv_ba: ba_bias must be [2H]");
++    TORCH_CHECK(ba.numel() == (int64_t) R * 2 * H, "gdn_conv_ba: ba must be [B, S, 2H]");
++    TORCH_CHECK(beta.numel() == (int64_t) R * H && g.numel() == (int64_t) R * H, "gdn_conv_ba: beta/g must be [B, S, H]");
++    TORCH_CHECK(state_size >= K, "conv_state must have at least K entries");
++    TORCH_CHECK(conv_state.dim() == 3 && conv_state.size(1) == F, "conv_state must be (num_slots, F, state_size)");
++    TORCH_CHECK(conv_weight.dim() == 2 && conv_weight.size(0) == F, "conv_weight must be (F, K)");
++    TORCH_CHECK(conv_out.numel() == (int64_t) R * F, "conv_out must be (B, S, F)");
++    TORCH_CHECK(x.is_contiguous() && ba_w.is_contiguous() && ba.is_contiguous() && qkv.is_contiguous() &&
++                beta.is_contiguous() && g.is_contiguous() && conv_state.is_contiguous() &&
++                conv_weight.is_contiguous() && conv_out.is_contiguous(),
++                "gdn_conv_ba: tensors must be contiguous");
++
++    const int* slots_ptr = (const int*) OPTPTR(slots);
++    if (slots_ptr)
++    {
++        TORCH_CHECK(slots.value().dim() == 1 && slots.value().size(0) == B, "slots must be (bsz)");
++    }
++    else
++    {
++        TORCH_CHECK(conv_state.size(0) >= B, "conv_state too small for batch without slots");
++    }
++
++    int blocks = H + CEIL_DIVIDE(F, CONV_BA_THREADS) * B;
++
++    #define ARGS(a_log_T)                               \
++        (const half*) x.data_ptr(),                     \
++        (bfloat16*) conv_state.data_ptr(),              \
++        slots_ptr,                                      \
++        (const float*) qkv.data_ptr(),                  \
++        (const bfloat16*) conv_weight.data_ptr(),       \
++        (const bfloat16*) OPTPTR(conv_bias),            \
++        (bfloat16*) conv_out.data_ptr(),                \
++        (const half*) ba_w.data_ptr(),                  \
++        (const half*) OPTPTR(ba_bias),                  \
++        (float*) ba.data_ptr(),                         \
++        (const bfloat16*) dt_bias.data_ptr(),           \
++        (const a_log_T*) a_log.data_ptr(),              \
++        (bfloat16*) beta.data_ptr(),                    \
++        (float*) g.data_ptr(),                          \
++        B, S, F, state_size, k, H, beta_scale
++
++    // x is param 0, conv_state param 1 and slots param 2: the order gdn_ba_gemv_kernel and
++    // conv1d_update_kernel recorded them, so run_bszN's patch list is unchanged
++    #define LAUNCH(hist, a_log_T, kc)                                                     \
++    {                                                                                     \
++        auto kernel = &gdn_conv_ba_kernel<hist, a_log_T, kc>;                             \
++        gdn_max_shared_carveout((const void*) kernel);                                    \
++        kernel<<<blocks, CONV_BA_THREADS, 0, stream>>>(ARGS(a_log_T));                    \
++        if (graph)                                                                        \
++        {                                                                                 \
++            graph->record_param((void*) kernel, GP_gdn_ba_x, 0);                          \
++            graph->record_param((void*) kernel, GP_conv1d_state, 1);                      \
++            graph->record_param((void*) kernel, GP_conv1d_slots, 2);                      \
++            graph->record_param((void*) kernel, GP_end, 0);                               \
++        }                                                                                 \
++    }
++
++    #define LAUNCH_K(hist, a_log_T)                                                       \
++    {                                                                                     \
++        switch (K)                                                                        \
++        {                                                                                 \
++            case 1: LAUNCH(hist, a_log_T, 1) break;                                       \
++            case 2: LAUNCH(hist, a_log_T, 2) break;                                       \
++            case 3: LAUNCH(hist, a_log_T, 3) break;                                       \
++            default: LAUNCH(hist, a_log_T, 4) break;                                      \
++        }                                                                                 \
++    }
++
++    if (a_log.dtype() == at::kFloat)
++    {
++        if (history) LAUNCH_K(true, float)
++        else         LAUNCH_K(false, float)
++    }
++    else if (a_log.dtype() == at::kBFloat16)
++    {
++        if (history) LAUNCH_K(true, bfloat16)
++        else         LAUNCH_K(false, bfloat16)
++    }
++    else TORCH_CHECK(false, "gdn_conv_ba: unsupported a_log dtype");
++
++    #undef LAUNCH_K
++    #undef LAUNCH
++    #undef ARGS
++
++    cuda_check(cudaPeekAtLastError());
++    return true;
++}
++
+ #define LR_GEMV_WARPS 8
+ 
+ // Float-input fp16-weight GEMV for the KDA low-rank second stages (f_b/g_b): x is a graph
+--- a/exllamav3_ext/gdn.cuh
++++ b/exllamav3_ext/gdn.cuh
+@@ -66,6 +66,32 @@
+                                     // a later batched_state_replay commit (128x128 heads only)
+ );
+ 
++// cuda_recurrent_gated_delta_rule_gr (128x128 heads, per-head decay) followed by the gated RMS
++// norm of its output (gated_rms_norm_gr with a 128-wide fp32/bf16 weight, fp32 gate, fp16 y,
++// gate_first off, one weight row), in one launch with identical results. core_attn_out is not
++// written. Returns false without launching when the shapes/dtypes are not covered
++bool cuda_recurrent_gated_delta_rule_norm_gr
++(
++    const at::Tensor& mixed_qkv,
++    const at::Tensor& g,
++    const at::Tensor& beta,
++    at::Tensor& recurrent_state,
++    int num_k_heads,
++    int num_v_heads,
++    int k_head_dim,
++    int v_head_dim,
++    const c10::optional<at::Tensor>& slots,
++    bool history,
++    Graph* graph,
++    bool replay_verify,
++    const at::Tensor& norm_w,       // [128] float or bfloat16
++    const at::Tensor& gate,         // [bsz, seqlen, num_v_heads, 128] float
++    at::Tensor& y,                  // [bsz, seqlen, num_v_heads * 128] half
++    float epsilon,
++    float constant_bias,
++    int gate_act                    // 0 = silu, 1 = sigmoid
++);
++
+ // Mamba2 discretization: dt = clamp(softplus(dt_raw + dt_bias), dt_min, dt_max), g = -exp(a_log) * dt
+ void mamba2_dt_op
+ (
+@@ -187,6 +213,31 @@
+     const at::Tensor& w_t,          // [n, k] half
+     const c10::optional<at::Tensor>& bias,  // [n] half
+     at::Tensor& y,                  // [.., n] float
++    Graph* graph
++);
++
++// Split-projection (Qwen3.5) decode front end in one launch: gdn_ba_gemv_gr (into ba), the beta/g
++// half of gated_delta_net_fused_op_3_gr and cuda_causal_conv1d_update_gr (activation on) reading
++// the fp32 qkv directly, with identical results. mixed_qkv is not written. Returns false without
++// launching for conv widths above 4
++bool gdn_conv_ba_gr
++(
++    const at::Tensor& x,            // [B, S, k] half
++    const at::Tensor& ba_w,         // [2H, k] half
++    const c10::optional<at::Tensor>& ba_bias,  // [2H] half
++    at::Tensor& ba,                 // out [B, S, 2H] float
++    const at::Tensor& qkv,          // [B, S, F] float
++    const at::Tensor& dt_bias,      // [H] bfloat16
++    const at::Tensor& a_log,        // [H] float or bfloat16
++    at::Tensor& beta,               // out [B, S, H] bfloat16
++    at::Tensor& g,                  // out [B, S, H] float
++    const float beta_scale,
++    at::Tensor& conv_state,         // (num_slots, F, state_size) bfloat16
++    const c10::optional<at::Tensor>& slots,
++    const at::Tensor& conv_weight,  // (F, K) bfloat16
++    const c10::optional<at::Tensor>& conv_bias,
++    at::Tensor& conv_out,           // out [B, S, F] bfloat16
++    bool history,
+     Graph* graph
+ );
+ 
+--- a/exllamav3_ext/libtorch/gated_delta_net.cpp
++++ b/exllamav3_ext/libtorch/gated_delta_net.cpp
+@@ -274,6 +274,18 @@
+             lower_bound, beta_scale,
+             graph
+         );
++        cuda_causal_conv1d_update_gr
++        (
++            s.mixed_qkv,
++            conv_state,
++            slots,
++            conv1d_weight,
++            conv1d_bias,
++            s.conv_out,
++            true,
++            history,
++            graph
++        );
+     }
+     else
+     {
+@@ -284,49 +296,79 @@
+                 add_gr(s.z_flat, z_proj->bias.value(), s.z_flat, graph);
+         }
+ 
+-        gdn_ba_gemv_gr(x, ba_weight_t, ba_bias, s.ba, graph);
+-
+-        gated_delta_net_fused_op_3_gr
++        // b/a GEMV, beta/g and the conv update as one launch reading the fp32 qkv directly (same
++        // results as the three launches below; mixed_qkv is not written). Both record ba x,
++        // conv_state, slots in that order
++        bool fused_conv = gdn_conv_ba_gr
+         (
+-            s.qkv, s.ba,
+-            dt_bias, a_log,
+-            s.mixed_qkv, s.beta, s.g,
+-            beta_scale,
++            x, ba_weight_t, ba_bias, s.ba,
++            s.qkv, dt_bias, a_log, s.beta, s.g, beta_scale,
++            conv_state, slots, conv1d_weight, conv1d_bias, s.conv_out,
++            history,
+             graph
+         );
+-    }
+-
+-    cuda_causal_conv1d_update_gr
+-    (
+-        s.mixed_qkv,
+-        conv_state,
+-        slots,
+-        conv1d_weight,
+-        conv1d_bias,
+-        s.conv_out,
+-        true,
+-        history,
+-        graph
+-    );
+-
+-    cuda_recurrent_gated_delta_rule_gr
+-    (
+-        s.conv_out,
+-        s.g,
+-        s.beta,
+-        recurrent_state,
+-        s.core_attn_out,
+-        num_k_heads,
+-        num_v_heads,
+-        k_head_dim,
+-        v_head_dim,
+-        slots,
+-        history,
+-        graph,
+-        history && replay_verify
+-    );
+-
+-    norm->run_gr(s.core_attn_out, s.core_attn_out_f, s.z, graph);
++
++        if (!fused_conv)
++        {
++            gdn_ba_gemv_gr(x, ba_weight_t, ba_bias, s.ba, graph);
++
++            gated_delta_net_fused_op_3_gr
++            (
++                s.qkv, s.ba,
++                dt_bias, a_log,
++                s.mixed_qkv, s.beta, s.g,
++                beta_scale,
++                graph
++            );
++
++            cuda_causal_conv1d_update_gr
++            (
++                s.mixed_qkv,
++                conv_state,
++                slots,
++                conv1d_weight,
++                conv1d_bias,
++                s.conv_out,
++                true,
++                history,
++                graph
++            );
++        }
++    }
++
++    // Recurrence and gated norm as one launch where covered (identical results, core_attn_out
++    // unwritten), otherwise the two launches. Both record recurrent_state then slots
++    bool fused_norm = !kda && norm->w_groups == 1 && !norm->gate_first &&
++        cuda_recurrent_gated_delta_rule_norm_gr
++        (
++            s.conv_out, s.g, s.beta, recurrent_state,
++            num_k_heads, num_v_heads, k_head_dim, v_head_dim,
++            slots, history, graph, history && replay_verify,
++            norm->weight, s.z, s.core_attn_out_f,
++            norm->rms_norm_eps, norm->constant_bias, norm->gate_act
++        );
++
++    if (!fused_norm)
++    {
++        cuda_recurrent_gated_delta_rule_gr
++        (
++            s.conv_out,
++            s.g,
++            s.beta,
++            recurrent_state,
++            s.core_attn_out,
++            num_k_heads,
++            num_v_heads,
++            k_head_dim,
++            v_head_dim,
++            slots,
++            history,
++            graph,
++            history && replay_verify
++        );
++
++        norm->run_gr(s.core_attn_out, s.core_attn_out_f, s.z, graph);
++    }
+ 
+     exl3_gemm_gr(s.core_attn_out_f, o_proj->trellis, y, o_proj->suh, s.o_xh, o_proj->svh, -1, o_proj->mcg, o_proj->mul1, 0, graph);
+     if (o_proj->bias)
