@@ -29,3 +29,7 @@ import ./bend/draft_head_partition_laws.bend as DraftHeadPartitionLaws
 # counter totals, deadlock-free levels, cp.async ring, v2 split-K order and finish jobs over the
 # Nat model bend/mlp_m16_sched.bend (table bend/MLP_M16_SCHED_TABLE.bend).
 import ./bend/mlp_m16_sched_laws.bend as MlpM16SchedLaws
+# Dense verify-attention partial-buffer bounds (ext patch 3004): every block the 3002 GQA split /
+# combine grids store or read lies inside the dense_partial_blocks allocation, which is tight and
+# equals the host's fail-closed extent, over the Nat model bend/attn_bounds.bend.
+import ./bend/attn_bounds_laws.bend as AttnBoundsLaws
