@@ -1,0 +1,736 @@
+--- a/exllamav3_ext/libtorch/mlp.cpp
++++ b/exllamav3_ext/libtorch/mlp.cpp
+@@ -6,6 +6,7 @@
+ #include "../util.h"
+ #include "../hgemm.cuh"
+ #include "../quant/exl3_gemm.cuh"
++#include "../quant/exl3_gemm_m16.cuh"
+ #include "../activation.cuh"
+ #include "../add.cuh"
+ 
+@@ -69,8 +70,21 @@
+         at::Tensor u2 = gu_n.select(0, 1);
+         at::Tensor gate_xh = guh_n.select(0, 0);
+         at::Tensor up_xh   = guh_n.select(0, 1);
+-        exl3_gemm_gr(x, gate->trellis, g2, gate->suh, gate_xh, gate->svh, -1, gate->mcg, gate->mul1, 0, graph);
+-        exl3_gemm_gr(x, up->trellis, u2, up->suh, up_xh, up->svh, -1, up->mcg, up->mul1, 0, graph);
++        // Shape-selected swap-AB kernel for m <= 16 (4 bpw mul1, k/n multiples of 128): gate and
++        // up in one launch. Graph sites are recorded as A, C(gate), A, C(up), matching the pair
++        // of exl3_gemm_gr calls below, so run_bszN's parameter list is unchanged
++        if (exl3_gemm_m16_enabled() &&
++            gate->trellis.sizes() == up->trellis.sizes() &&
++            exl3_gemm_m16_supported(num_tokens, (int) gate->trellis.size(0) * 16, (int) gate->trellis.size(1) * 16, gate->K, gate->mcg, gate->mul1) &&
++            exl3_gemm_m16_supported(num_tokens, (int) up->trellis.size(0) * 16, (int) up->trellis.size(1) * 16, up->K, up->mcg, up->mul1))
++        {
++            exl3_gemm_m16_gr(x, gate->trellis, g2, gate->suh, gate_xh, gate->svh, up->trellis, u2, up->suh, up_xh, up->svh, graph);
++        }
++        else
++        {
++            exl3_gemm_gr(x, gate->trellis, g2, gate->suh, gate_xh, gate->svh, -1, gate->mcg, gate->mul1, 0, graph);
++            exl3_gemm_gr(x, up->trellis, u2, up->suh, up_xh, up->svh, -1, up->mcg, up->mul1, 0, graph);
++        }
+         if (gate->bias) add_gr(g2, gate->bias.value(), g2, graph);
+         if (up->bias) add_gr(u2, up->bias.value(), u2, graph);
+     }
+@@ -85,7 +99,11 @@
+     else if (act_relu2)
+         relu2_mul_gr(g, u, a_n, act_limit, graph);
+ 
+-    exl3_gemm_gr(a_n, down->trellis, d, down->suh, down_xh_n, down->svh, -1, down->mcg, down->mul1, 0, graph);
++    if (exl3_gemm_m16_enabled() &&
++        exl3_gemm_m16_supported(num_tokens, (int) down->trellis.size(0) * 16, (int) down->trellis.size(1) * 16, down->K, down->mcg, down->mul1))
++        exl3_gemm_m16_gr(a_n, down->trellis, d, down->suh, down_xh_n, down->svh, {}, {}, {}, {}, {}, graph);
++    else
++        exl3_gemm_gr(a_n, down->trellis, d, down->suh, down_xh_n, down->svh, -1, down->mcg, down->mul1, 0, graph);
+     if (down->bias)
+         add_gr(d, down->bias.value(), d, graph);
+ }
+--- /dev/null
++++ b/exllamav3_ext/quant/exl3_gemm_m16.cu
+@@ -0,0 +1,222 @@
++#include <cuda_fp16.h>
++#include "exl3_gemm_m16.cuh"
++
++#include <c10/cuda/CUDAGuard.h>
++#include <ATen/cuda/CUDAContext.h>
++#include "../util.h"
++#include "../util.cuh"
++#include "exl3_gemm_m16_kernel.cuh"
++#include "exl3_devctx.cuh"
++#include <mutex>
++
++// Fixed-size per-device scratch, allocated once and never resized: captured graphs keep the
++// pointers. Partial slots are EXL3_M16_SLOT_FLOATS floats each; counters are self-resetting.
++#define EXL3_M16_WS_BYTES (16ull * 1024 * 1024)
++#define EXL3_M16_MAX_GROUPS 8192
++
++namespace {
++
++struct M16Scratch
++{
++    float* ws = nullptr;
++    int* counters = nullptr;
++};
++
++M16Scratch g_scratch[MAX_DEVICES];
++std::mutex g_scratch_mtx;
++
++M16Scratch& get_scratch(int device, cudaStream_t stream)
++{
++    std::lock_guard<std::mutex> lock(g_scratch_mtx);
++    M16Scratch& s = g_scratch[device];
++    if (!s.ws)
++    {
++        cudaStreamCaptureStatus st;
++        cuda_check(cudaStreamIsCapturing(stream, &st));
++        TORCH_CHECK(st == cudaStreamCaptureStatusNone, "exl3_gemm_m16: first call must not be under graph capture");
++        cuda_check(cudaMalloc(&s.ws, EXL3_M16_WS_BYTES));
++        cuda_check(cudaMalloc(&s.counters, EXL3_M16_MAX_GROUPS * sizeof(int)));
++        cuda_check(cudaMemset(s.counters, 0, EXL3_M16_MAX_GROUPS * sizeof(int)));
++        cuda_check(cudaDeviceSynchronize());
++    }
++    return s;
++}
++
++template <int MT, bool c_fp32>
++struct M16Kernel
++{
++    static void* ptr() { return (void*) exl3_gemm_m16_kernel<MT, c_fp32, 2>; }
++    static int smem() { return Exl3M16Cfg<MT>::SMEM; }
++};
++
++struct M16Launch
++{
++    void* kernel;
++    int smem;
++    int blocks_per_sm;
++};
++
++M16Launch get_launch(int MT, bool c_fp32, int device)
++{
++    static M16Launch cache[MAX_DEVICES][2][2] = {};
++    std::lock_guard<std::mutex> lock(g_scratch_mtx);
++    M16Launch& l = cache[device][MT - 1][c_fp32 ? 1 : 0];
++    if (!l.kernel)
++    {
++        void* k; int sm;
++        if (MT == 1) { if (c_fp32) { k = M16Kernel<1, true>::ptr(); sm = M16Kernel<1, true>::smem(); }
++                       else        { k = M16Kernel<1, false>::ptr(); sm = M16Kernel<1, false>::smem(); } }
++        else         { if (c_fp32) { k = M16Kernel<2, true>::ptr(); sm = M16Kernel<2, true>::smem(); }
++                       else        { k = M16Kernel<2, false>::ptr(); sm = M16Kernel<2, false>::smem(); } }
++        cuda_check(cudaFuncSetAttribute(k, cudaFuncAttributeMaxDynamicSharedMemorySize, sm));
++        cuda_check(cudaFuncSetAttribute(k, cudaFuncAttributePreferredSharedMemoryCarveout, (int) cudaSharedmemCarveoutMaxShared));
++        int occ = 0;
++        cuda_check(cudaOccupancyMaxActiveBlocksPerMultiprocessor(&occ, k, EXL3_M16_THREADS, sm));
++        TORCH_CHECK(occ >= 1, "exl3_gemm_m16: kernel does not fit on an SM");
++        l.kernel = k;
++        l.smem = sm;
++        l.blocks_per_sm = occ < 2 ? occ : 2;
++    }
++    return l;
++}
++
++int owner(int x, int total, int G)
++{
++    return (int) ((((int64_t) x + 1) * G + total - 1) / total) - 1;
++}
++
++}  // namespace
++
++bool exl3_gemm_m16_enabled()
++{
++    static const bool enabled = []
++    {
++        const char* env = std::getenv("EXL3_GEMM_M16");
++        return !(env && env[0] == '0');
++    }();
++    return enabled;
++}
++
++bool exl3_gemm_m16_supported(int size_m, int size_k, int size_n, int K, bool mcg, bool mul1)
++{
++    return size_m >= 1 && size_m <= 16 && K == 4 && mul1 && !mcg &&
++           size_k >= 128 && size_k % 128 == 0 && size_n >= 128 && size_n % 128 == 0;
++}
++
++void exl3_gemm_m16_gr
++(
++    const at::Tensor& A,
++    const at::Tensor& B0,
++    at::Tensor& C0,
++    const at::Tensor& suh0,
++    at::Tensor& xh0,
++    const at::Tensor& svh0,
++    const c10::optional<at::Tensor>& B1,
++    const c10::optional<at::Tensor>& C1,
++    const c10::optional<at::Tensor>& suh1,
++    const c10::optional<at::Tensor>& xh1,
++    const c10::optional<at::Tensor>& svh1,
++    Graph* graph
++)
++{
++    const at::cuda::OptionalCUDAGuard device_guard(A.device());
++    cudaStream_t stream = graph ? graph->capture_stream : at::cuda::getCurrentCUDAStream().stream();
++
++    const int num_mats = B1 ? 2 : 1;
++    TORCH_CHECK(!!C1 == (num_mats == 2) && !!suh1 == (num_mats == 2) && !!xh1 == (num_mats == 2) && !!svh1 == (num_mats == 2),
++        "exl3_gemm_m16: second matrix needs B1, C1, suh1, xh1 and svh1 together");
++
++    TORCH_CHECK_DTYPE(A, kHalf);
++    TORCH_CHECK(A.is_contiguous(), "exl3_gemm_m16: A must be contiguous");
++    int size_m = 1;
++    for (int d = 0; d < A.dim() - 1; ++d) size_m *= A.size(d);
++    const int size_k = A.size(-1);
++    const bool c_fp32 = C0.dtype() == at::kFloat;
++    if (!c_fp32) TORCH_CHECK_DTYPE(C0, kHalf);
++
++    const at::Tensor* Bs[2]   = { &B0, B1 ? &B1.value() : nullptr };
++    const at::Tensor* Cs[2]   = { &C0, C1 ? &C1.value() : nullptr };
++    const at::Tensor* suhs[2] = { &suh0, suh1 ? &suh1.value() : nullptr };
++    const at::Tensor* xhs[2]  = { &xh0, xh1 ? &xh1.value() : nullptr };
++    const at::Tensor* svhs[2] = { &svh0, svh1 ? &svh1.value() : nullptr };
++
++    int size_n = B0.size(1) * 16;
++    const int K = B0.size(2) / 16;
++    Exl3M16Args args = {};
++    for (int i = 0; i < num_mats; ++i)
++    {
++        const at::Tensor& B = *Bs[i];
++        TORCH_CHECK_DTYPE(B, kShort);
++        TORCH_CHECK(B.dim() == 3 && B.is_contiguous(), "exl3_gemm_m16: B must be a contiguous 3D trellis");
++        TORCH_CHECK(B.size(0) * 16 == size_k && B.size(1) * 16 == size_n && B.size(2) / 16 == K,
++            "exl3_gemm_m16: matrices must share k, n and K");
++        TORCH_CHECK(Cs[i]->dtype() == C0.dtype() && Cs[i]->is_contiguous() && Cs[i]->numel() == (int64_t) size_m * size_n,
++            "exl3_gemm_m16: C must be contiguous (m, n) of one dtype");
++        TORCH_CHECK_DTYPE(*suhs[i], kHalf);
++        TORCH_CHECK_DTYPE(*svhs[i], kHalf);
++        TORCH_CHECK_DTYPE(*xhs[i], kHalf);
++        TORCH_CHECK(suhs[i]->numel() == size_k && svhs[i]->numel() == size_n, "exl3_gemm_m16: suh/svh size mismatch");
++        TORCH_CHECK(xhs[i]->is_contiguous() && xhs[i]->numel() >= (int64_t) size_m * size_k, "exl3_gemm_m16: xh too small");
++        TORCH_CHECK(xhs[i]->data_ptr() != A.data_ptr(), "exl3_gemm_m16: xh must not alias A");
++        args.B[i] = (const uint16_t*) B.data_ptr();
++        args.suh[i] = (const half*) suhs[i]->data_ptr();
++        args.xh[i] = (half*) xhs[i]->data_ptr();
++        args.svh[i] = (const half*) svhs[i]->data_ptr();
++    }
++    if (num_mats == 2)
++        TORCH_CHECK(xhs[0]->data_ptr() != xhs[1]->data_ptr(), "exl3_gemm_m16: xh buffers must not alias");
++    TORCH_CHECK(exl3_gemm_m16_supported(size_m, size_k, size_n, K, false, true),
++        "exl3_gemm_m16: unsupported shape (m ", size_m, ", k ", size_k, ", n ", size_n, ", K ", K, ")");
++
++    int device;
++    cudaGetDevice(&device);
++    int num_sms = DevCtx::instance().get_num_sms(device);
++    M16Scratch& scratch = get_scratch(device, stream);
++
++    const int MT = size_m <= 8 ? 1 : 2;
++    M16Launch l = get_launch(MT, c_fp32, device);
++    const int G = num_sms * l.blocks_per_sm;
++
++    // Partial slots per group: largest contributor count over all groups
++    const int KT = size_k / 16;
++    const int groups = num_mats * (size_n / 128);
++    const int total = groups * KT;
++    TORCH_CHECK(total >= G, "exl3_gemm_m16: matrix too small for the grid");
++    TORCH_CHECK(groups <= EXL3_M16_MAX_GROUPS, "exl3_gemm_m16: too many output groups");
++    int max_contrib = 1;
++    for (int g = 0; g < groups; ++g)
++    {
++        int nc = owner((g + 1) * KT - 1, total, G) - owner(g * KT, total, G) + 1;
++        if (nc > max_contrib) max_contrib = nc;
++    }
++    TORCH_CHECK((uint64_t) groups * max_contrib * EXL3_M16_SLOT_FLOATS * sizeof(float) <= EXL3_M16_WS_BYTES,
++        "exl3_gemm_m16: workspace too small");
++
++    args.ws = scratch.ws;
++    args.counters = scratch.counters;
++    args.size_m = size_m;
++    args.size_k = size_k;
++    args.size_n = size_n;
++    args.num_mats = num_mats;
++    args.max_contrib = max_contrib;
++
++    const half* A_ptr = (const half*) A.data_ptr();
++    void* C0_ptr = C0.data_ptr();
++    void* C1_ptr = num_mats == 2 ? Cs[1]->data_ptr() : nullptr;
++    void* kernel_args[] = { (void*) &A_ptr, (void*) &C0_ptr, (void*) &C1_ptr, (void*) &args };
++
++    cuda_check(cudaLaunchCooperativeKernel(l.kernel, dim3(G), dim3(EXL3_M16_THREADS), kernel_args, l.smem, stream));
++
++    if (graph)
++    {
++        graph->record_param(l.kernel, GP_gemm_A, 0);
++        graph->record_param(l.kernel, GP_gemm_C, 1);
++        if (num_mats == 2)
++        {
++            graph->record_param(l.kernel, GP_gemm_A, 0);
++            graph->record_param(l.kernel, GP_gemm_C, 2);
++        }
++        graph->record_param(l.kernel, GP_end, 0);
++    }
++    cuda_check(cudaPeekAtLastError());
++}
+--- /dev/null
++++ b/exllamav3_ext/quant/exl3_gemm_m16.cuh
+@@ -0,0 +1,32 @@
++#pragma once
++
++#include <ATen/Tensor.h>
++#include "../graph.cuh"
++
++// Swap-AB EXL3 GEMM for 1..16 rows (exl3_gemm_m16_kernel.cuh). Supported: 4 bpw, mul1 codebook,
++// k and n multiples of 128. Callers select it explicitly with exl3_gemm_m16_supported; the launcher
++// raises on anything else.
++
++bool exl3_gemm_m16_enabled();
++
++bool exl3_gemm_m16_supported(int size_m, int size_k, int size_n, int K, bool mcg, bool mul1);
++
++// C_i = had_out(had_in(A * suh_i) @ W_i) * svh_i for one matrix (B1 empty) or two matrices sharing A
++// (gate and up). xh_i receive the input transform (same role as A_had in exl3_gemm_gr). Graph sites:
++// GP_gemm_A (A), GP_gemm_C (C0), and for two matrices GP_gemm_A (A) and GP_gemm_C (C1) again, in the
++// order the separate exl3_gemm_gr calls would record them.
++void exl3_gemm_m16_gr
++(
++    const at::Tensor& A,
++    const at::Tensor& B0,
++    at::Tensor& C0,
++    const at::Tensor& suh0,
++    at::Tensor& xh0,
++    const at::Tensor& svh0,
++    const c10::optional<at::Tensor>& B1,
++    const c10::optional<at::Tensor>& C1,
++    const c10::optional<at::Tensor>& suh1,
++    const c10::optional<at::Tensor>& xh1,
++    const c10::optional<at::Tensor>& svh1,
++    Graph* graph
++);
+--- /dev/null
++++ b/exllamav3_ext/quant/exl3_gemm_m16_kernel.cuh
+@@ -0,0 +1,392 @@
++#pragma once
++
++// EXL3 trellis GEMM for 1..16 token rows, swap-AB (exl3_gemm_m16.cu has the host side).
++//
++// - The weight tile is the m16 x k16 A operand of mma.m16n8k16, decoded straight into registers:
++//   dq8_aligned_4bits yields the two k16 x n8 B fragments (f0 = tile cols 0-7, f1 = cols 8-15) of
++//   the regular kernels, and {f0[0], f1[0], f0[1], f1[1]} is exactly the row-major A fragment of
++//   the transposed tile. The activations (input-Hadamard domain) are the k16 x n8 B operand, one n8
++//   token tile for m <= 8 (MT = 1), two for m <= 16 (MT = 2). No padded MMA rows; fp32 accumulate.
++// - Weights and activation slices stream through a warp-private cp.async ring (PF stages of 512 B
++//   of weights + MT * 256 B of activations), so the main loop has no block barrier. The first
++//   PF - 1 weight stages are issued before the input Hadamard phase and its grid.sync.
++// - Work partition: iterations are (group, k-tile) with group = (matrix, 128 output columns), in
++//   group-major order; block b owns the contiguous range [b * I / G, (b + 1) * I / G). In a block,
++//   warp w covers the 64-column half (w & 1) and every 4th k-tile of the range (phase w >> 1).
++// - Deterministic reduction: at each group boundary the 4 k-phase warps of each half are summed
++//   in a fixed tree ((p0 + p2) + (p1 + p3)) in shared memory. A group computed by one block is
++//   finished in place; otherwise every contributing block writes its partial to a fixed slot
++//   (contributor index = block - first contributing block) and the last block to arrive sums
++//   the slots in slot order. Summation order therefore depends only on the grid size.
++// - Epilogue: the fp32 128-column row is output-Hadamard transformed with svh post-scaling
++//   (had_fh_r_128_inner for fp16 C, had_ff_r_128_inner for fp32 C), same scale as the other paths.
++
++#include <cooperative_groups.h>
++#include "../ptx.cuh"
++#include "exl3_dq.cuh"
++#include "hadamard_inner.cuh"
++
++#define EXL3_M16_THREADS 256
++#define EXL3_M16_WARPS 8
++#define EXL3_M16_PHASES 4
++#define EXL3_M16_MAX_MATS 2
++#define EXL3_M16_SLOT_FLOATS (16 * 128)
++
++struct Exl3M16Args
++{
++    const uint16_t* B[EXL3_M16_MAX_MATS];
++    const half* suh[EXL3_M16_MAX_MATS];
++    half* xh[EXL3_M16_MAX_MATS];
++    const half* svh[EXL3_M16_MAX_MATS];
++    float* ws;
++    int* counters;
++    int size_m;
++    int size_k;
++    int size_n;
++    int num_mats;
++    int max_contrib;
++};
++
++template <int MT>
++struct Exl3M16Cfg
++{
++    static constexpr int PF = MT == 1 ? 6 : 4;                  // ring stages per warp
++    static constexpr int W_BYTES = 512;                         // 4 tiles x 128 B (4 bpw)
++    static constexpr int X_BYTES = MT * 256;                    // 2 k-halves x MT*8 rows x 16 B
++    static constexpr int STAGE = W_BYTES + X_BYTES;
++    static constexpr int RING = EXL3_M16_WARPS * PF * STAGE;
++    static constexpr int ACC = 4 * MT * 4;                      // floats per lane
++    static constexpr int RED = 2 * 2 * ACC * 32 * 4;            // 2 slots x 2 halves x ACC x 32 lanes
++    static constexpr int SMEM = RING + RED;
++    static_assert(RED >= MT * 8 * 128 * 4, "reduction area must hold the output tile");
++};
++
++// Block owning iteration x, for the partition start(b) = floor(b * total / G)
++__device__ __forceinline__ int exl3_m16_owner(int x, int total, int G)
++{
++    return (int) ((((int64_t) x + 1) * G + total - 1) / total) - 1;
++}
++
++template <int MT, bool c_fp32, int cb>
++__global__ __launch_bounds__(EXL3_M16_THREADS, 2)
++void exl3_gemm_m16_kernel(const half* __restrict__ A, void* C0, void* C1, Exl3M16Args p)
++{
++    using Cfg = Exl3M16Cfg<MT>;
++    constexpr int PF = Cfg::PF;
++    constexpr int STAGE = Cfg::STAGE;
++    constexpr int ROWS = MT * 8;
++
++    extern __shared__ __align__(16) uint8_t sm[];
++    __shared__ int s_last;
++
++    const int warp = threadIdx.x >> 5;
++    const int lane = threadIdx.x & 31;
++    const int nh = warp & 1;
++    const int kp = warp >> 1;
++
++    const int size_m = p.size_m;
++    const int size_k = p.size_k;
++    const int size_n = p.size_n;
++    const int KT = size_k >> 4;
++    const int NT = size_n >> 4;
++    const int NG = size_n >> 7;
++    const int total = p.num_mats * NG * KT;
++    const int G = gridDim.x;
++    const int b = blockIdx.x;
++    const int s_b = (int) (((int64_t) b * total) / G);
++    const int e_b = (int) (((int64_t) (b + 1) * total) / G);
++
++    uint8_t* ring = sm + warp * PF * STAGE;
++    float* red = (float*) (sm + Cfg::RING);
++
++    // This warp's iterations: s_b + kp + 4 * j, j < nj
++    const int nj = e_b - s_b > kp ? (e_b - s_b - kp + 3) / 4 : 0;
++
++    // Activation copy role: lane < 2 * ROWS copies 16 B of token (lane % ROWS), k-half (lane / ROWS);
++    // tokens past size_m replicate the last row (finite values, results discarded)
++    const bool x_lane = lane < 2 * ROWS;
++    const int x_tok = min(lane % ROWS, size_m - 1);
++    const int x_off = x_tok * size_k + (lane / ROWS) * 8;
++
++    auto issue_w = [&] (int g, int kt, int slot)
++    {
++        int mat = g >= NG ? 1 : 0;
++        int ng = g - mat * NG;
++        const uint16_t* src = (mat ? p.B[1] : p.B[0]) + ((size_t) kt * NT + ng * 8 + nh * 4) * 64 + lane * 8;
++        cp_async_stream(ring + slot * STAGE + lane * 16, src);
++    };
++    auto issue_x = [&] (int g, int kt, int slot)
++    {
++        int mat = g >= NG ? 1 : 0;
++        if (x_lane)
++            cp_async(ring + slot * STAGE + Cfg::W_BYTES + lane * 16, (mat ? p.xh[1] : p.xh[0]) + x_off + kt * 16);
++    };
++
++    // Prologue: first PF - 1 weight stages (independent of the input transform)
++    #pragma unroll
++    for (int j = 0; j < PF - 1; ++j)
++    {
++        if (j < nj)
++        {
++            int it = s_b + kp + 4 * j;
++            int g = it / KT;
++            issue_w(g, it - g * KT, j);
++        }
++        cp_async_fence();
++    }
++
++    // Input scales and Hadamard transform, one warp per 128 elements (same call as exl3_gemm_kernel)
++    {
++        int per_mat = size_m * size_k / 128;
++        int total_warps = p.num_mats * per_mat;
++        int warps_grid = gridDim.x * EXL3_M16_WARPS;
++        for (int w = warp + EXL3_M16_WARPS * blockIdx.x; w < total_warps; w += warps_grid)
++        {
++            int mat = w >= per_mat ? 1 : 0;
++            int r = w - mat * per_mat;
++            had_hf_r_128_inner<true, false>
++            (
++                A + r * 128,
++                (mat ? p.xh[1] : p.xh[0]) + r * 128,
++                (mat ? p.suh[1] : p.suh[0]) + (r * 128) % size_k,
++                0.088388347648f  // 1/sqrt(128)
++            );
++        }
++        cooperative_groups::this_grid().sync();
++    }
++
++    // Activation slices of the prologue stages, one group
++    #pragma unroll
++    for (int j = 0; j < PF - 1; ++j)
++    {
++        if (j < nj)
++        {
++            int it = s_b + kp + 4 * j;
++            int g = it / KT;
++            issue_x(g, it - g * KT, j);
++        }
++    }
++    cp_async_fence();
++
++    // Issue cursor at j = PF - 1
++    int iss_j = PF - 1;
++    int iss_g, iss_kt;
++    {
++        int it = s_b + kp + 4 * iss_j;
++        iss_g = it / KT;
++        iss_kt = it - iss_g * KT;
++    }
++    int iss_slot = PF - 1;
++    int cur_slot = 0;
++
++    // ldmatrix row address for this lane: matrix i = (token tile, k-half), row r
++    int ldsm_off;
++    {
++        int i = MT == 1 ? (lane >> 3) & 1 : lane >> 3;
++        int r = lane & 7;
++        ldsm_off = Cfg::W_BYTES + (i & 1) * ROWS * 16 + ((i >> 1) * 8 + r) * 16;
++    }
++
++    FragC acc[4][MT];
++    #pragma unroll
++    for (int t = 0; t < 4; ++t)
++        #pragma unroll
++        for (int mt = 0; mt < MT; ++mt)
++            #pragma unroll
++            for (int c = 0; c < 4; ++c) acc[t][mt][c] = 0.0f;
++
++    int j = 0;
++    int it = s_b + kp;
++    const int g_first = e_b > s_b ? s_b / KT : 0;
++    const int g_last = e_b > s_b ? (e_b - 1) / KT : -1;
++
++    for (int g = g_first; g <= g_last; ++g)
++    {
++        const int seg_hi = min(e_b, (g + 1) * KT);
++
++        for (; it < seg_hi; it += 4, ++j)
++        {
++            if (iss_j < nj)
++            {
++                issue_w(iss_g, iss_kt, iss_slot);
++                issue_x(iss_g, iss_kt, iss_slot);
++                iss_kt += 4;
++                if (iss_kt >= KT) { iss_kt -= KT; iss_g++; }
++            }
++            iss_j++;
++            iss_slot = iss_slot == PF - 1 ? 0 : iss_slot + 1;
++            cp_async_fence();
++            if (j == 0) cp_async_wait<1>();
++            else        cp_async_wait<PF - 1>();
++            __syncwarp();
++
++            const uint8_t* st = ring + cur_slot * STAGE;
++            uint32_t bx[MT][2];
++            {
++                uint32_t sa = static_cast<uint32_t>(__cvta_generic_to_shared(st + ldsm_off));
++                if constexpr (MT == 2)
++                    asm volatile ("ldmatrix.sync.aligned.m8n8.x4.shared.b16 {%0,%1,%2,%3}, [%4];\n"
++                        : "=r"(bx[0][0]), "=r"(bx[0][1]), "=r"(bx[1][0]), "=r"(bx[1][1]) : "r"(sa));
++                else
++                    asm volatile ("ldmatrix.sync.aligned.m8n8.x2.shared.b16 {%0,%1}, [%2];\n"
++                        : "=r"(bx[0][0]), "=r"(bx[0][1]) : "r"(sa));
++            }
++
++            #pragma unroll
++            for (int t = 0; t < 4; ++t)
++            {
++                FragB f0, f1;
++                dq8_aligned_4bits<cb>((const uint32_t*) (st + t * 128), lane * 8, f0, f1);
++                FragA a;
++                a[0] = f0[0];
++                a[1] = f1[0];
++                a[2] = f0[1];
++                a[3] = f1[1];
++                #pragma unroll
++                for (int mt = 0; mt < MT; ++mt)
++                {
++                    FragB bb;
++                    bb[0] = *reinterpret_cast<half2*>(&bx[mt][0]);
++                    bb[1] = *reinterpret_cast<half2*>(&bx[mt][1]);
++                    ptx_mma_m16n8k16(a, bb, acc[t][mt]);
++                }
++            }
++            __syncwarp();
++            cur_slot = cur_slot == PF - 1 ? 0 : cur_slot + 1;
++        }
++
++        // Group boundary: fixed-order block reduction of the four k-phases of each half
++        {
++            constexpr int ACC = Cfg::ACC;
++            float* slot0 = red + (0 * 2 + nh) * ACC * 32;
++            float* slot1 = red + (1 * 2 + nh) * ACC * 32;
++            auto put = [&] (float* s)
++            {
++                #pragma unroll
++                for (int t = 0; t < 4; ++t)
++                    #pragma unroll
++                    for (int mt = 0; mt < MT; ++mt)
++                        #pragma unroll
++                        for (int c = 0; c < 4; ++c)
++                            s[((t * MT + mt) * 4 + c) * 32 + lane] = acc[t][mt][c];
++            };
++            auto add = [&] (const float* s)
++            {
++                #pragma unroll
++                for (int t = 0; t < 4; ++t)
++                    #pragma unroll
++                    for (int mt = 0; mt < MT; ++mt)
++                        #pragma unroll
++                        for (int c = 0; c < 4; ++c)
++                            acc[t][mt][c] += s[((t * MT + mt) * 4 + c) * 32 + lane];
++            };
++
++            if (kp == 2) put(slot0);
++            if (kp == 3) put(slot1);
++            __syncthreads();
++            if (kp == 0) add(slot0);
++            if (kp == 1) add(slot1);
++            __syncthreads();
++            if (kp == 1) put(slot0);
++            __syncthreads();
++            if (kp == 0) add(slot0);
++            __syncthreads();
++
++            // Logical fp32 tile [row][128] in the reduction area. Lane holds output columns
++            // t * 16 + (lane >> 2) (+ 8 for c >= 2), tokens mt * 8 + 2 * (lane & 3) (+ 1 for odd c)
++            float* tile = red;
++            if (kp == 0)
++            {
++                #pragma unroll
++                for (int t = 0; t < 4; ++t)
++                    #pragma unroll
++                    for (int mt = 0; mt < MT; ++mt)
++                        #pragma unroll
++                        for (int c = 0; c < 4; ++c)
++                        {
++                            int row = mt * 8 + 2 * (lane & 3) + (c & 1);
++                            int col = nh * 64 + t * 16 + (lane >> 2) + (c >> 1) * 8;
++                            tile[row * 128 + col] = acc[t][mt][c];
++                        }
++            }
++            #pragma unroll
++            for (int t = 0; t < 4; ++t)
++                #pragma unroll
++                for (int mt = 0; mt < MT; ++mt)
++                    #pragma unroll
++                    for (int c = 0; c < 4; ++c) acc[t][mt][c] = 0.0f;
++            __syncthreads();
++
++            // Contributors of group g: blocks owning its first and last iteration
++            const int b_lo = exl3_m16_owner(g * KT, total, G);
++            const int b_hi = exl3_m16_owner((g + 1) * KT - 1, total, G);
++            const int nc = b_hi - b_lo + 1;
++            bool finish = true;
++
++            if (nc > 1)
++            {
++                float4* dst = (float4*) (p.ws + ((size_t) g * p.max_contrib + (b - b_lo)) * EXL3_M16_SLOT_FLOATS);
++                const float4* src = (const float4*) tile;
++                for (int i = threadIdx.x; i < size_m * 32; i += EXL3_M16_THREADS)
++                    __stcg(dst + i, src[i]);
++                __threadfence();
++                __syncthreads();
++                if (threadIdx.x == 0)
++                {
++                    int old = atomicAdd(p.counters + g, 1);
++                    s_last = old == nc - 1;
++                }
++                __syncthreads();
++                finish = s_last;
++                if (finish)
++                {
++                    __threadfence();
++                    const float4* base = (const float4*) (p.ws + (size_t) g * p.max_contrib * EXL3_M16_SLOT_FLOATS);
++                    float4* t4 = (float4*) tile;
++                    for (int i = threadIdx.x; i < size_m * 32; i += EXL3_M16_THREADS)
++                    {
++                        float4 v = __ldcg(base + i);
++                        for (int c = 1; c < nc; ++c)
++                        {
++                            float4 w = __ldcg(base + c * (EXL3_M16_SLOT_FLOATS / 4) + i);
++                            v.x += w.x; v.y += w.y; v.z += w.z; v.w += w.w;
++                        }
++                        t4[i] = v;
++                    }
++                    if (threadIdx.x == 0) p.counters[g] = 0;
++                    __syncthreads();
++                }
++            }
++
++            if (finish)
++            {
++                const int mat = g >= NG ? 1 : 0;
++                const int col0 = (g - mat * NG) * 128;
++                const half* svh = (mat ? p.svh[1] : p.svh[0]) + col0;
++                void* C = mat ? C1 : C0;
++                for (int r = warp; r < size_m; r += EXL3_M16_WARPS)
++                {
++                    if constexpr (c_fp32)
++                        had_ff_r_128_inner<false, true>
++                        (
++                            tile + r * 128,
++                            ((float*) C) + (size_t) r * size_n + col0,
++                            svh,
++                            0.088388347648f  // 1/sqrt(128)
++                        );
++                    else
++                        had_fh_r_128_inner<false, true>
++                        (
++                            tile + r * 128,
++                            ((half*) C) + (size_t) r * size_n + col0,
++                            svh,
++                            0.088388347648f  // 1/sqrt(128)
++                        );
++                }
++            }
++            __syncthreads();
++        }
++    }
++
++    cp_async_wait<0>();
++}
+--- /dev/null
++++ b/exllamav3_ext/quant/exl3_gemm_m16_op.cpp
+@@ -0,0 +1,31 @@
++#include <torch/library.h>
++#include <ATen/Tensor.h>
++#include "exl3_gemm_m16.cuh"
++
++// Eager entry point for isolated A/B and benchmarking (torch.ops.exl3_m16.gemm), registered as a
++// torch op so bindings.cpp stays untouched. Same launcher as the BC_GatedMLP path, no graph sites.
++
++static void exl3_gemm_m16_op
++(
++    const at::Tensor& A,
++    const at::Tensor& B0,
++    const at::Tensor& C0,
++    const at::Tensor& suh0,
++    const at::Tensor& xh0,
++    const at::Tensor& svh0,
++    const c10::optional<at::Tensor>& B1,
++    const c10::optional<at::Tensor>& C1,
++    const c10::optional<at::Tensor>& suh1,
++    const c10::optional<at::Tensor>& xh1,
++    const c10::optional<at::Tensor>& svh1
++)
++{
++    at::Tensor C0_ = C0;
++    at::Tensor xh0_ = xh0;
++    exl3_gemm_m16_gr(A, B0, C0_, suh0, xh0_, svh0, B1, C1, suh1, xh1, svh1, nullptr);
++}
++
++TORCH_LIBRARY(exl3_m16, m)
++{
++    m.def("gemm", &exl3_gemm_m16_op);
++}

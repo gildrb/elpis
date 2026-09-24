@@ -1,0 +1,305 @@
+--- a/generator/generator.py
++++ b/generator/generator.py
+@@ -19,6 +19,7 @@
+ from .sampler import Sampler
+ from .sampler.custom import CustomSampler, SS_Fused
+ from .greedy_accept import GreedyAccept
++from .gdn_rewind import RewindPlans
+ from .visualizer import CacheVisualizer
+ import time
+ import threading
+@@ -269,6 +270,9 @@
+         self.greedy_accept = GreedyAccept(self.num_draft_tokens) if self.num_draft_tokens else None
+         self.verify_ids_pinned = None
+         self.greedy_verify_rounds = 0
++        self.rewind_plans = RewindPlans()
++        self.draft_ids_ready = None
++        self.verify_staging_set = 0
+ 
+ 
+     def num_remaining_jobs(self):
+@@ -900,7 +904,11 @@
+                 return None
+             window = w_used
+ 
+-        self.draft_ids_pinned[:batch_size, :window].copy_(new_ids[:batch_size, :window])
++        # The readback completes in iterate_gen, which synchronizes on it only once it needs the drafted tokens,
++        # after preparing the verify batch's block table while the draft still runs
++        self.draft_ids_pinned[:batch_size, :window].copy_(new_ids[:batch_size, :window], non_blocking = True)
++        self.draft_ids_ready = torch.cuda.Event()
++        self.draft_ids_ready.record(torch.cuda.current_stream(new_ids.device))
+         return self.draft_ids_pinned[:, :window]
+ 
+ 
+@@ -1018,14 +1026,19 @@
+         # Block-table width is padded to a multiple of 16 pages so the pinned staging buffers
+         # cover a few distinct widths only; the extra (zeroed) columns are never dereferenced
+         # since the kernels bound their reads by the cache lengths
++        # Two alternating staging sets: this round's is written before the drafted tokens are read back, while the
++        # previous round's draft cache update may still be reading the other set; each round synchronizes the
++        # stream before the next one reuses its set
++        self.verify_staging_set ^= 1
++        staging_set = self.verify_staging_set
+         max_pages_batch = (max_seq_len + PAGE_SIZE - 1) // PAGE_SIZE
+         max_pages_batch = (max_pages_batch + 15) // 16 * 16
+-        block_index = self._staging("block_index", batch_size, max_pages_batch)
++        block_index = self._staging(f"block_index{staging_set}", batch_size, max_pages_batch)
+         block_index.zero_()
+-        cache_seqlens = self._staging("cache_seqlens", batch_size)
++        cache_seqlens = self._staging(f"cache_seqlens{staging_set}", batch_size)
+         batch = 0
+         use_offsets = "mrope" in self.model.caps
+-        positions = self._staging("positions", batch_size) if use_offsets else None
++        positions = self._staging(f"positions{staging_set}", batch_size) if use_offsets else None
+         for job in self.active_jobs:
+             if not job.is_prefill_done(): continue
+             for seq in job.sequences:
+@@ -1036,6 +1049,11 @@
+                     positions[batch] = seq.kv_position + job.alt_rope_offset
+                 batch += 1
+ 
++        # A DFlash draft's tokens were read back asynchronously
++        draft_ids_ready, self.draft_ids_ready = self.draft_ids_ready, None
++        if draft_ids_ready is not None:
++            draft_ids_ready.synchronize()
++
+         # Collect input IDs and indexed embeddings
+         # Jobs may contribute multiple sequence rows. logit_mapping records the slice of the model output that
+         # belongs to each active job, while batch_jobs keeps the corresponding Job objects in compact-batch order.
+@@ -1131,6 +1149,19 @@
+         accepted_lengths = []
+         rewound_jobs = set()
+         j = 0
++        draft_kv_refreshed = False
++
++        # Update a DFlash draft's cache from the target states of the tokens accepted this round (accepted_lengths)
++        def refresh_draft_kv():
++            self.draft_model.update_kv_from_target(
++                target_hidden = p_export_states,
++                cache = self.draft_cache,
++                lengths = accepted_lengths,
++                params = {
++                    "block_table": block_index,
++                    "cache_seqlens": p_cache_seqlens,
++                }
++            )
+ 
+         # Reject the trailing draft positions after the last accepted token at index i: count them, roll back the
+         # job's recurrent state and return cache pages to the accepted position
+@@ -1234,19 +1265,48 @@
+                 ids = job.sampler.forward(batch_logits[a:b, :, :], None, 0, self.tokenizer)
+                 pinned[row].copy_(ids.view(width), non_blocking = True)
+                 verified.append(job)
++
++            # Everything the decisions need besides the verifier tokens is fixed before the readback, so it is
++            # computed while the verify forward still runs: each job's checkpoint position and the GDN rewind
++            # launches for every outcome of its round
++            checkpoints = []
++            rewind_plans = []
++            for row, job in enumerate(verified):
++                checkpoints.append(self._greedy_checkpoint(job, window) if batch_states is not None else 0)
++                if batch_states:
++                    rewind_plans.append(self.rewind_plans.prepare(batch_states[row], window))
+             torch.cuda.current_stream(batch_logits.device).synchronize()
+ 
++            # Decide every job's round and immediately launch the GPU work that depends only on the decision, in
++            # the serial path's stream order: each job's recurrent-state rewind (the full commit when the whole
++            # window was accepted or the job ends, the accepted prefix otherwise), then the draft cache update.
++            # The host bookkeeping below then runs while the GPU executes them
++            decisions = []
+             for row, job in enumerate(verified):
+-                verify_ids = pinned[row]
+-                checkpoint = self._greedy_checkpoint(job, window) if batch_states is not None else 0
+                 count, eos = self.greedy_accept(
+-                    verify_ids,
++                    pinned[row],
+                     draft_tokens[row],
+                     job.stop_tokens,
+                     job.max_new_tokens - job.new_tokens,
+-                    checkpoint,
++                    checkpoints[row],
+                 )
+                 self.greedy_verify_rounds += 1
++                if batch_states:
++                    num_rejected = window + 1 - count if not eos and count <= window else 0
++                    if rewind_plans[row] is not None:
++                        self.rewind_plans.rewind(rewind_plans[row], num_rejected)
++                    else:
++                        batch_states[row].rewind(num_rejected)
++                decisions.append((count, eos))
++                accepted_lengths.append(count)
++            if self.dflash_draft:
++                refresh_draft_kv()
++                draft_kv_refreshed = True
++
++            for row, job in enumerate(verified):
++                verify_ids = pinned[row]
++                count, eos = decisions[row]
++                checkpoint = checkpoints[row]
+ 
+                 # Commit exactly the decided prefix through the job's own serial bookkeeping. Its independent stop,
+                 # requeue, rewind and checkpoint-boundary outcomes must agree with the decision at every position
+@@ -1273,8 +1333,7 @@
+ 
+                 # Stop at EOS: the remaining draft positions were verified but never resolved, count them as
+                 # rejected and patch the already-built EOS event. Otherwise reject the unaccepted draft suffix, if
+-                # any, rolling back recurrent state and page positions
+-                rejected = 0
++                # any, rolling back page positions (the recurrent state was rewound above)
+                 if eos:
+                     num_unresolved = window - (count - 1)
+                     if num_unresolved:
+@@ -1286,15 +1345,10 @@
+                                 break
+                     completed_jobs.append(job)
+                 elif count <= window:
+-                    rejected = reject_remainder(job, row, count - 1, batch_states)
+-
+-                # Make sure outgoing state is valid if entire draft was accepted
+-                if batch_states and rejected == 0:
+-                    batch_states[row].rewind(0)
++                    reject_remainder(job, row, count - 1, None)
+ 
+                 if self.record_draft_stats:
+                     job.draft_stats.append((job.new_tokens, window, count - 1))
+-                accepted_lengths.append(count)
+ 
+         # With a draft, positions within a job are consumed strictly serially: acceptance of
+         # position n gates position n+1, and constrained-decoding masks and sampling past IDs
+@@ -1430,17 +1484,10 @@
+             cal.decay_step()
+ 
+         # Accept new target_hidden if DFlash. DFlash draft models can update their cache from target-model hidden
+-        # states for the tokens accepted above, keeping draft and target cache layouts aligned.
+-        if self.dflash_draft:
+-            self.draft_model.update_kv_from_target(
+-                target_hidden = p_export_states,
+-                cache = self.draft_cache,
+-                lengths = accepted_lengths,
+-                params = {
+-                    "block_table": block_index,
+-                    "cache_seqlens": p_cache_seqlens,
+-                }
+-            )
++        # states for the tokens accepted above, keeping draft and target cache layouts aligned. The greedy path
++        # launched it as soon as the round was decided
++        if self.dflash_draft and not draft_kv_refreshed:
++            refresh_draft_kv()
+ 
+         # Accept new target_hidden if MTP. MTP draft models can update their cache from target-model hidden
+         # states for the tokens accepted above, keeping draft and target cache layouts aligned.
+--- /dev/null
++++ b/generator/gdn_rewind.py
+@@ -0,0 +1,112 @@
++"""
++Prebuilt GDN recurrent-state rewinds for greedy speculative verification.
++
++After a history-free verify every GDN layer holds the verified slot's commit as pending, and the round's
++acceptance decision only selects how many verified tokens the commit keeps. GDNState.rewind() builds each
++layer's rewind jobs in Python at decision time, a few microseconds per layer while the GPU waits for them.
++RewindPlans builds the identical job lists for every possible outcome of the round while the verify forward
++still runs, reusing a slot's lists from earlier rounds while every address they encode is unchanged, so the
++decision only launches them.
++"""
++
++from __future__ import annotations
++import torch
++from ..ext import exllamav3_ext as ext
++from ..modules.gated_delta_net import GDNState, GDNLayerState
++
++
++class _ReplayView:
++    """
++    The fields GDNLayerState.replay_job reads, so the layer's own job builder can run for every outcome without
++    consuming the layer's pending verify
++    """
++    __slots__ = ("pending", "recurrent_state", "module")
++
++
++class RewindPlans:
++
++    def __init__(self):
++        # slot -> (key, launches): launches[n] lists (device_index, conv_jobs, replay_jobs) in the order
++        # GDNState.rewind(n) dispatches them, key every address and size the jobs encode
++        self.plans = {}
++        self.planned_rewinds = 0
++
++
++    def prepare(self, state, window: int) -> tuple | None:
++        """
++        Plan the rewind that ends a verify round of `window` drafted tokens on `state`, or return None when the
++        state is not a single-process GDN state whose every layer holds that verify as pending. Call after the
++        verify forward was launched and before anything else touches the state.
++        """
++        if type(state) is not GDNState or state.cache.model.loaded_tp or state.last_history != window:
++            return None
++        slot = state.slot
++        layers = list(state.cache.get_all_recurrent_layers().values())
++        entries = []
++        key = [window]
++        for l in layers:
++            if type(l) is not GDNLayerState:
++                return None
++            entry = getattr(l, "pending", {}).get(slot)
++            if entry is None or entry[4] != window + 1:
++                return None
++            entries.append(entry)
++            key += (
++                id(l),
++                l.conv_state.data_ptr(),
++                l.recurrent_state.data_ptr(),
++                entry[0].data_ptr(),
++                entry[1].data_ptr(),
++                entry[2].data_ptr(),
++                entry[3],
++            )
++        key = tuple(key)
++        plan = self.plans.get(slot)
++        if plan is None or plan[0] != key:
++            plan = (key, self._build(layers, entries, slot, window))
++            self.plans[slot] = plan
++        return state, layers, entries, plan[1]
++
++
++    @staticmethod
++    def _build(layers: list, entries: list, slot: int, window: int) -> list:
++        """
++        Job lists of GDNState.rewind(n) for n in 0..window, built by the layers' own job builders: conv rewind
++        jobs by the side-effect-free GDNLayerState.rewind_conv_job, replay jobs by GDNLayerState.replay_job on a
++        view that holds only the pending entry
++        """
++        view = _ReplayView()
++        launches = []
++        for num_tokens in range(window + 1):
++            by_device = {}
++            for l, entry in zip(layers, entries):
++                conv_jobs, replay_jobs = by_device.setdefault(torch.device(l.device).index, ([], []))
++                cj = l.rewind_conv_job(slot, window, num_tokens)
++                if cj is not None:
++                    conv_jobs.append(cj)
++                view.pending = {slot: entry}
++                view.recurrent_state = l.recurrent_state
++                view.module = l.module
++                replay_jobs.append(GDNLayerState.replay_job(view, slot, window + 1 - num_tokens))
++            launches.append([(device_index, c, r) for device_index, (c, r) in by_device.items()])
++        return launches
++
++
++    def rewind(self, prepared: tuple, num_tokens: int):
++        """
++        Same effect and the same launches as state.rewind(num_tokens) for the state `prepared` planned
++        """
++        state, layers, entries, launches = prepared
++        slot = state.slot
++        if any(l.pending.get(slot) is not entry for l, entry in zip(layers, entries)):
++            raise RuntimeError("GDN rewind plan is stale: a layer's pending verify changed after planning")
++        for l in layers:
++            del l.pending[slot]
++        for device_index, conv_jobs, replay_jobs in launches[num_tokens]:
++            if conv_jobs:
++                ext.batched_conv_rewind(conv_jobs, device_index)
++            if replay_jobs:
++                ext.batched_state_replay(replay_jobs, device_index)
++        state.position -= num_tokens
++        state.last_history = 0
++        self.planned_rewinds += 1

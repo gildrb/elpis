@@ -1,5 +1,5 @@
 4081a75f5c2dcb165fb0903d2fadbce1ef8a0d0cedf1500a36a5ed8fc9a6fd72  0001-gdn-shared-carveout.patch
 4a46228f8042d18cf3f64ef58094691f68694826f9b6a0a9b69e4880f102bf55  0002-gdn-rule-registers.patch
-58051d13dd1cbb2e333822f79a18cf6b293d9204d774cc84bd4b66b359145c47  1001-gemm-fused-gate-up-silu.patch
 11627b8cb98d214a36fa625307eef7997c9d71c9c7dec5909437db92e488624a  0003-gdn-history-free-verify.patch
 a4fdfebef14c5e8ab226c17c72e67119caa842cc66c25ec195ac29f704eda244  0004-gdn-commit-replay.patch
+5f3a3377d4380021a546cc1289af2d40385d972f65a7e0d08d1fffa96dafcfd8  3001-attn-exact.patch

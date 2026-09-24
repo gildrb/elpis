@@ -6,21 +6,29 @@
     "revision": "355c6ee10fbd25b79070316a81ea0708cc18155a",
     "root": "/opt/venv/lib/python3.13/site-packages/exllamav3"
   },
-  "series_sha256": "b7f4f8ffb42f9b73dc701b7a646ab43d61a802e55ea0ccd3cb3871c4be3f61ba",
+  "series_sha256": "e5defd62618a2bd2bb22690850fad69e820f4a82c3f86e5f42379aa5774159cf",
   "patches": [
     {
       "name": "0001-greedy-batched-verify.patch",
       "sha256": "dfbf8e338da3e0750c56d7360eb93011b66b1c311dfef8381e4a6022980b61fd"
+    },
+    {
+      "name": "0002-host-overlap.patch",
+      "sha256": "9edf502d885085a175d8ea2f21f68648fd02a2805286d6318b276aad991e6a13"
     }
   ],
   "files": {
     "generator/generator.py": {
       "pre": "5d9e5741fb297513118fe03830a715713eb334d728c7cdcc8c0839b29dc91de7",
-      "post": "168b78ad8c974307e0816871692db90f3fcebcdcd45ea879cae3badad66e03ca"
+      "post": "2626d362e265732d3803ee5a1a5d1c296023bc9606a86651e76176fe9b5c5f10"
     },
     "generator/greedy_accept.py": {
       "pre": null,
       "post": "55f0737093f3ced7d6fe6e8eba9d71caabf59e84bb3890d6a32b15630ed28b36"
+    },
+    "generator/gdn_rewind.py": {
+      "pre": null,
+      "post": "08bf319ae372a26cb85d3a39896e0001bf2d3dbe4c9adf21bb58012c8eedb49a"
     }
   },
   "acceptor": {

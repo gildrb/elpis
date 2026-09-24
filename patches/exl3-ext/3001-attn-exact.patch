@@ -1,0 +1,71 @@
+--- a/modules/attention_fn/triton_paged.py
++++ b/modules/attention_fn/triton_paged.py
+@@ -760,6 +760,17 @@
+ 
+ 
+ @triton.jit
++def _qc_centered(raw, BITS: tl.constexpr):
++    """raw - (2^(BITS-1) - 0.5) as fp32, exactly, without an I2F: with the fp32 exponent of 2^22
++    the mantissa ulp is 0.5, so the bit pattern 0x4A800000 | (raw << 1) is the float 2^22 + raw
++    (raw < 2^22), and subtracting the representable 2^22 + mh is exact (Sterbenz: both operands
++    lie in [2^22, 2^23)). The result is the value raw.to(fp32) - mh produces."""
++    MAGIC: tl.constexpr = 0x4A800000
++    BIAS: tl.constexpr = 4194304.0 + ((1 << (BITS - 1)) - 0.5)
++    return ((raw << 1) | MAGIC).to(tl.float32, bitcast = True) - BIAS
++
++
++@triton.jit
+ def _qc_load_kt(qwords, scales, tok_rows, kv_head, offs_d, mask_n,
+                 BITS: tl.constexpr, n_kv_heads: tl.constexpr, head_dim: tl.constexpr, HD_PAD: tl.constexpr):
+     """(HD_PAD, BLOCK_N) fp16 tile from the packed cache, linear midpoint grid, values stay
+@@ -799,10 +810,12 @@
+                      mask = mask_n[None, :] & (garr < G)[:, None], other = 0.0)
+     else:
+         sc = tl.load(scales + tok_rows[None, :] * GPT + (sgb + garr)[:, None], mask = mask_n[None, :], other = 0.0)
+-    scx = tl.reshape(tl.broadcast_to(sc[:, None, :], (G_PAD, 32, sc.shape[1])), (HD_PAD, sc.shape[1]))
+-    mh = (1 << (BITS - 1)) - 0.5
+     inv_m = 1.0 / (1 << (BITS - 1))
+-    return ((raw.to(tl.float32) - mh) * (scx.to(tl.float32) * inv_m)).to(tl.float16)
++    # fp32 group scale times 2^-(BITS-1) on the (G_PAD, BLOCK_N) tile, then broadcast: the same
++    # per-element value the broadcast-then-convert order produced, 32x fewer converts/multiplies
++    scf = sc.to(tl.float32) * inv_m
++    scx = tl.reshape(tl.broadcast_to(scf[:, None, :], (G_PAD, 32, scf.shape[1])), (HD_PAD, scf.shape[1]))
++    return (_qc_centered(raw, BITS) * scx).to(tl.float16)
+ 
+ 
+ @triton.jit
+@@ -842,10 +855,10 @@
+                      mask = mask_n[:, None] & (garr < G)[None, :], other = 0.0)
+     else:
+         sc = tl.load(scales + tok_rows[:, None] * GPT + (sgb + garr)[None, :], mask = mask_n[:, None], other = 0.0)
+-    scx = tl.reshape(tl.broadcast_to(sc[:, :, None], (sc.shape[0], G_PAD, 32)), (sc.shape[0], HD_PAD))
+-    mh = (1 << (BITS - 1)) - 0.5
+     inv_m = 1.0 / (1 << (BITS - 1))
+-    return ((raw.to(tl.float32) - mh) * (scx.to(tl.float32) * inv_m)).to(tl.float16)
++    scf = sc.to(tl.float32) * inv_m
++    scx = tl.reshape(tl.broadcast_to(scf[:, :, None], (scf.shape[0], G_PAD, 32)), (scf.shape[0], HD_PAD))
++    return (_qc_centered(raw, BITS) * scx).to(tl.float16)
+ 
+ 
+ @triton.jit
+@@ -916,12 +929,19 @@
+ 
+     n_start = split * split_len
+     n_end = tl.minimum(n_start + split_len, total_k_len)
++    n_lo = n_start
++    if WINDOW_LEFT >= 0:
++        # Sliding window: tiles wholly below the earliest row's window start (q_abs - WINDOW_LEFT
++        # at row_q 0) are fully masked for every row. Leading masked tiles leave the running
++        # state at its init (m -inf, l 0, acc 0), so skipping them is exact. split_len is a
++        # multiple of BLOCK_N, so the kept tiles keep their BLOCK_N-aligned boundaries
++        n_lo = tl.maximum(n_start, (tl.maximum(0, total_k_len - q_len - WINDOW_LEFT) // BLOCK_N) * BLOCK_N)
+ 
+     m = tl.full((BLOCK_ROWS,), -float("inf"), tl.float32)
+     l = tl.full((BLOCK_ROWS,), 0.0, tl.float32)
+     acc = tl.zeros((BLOCK_ROWS, HD_PAD), tl.float32)
+ 
+-    for n0 in range(n_start, n_end, BLOCK_N):
++    for n0 in range(n_lo, n_end, BLOCK_N):
+         offs_n = n0 + tl.arange(0, BLOCK_N)
+         page = offs_n // page_size
+         page_off = offs_n - page * page_size

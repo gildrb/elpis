@@ -1,0 +1,414 @@
+--- a/modules/attention_fn/bc_attn.py
++++ b/modules/attention_fn/bc_attn.py
+@@ -265,8 +265,13 @@
+         from .triton_paged import (
+             _paged_attn_decode_split_kernel,
+             _paged_attn_decode_combine_kernel,
++            _paged_attn_decode_gqa_split_kernel,
++            _paged_attn_decode_gqa_combine_kernel,
+             _paged_kv_update_kernel,
+             _normalize_window,
++            gqa_geometry,
++            _gqa_warps,
++            _gqa_pv_f16,
+         )
+ 
+         dev = self.device
+@@ -308,7 +313,18 @@
+             SOFTCAP = float(self.softcap or 0.0), FINAL = False, HAS_SINKS = False,
+             BLOCK_M = block_m, BLOCK_H = block_h, BLOCK_ROWS = block_rows, BLOCK_N = block_n,
+         )
+-        k_split = _compile_kernel(dev, _paged_attn_decode_split_kernel, sig, consts, 4, 2)
++        # GQA-fused kernels (shape-based selection, gqa_geometry): same launch geometry
++        # (programs, splits_cap) and partial buffers; the kernels size splits in-kernel from
++        # the live length, so the patched split_len / num_splits arguments go unused
++        use_gqa, gqa_splits, gqa_min_split = gqa_geometry(
++            bsz, kvh, h_blocks, splits_cap, _get_sm_count(dev), block_n)
++        if use_gqa:
++            consts_g = consts | dict(NSUB = h_blocks, GRID_Y = splits_cap, SPLITS = gqa_splits,
++                                     MIN_SPLIT = gqa_min_split, PV_F16 = _gqa_pv_f16)
++            sig_g = sig | {n: "constexpr" for n in ("NSUB", "GRID_Y", "SPLITS", "MIN_SPLIT", "PV_F16")}
++            k_split = _compile_kernel(dev, _paged_attn_decode_gqa_split_kernel, sig_g, consts_g, _gqa_warps, 2)
++        else:
++            k_split = _compile_kernel(dev, _paged_attn_decode_split_kernel, sig, consts, 4, 2)
+ 
+         sig_c = {
+             "partial_o": "*fp32", "partial_ml": "*fp32", "out": "*fp16", "h32": "*fp16",
+@@ -321,7 +337,13 @@
+             n_q_heads = qh, n_kv_heads = kvh, head_dim = hd, HD_PAD = hd_pad,
+             BLOCK_M = block_m, BLOCK_H = block_h, BLOCK_ROWS = block_rows,
+         )
+-        k_combine = _compile_kernel(dev, _paged_attn_decode_combine_kernel, sig_c, consts_c, 4, 1)
++        if use_gqa:
++            k_combine = _compile_kernel(
++                dev, _paged_attn_decode_gqa_combine_kernel,
++                sig_c | {"NSUB": "constexpr", "SPLITS": "constexpr"},
++                consts_c | dict(NSUB = h_blocks, SPLITS = gqa_splits), 4, 1)
++        else:
++            k_combine = _compile_kernel(dev, _paged_attn_decode_combine_kernel, sig_c, consts_c, 4, 1)
+ 
+         k_update = None
+         if not self.quant:
+--- a/modules/attention_fn/triton_paged.py
++++ b/modules/attention_fn/triton_paged.py
+@@ -1086,6 +1086,297 @@
+     tl.store(out + out_base[:, None] + offs_d[None, :], out_tile, mask=valid_row[:, None] & d_mask[None, :])
+ 
+ 
++@triton.jit
++def _gqa_rows(q, batch, kv_head, sub, total_k_len,
++              q_len: tl.constexpr, n_q_heads: tl.constexpr, group_size: tl.constexpr,
++              head_dim: tl.constexpr, HD_PAD: tl.constexpr, BLOCK_M: tl.constexpr,
++              BLOCK_H: tl.constexpr, QCK: tl.constexpr, h32):
++    """Row block `sub` (16 rows = BLOCK_H sibling q heads x BLOCK_M query positions) of one kv
++    head's GQA group: its q tile (H32-rotated for a quantized K), row validity and positions."""
++    rows = tl.arange(0, BLOCK_M * BLOCK_H)
++    row_q = rows % BLOCK_M
++    row_h_local = sub * BLOCK_H + (rows // BLOCK_M)
++    q_head = kv_head * group_size + row_h_local
++    valid_row = (row_q < q_len) & (row_h_local < group_size)
++    offs_d = tl.arange(0, HD_PAD)
++    q_base = ((batch * q_len + row_q) * n_q_heads + q_head) * head_dim
++    q_tile = tl.load(q + q_base[:, None] + offs_d[None, :],
++                     mask = valid_row[:, None] & (offs_d < head_dim)[None, :], other = 0.0)
++    if QCK > 0:
++        q_tile = _rot_h32(q_tile, h32, BLOCK_M * BLOCK_H, HD_PAD)
++    q_abs = total_k_len - q_len + row_q
++    return q_tile, valid_row, q_abs
++
++
++@triton.jit
++def _gqa_step(q_tile, k_tile, v_tile, m, l, acc, offs_n, n_end, q_abs, valid_row,
++              scale: tl.constexpr, SOFTCAP: tl.constexpr, CAUSAL: tl.constexpr,
++              WINDOW_LEFT: tl.constexpr, WINDOW_RIGHT: tl.constexpr, PV_F16: tl.constexpr):
++    """One online-softmax step of one 16-row block against a shared dequantized K/V tile."""
++    scores = tl.dot(q_tile, k_tile) * scale
++    if SOFTCAP > 0.0:
++        scores_scaled = scores / SOFTCAP
++        scores = (2.0 / (1.0 + tl.exp(-2.0 * scores_scaled)) - 1.0) * SOFTCAP
++    valid = valid_row[:, None] & (offs_n[None, :] < n_end)
++    if CAUSAL:
++        valid = valid & (offs_n[None, :] <= q_abs[:, None])
++    if WINDOW_LEFT >= 0:
++        valid = valid & (offs_n[None, :] >= q_abs[:, None] - WINDOW_LEFT)
++    if WINDOW_RIGHT >= 0:
++        valid = valid & (offs_n[None, :] <= q_abs[:, None] + WINDOW_RIGHT)
++    scores = tl.where(valid, scores, -float("inf"))
++    m_new = tl.maximum(m, tl.max(scores, axis=1))
++    m_exp = tl.where(m_new == -float("inf"), 0.0, m_new)
++    p = tl.exp(scores - m_exp[:, None])
++    p = tl.where(valid, p, 0.0)
++    alpha = tl.where(m == -float("inf"), 0.0, tl.exp(m - m_exp))
++    l_new = l * alpha + tl.sum(p, axis=1)
++    if PV_F16:
++        pv = tl.dot(p.to(v_tile.dtype), v_tile, out_dtype = tl.float16).to(tl.float32)
++    else:
++        pv = tl.dot(p.to(v_tile.dtype), v_tile)
++    acc = acc * alpha[:, None] + pv
++    return m_new, l_new, acc
++
++
++@triton.jit
++def _gqa_store(partial_o, partial_ml, idx, has_work, m, l, acc,
++               ROWS: tl.constexpr, HD_PAD: tl.constexpr):
++    rows = tl.arange(0, ROWS)
++    offs_d = tl.arange(0, HD_PAD)
++    tl.store(partial_ml + idx * ROWS * 2 + rows * 2, m)
++    tl.store(partial_ml + idx * ROWS * 2 + rows * 2 + 1, l)
++    if has_work:
++        tl.store(partial_o + idx * ROWS * HD_PAD + rows[:, None] * HD_PAD + offs_d[None, :], acc)
++
++
++@triton.jit
++def _paged_attn_decode_gqa_split_kernel(
++    q,
++    k_cache,
++    v_cache,
++    block_table,
++    cache_seqlens,
++    out,
++    partial_o,
++    partial_ml,
++    k_scales,
++    v_scales,
++    h32,
++    split_len,           # unused: splits are sized in-kernel from the live length
++    num_pages_per_seq,
++    num_splits,          # unused: the effective split count is the SPLITS constexpr
++    sinks,
++    QCK: tl.constexpr,
++    QCV: tl.constexpr,
++    q_len: tl.constexpr,
++    kv_append_len: tl.constexpr,
++    n_q_heads: tl.constexpr,
++    n_kv_heads: tl.constexpr,
++    page_size: tl.constexpr,
++    head_dim: tl.constexpr,
++    HD_PAD: tl.constexpr,
++    scale: tl.constexpr,
++    CAUSAL: tl.constexpr,
++    WINDOW_LEFT: tl.constexpr,
++    WINDOW_RIGHT: tl.constexpr,
++    SOFTCAP: tl.constexpr,
++    FINAL: tl.constexpr,       # must be False: the GQA kernel always reduces in the combine pass
++    HAS_SINKS: tl.constexpr,
++    BLOCK_M: tl.constexpr,
++    BLOCK_H: tl.constexpr,
++    BLOCK_ROWS: tl.constexpr,  # BLOCK_M * BLOCK_H == 16: rows per MMA block
++    BLOCK_N: tl.constexpr,
++    NSUB: tl.constexpr,        # 16-row blocks per kv head (1..4): cdiv(group_size, BLOCK_H)
++    GRID_Y: tl.constexpr,      # launched grid height; split = sub-program * GRID_Y + y
++    SPLITS: tl.constexpr,      # effective kv splits per (batch, kv_head); <= NSUB * GRID_Y
++    MIN_SPLIT: tl.constexpr,   # minimum tokens per live split
++    PV_F16: tl.constexpr,      # fp16-accumulate PV MMA (added into the fp32 accumulator)
++):
++    """GQA-fused flash-decoding phase 1: one program per (batch, kv_head, kv split). The K/V
++    tile is dequantized once and shared by all NSUB 16-row blocks of the GQA group (separate
++    accumulators, no padded rows). The grid keeps the per-h_block geometry of
++    _paged_attn_decode_split_kernel ((programs, GRID_Y)); the h_block index is folded into the
++    split index. Splits are sized from the live length (cache_seqlens) and, for a sliding
++    window, cover only [window start, total_k_len)."""
++    pid = tl.program_id(0)
++    y = tl.program_id(1)
++    bh = pid // NSUB
++    split = (pid % NSUB) * GRID_Y + y
++    if split >= SPLITS:
++        return
++    batch = bh // n_kv_heads
++    kv_head = bh - batch * n_kv_heads
++    group_size: tl.constexpr = n_q_heads // n_kv_heads
++
++    total_k_len = tl.load(cache_seqlens + batch) + kv_append_len
++    lo = 0
++    if WINDOW_LEFT >= 0:
++        lo = (tl.maximum(0, total_k_len - q_len - WINDOW_LEFT) // BLOCK_N) * BLOCK_N
++    span = total_k_len - lo
++    live = tl.maximum(1, tl.minimum(SPLITS, tl.cdiv(span, MIN_SPLIT)))
++    s_len = tl.cdiv(tl.cdiv(span, live), BLOCK_N) * BLOCK_N
++    n_start = lo + split * s_len
++    n_end = tl.minimum(n_start + s_len, total_k_len)
++
++    q0, vr0, qa0 = _gqa_rows(q, batch, kv_head, 0, total_k_len, q_len, n_q_heads, group_size,
++                             head_dim, HD_PAD, BLOCK_M, BLOCK_H, QCK, h32)
++    m0 = tl.full((BLOCK_ROWS,), -float("inf"), tl.float32)
++    l0 = tl.full((BLOCK_ROWS,), 0.0, tl.float32)
++    a0 = tl.zeros((BLOCK_ROWS, HD_PAD), tl.float32)
++    if NSUB > 1:
++        q1, vr1, qa1 = _gqa_rows(q, batch, kv_head, 1, total_k_len, q_len, n_q_heads, group_size,
++                                 head_dim, HD_PAD, BLOCK_M, BLOCK_H, QCK, h32)
++        m1 = tl.full((BLOCK_ROWS,), -float("inf"), tl.float32)
++        l1 = tl.full((BLOCK_ROWS,), 0.0, tl.float32)
++        a1 = tl.zeros((BLOCK_ROWS, HD_PAD), tl.float32)
++    if NSUB > 2:
++        q2, vr2, qa2 = _gqa_rows(q, batch, kv_head, 2, total_k_len, q_len, n_q_heads, group_size,
++                                 head_dim, HD_PAD, BLOCK_M, BLOCK_H, QCK, h32)
++        m2 = tl.full((BLOCK_ROWS,), -float("inf"), tl.float32)
++        l2 = tl.full((BLOCK_ROWS,), 0.0, tl.float32)
++        a2 = tl.zeros((BLOCK_ROWS, HD_PAD), tl.float32)
++    if NSUB > 3:
++        q3, vr3, qa3 = _gqa_rows(q, batch, kv_head, 3, total_k_len, q_len, n_q_heads, group_size,
++                                 head_dim, HD_PAD, BLOCK_M, BLOCK_H, QCK, h32)
++        m3 = tl.full((BLOCK_ROWS,), -float("inf"), tl.float32)
++        l3 = tl.full((BLOCK_ROWS,), 0.0, tl.float32)
++        a3 = tl.zeros((BLOCK_ROWS, HD_PAD), tl.float32)
++
++    offs_d = tl.arange(0, HD_PAD)
++    d_mask = offs_d < head_dim
++    for n0 in range(n_start, n_end, BLOCK_N):
++        offs_n = n0 + tl.arange(0, BLOCK_N)
++        page = offs_n // page_size
++        page_off = offs_n - page * page_size
++        phys = tl.load(block_table + batch * num_pages_per_seq + page, mask=offs_n < n_end, other=0)
++        tok_rows = phys * page_size + page_off
++        if QCK > 0:
++            k_tile = _qc_load_kt(k_cache, k_scales, tok_rows, kv_head, offs_d, offs_n < n_end, QCK, n_kv_heads, head_dim, HD_PAD)
++        else:
++            k_ptrs = k_cache + ((tok_rows[None, :] * n_kv_heads + kv_head) * head_dim + offs_d[:, None])
++            k_tile = tl.load(k_ptrs, mask=(offs_n[None, :] < n_end) & d_mask[:, None], other=0.0)
++        if QCV > 0:
++            v_tile = _qc_load_v(v_cache, v_scales, tok_rows, kv_head, offs_d, offs_n < n_end, QCV, n_kv_heads, head_dim, HD_PAD)
++        else:
++            v_ptrs = v_cache + ((tok_rows[:, None] * n_kv_heads + kv_head) * head_dim + offs_d[None, :])
++            v_tile = tl.load(v_ptrs, mask=(offs_n[:, None] < n_end) & d_mask[None, :], other=0.0)
++        m0, l0, a0 = _gqa_step(q0, k_tile, v_tile, m0, l0, a0, offs_n, n_end, qa0, vr0,
++                               scale, SOFTCAP, CAUSAL, WINDOW_LEFT, WINDOW_RIGHT, PV_F16)
++        if NSUB > 1:
++            m1, l1, a1 = _gqa_step(q1, k_tile, v_tile, m1, l1, a1, offs_n, n_end, qa1, vr1,
++                                   scale, SOFTCAP, CAUSAL, WINDOW_LEFT, WINDOW_RIGHT, PV_F16)
++        if NSUB > 2:
++            m2, l2, a2 = _gqa_step(q2, k_tile, v_tile, m2, l2, a2, offs_n, n_end, qa2, vr2,
++                                   scale, SOFTCAP, CAUSAL, WINDOW_LEFT, WINDOW_RIGHT, PV_F16)
++        if NSUB > 3:
++            m3, l3, a3 = _gqa_step(q3, k_tile, v_tile, m3, l3, a3, offs_n, n_end, qa3, vr3,
++                                   scale, SOFTCAP, CAUSAL, WINDOW_LEFT, WINDOW_RIGHT, PV_F16)
++
++    # Partials: ((bh * SPLITS + split) * NSUB + sub) row blocks of BLOCK_ROWS x HD_PAD. The
++    # (m, l) pair is always stored (m = -inf marks an empty split); acc only when non-empty
++    has_work = n_start < n_end
++    base = (bh * SPLITS + split) * NSUB
++    _gqa_store(partial_o, partial_ml, base, has_work, m0, l0, a0, BLOCK_ROWS, HD_PAD)
++    if NSUB > 1:
++        _gqa_store(partial_o, partial_ml, base + 1, has_work, m1, l1, a1, BLOCK_ROWS, HD_PAD)
++    if NSUB > 2:
++        _gqa_store(partial_o, partial_ml, base + 2, has_work, m2, l2, a2, BLOCK_ROWS, HD_PAD)
++    if NSUB > 3:
++        _gqa_store(partial_o, partial_ml, base + 3, has_work, m3, l3, a3, BLOCK_ROWS, HD_PAD)
++
++
++@triton.jit
++def _paged_attn_decode_gqa_combine_kernel(
++    partial_o,
++    partial_ml,
++    out,
++    h32,
++    num_splits,          # unused: SPLITS constexpr
++    sinks,
++    QCV: tl.constexpr,
++    HAS_SINKS: tl.constexpr,
++    q_len: tl.constexpr,
++    n_q_heads: tl.constexpr,
++    n_kv_heads: tl.constexpr,
++    head_dim: tl.constexpr,
++    HD_PAD: tl.constexpr,
++    BLOCK_M: tl.constexpr,
++    BLOCK_H: tl.constexpr,
++    BLOCK_ROWS: tl.constexpr,
++    NSUB: tl.constexpr,
++    SPLITS: tl.constexpr,
++):
++    """Flash-decoding phase 2 for the GQA-fused split kernel: one program per (batch, kv_head,
++    16-row block) (the same grid as _paged_attn_decode_combine_kernel); empty splits (all rows
++    m = -inf) are skipped without reading their accumulator."""
++    pid = tl.program_id(0)
++    bh = pid // NSUB
++    sub = pid % NSUB
++    batch = bh // n_kv_heads
++    kv_head = bh - batch * n_kv_heads
++    group_size = n_q_heads // n_kv_heads
++
++    rows = tl.arange(0, BLOCK_ROWS)
++    row_q = rows % BLOCK_M
++    row_h_local = sub * BLOCK_H + (rows // BLOCK_M)
++    q_head = kv_head * group_size + row_h_local
++    valid_row = (row_q < q_len) & (row_h_local < group_size)
++    offs_d = tl.arange(0, HD_PAD)
++    d_mask = offs_d < head_dim
++
++    m_max = tl.full((BLOCK_ROWS,), -float("inf"), tl.float32)
++    for s in range(SPLITS):
++        idx = (bh * SPLITS + s) * NSUB + sub
++        m_max = tl.maximum(m_max, tl.load(partial_ml + idx * BLOCK_ROWS * 2 + rows * 2))
++    if HAS_SINKS:
++        sink = tl.load(sinks + q_head, mask=valid_row, other=0.0).to(tl.float32)
++        m_max = tl.maximum(m_max, sink)
++
++    l_sum = tl.zeros((BLOCK_ROWS,), tl.float32)
++    acc = tl.zeros((BLOCK_ROWS, HD_PAD), tl.float32)
++    m_safe = tl.where(m_max == -float("inf"), 0.0, m_max)
++    for s in range(SPLITS):
++        idx = (bh * SPLITS + s) * NSUB + sub
++        m_s = tl.load(partial_ml + idx * BLOCK_ROWS * 2 + rows * 2)
++        if tl.max(m_s, axis=0) > -float("inf"):
++            l_s = tl.load(partial_ml + idx * BLOCK_ROWS * 2 + rows * 2 + 1)
++            w = tl.where(m_s == -float("inf"), 0.0, tl.exp(m_s - m_safe))
++            o_s = tl.load(partial_o + idx * BLOCK_ROWS * HD_PAD + rows[:, None] * HD_PAD + offs_d[None, :])
++            acc += o_s * w[:, None]
++            l_sum += l_s * w
++
++    if HAS_SINKS:
++        l_sum += tl.exp(sink - m_safe)
++    out_tile = acc / tl.where(l_sum[:, None] == 0.0, 1.0, l_sum[:, None])
++    if QCV > 0:
++        out_tile = _rot_h32(out_tile, h32, BLOCK_ROWS, HD_PAD)
++    out_base = ((batch * q_len + row_q) * n_q_heads + q_head) * head_dim
++    tl.store(out + out_base[:, None] + offs_d[None, :], out_tile, mask=valid_row[:, None] & d_mask[None, :])
++
++
++# GQA-fused decode (3002): shape-based selection, raise on unsupported explicit requests
++_gqa_enable = os.environ.get("EXL3_ATTN_GQA", "1") != "0"
++_gqa_ctas_per_sm = int(os.environ.get("EXL3_ATTN_GQA_CTAS_PER_SM", "2"))
++_gqa_min_split = int(os.environ.get("EXL3_ATTN_GQA_MIN_SPLIT", "0"))   # 0: 4 * BLOCK_N
++_gqa_warps = int(os.environ.get("EXL3_ATTN_GQA_WARPS", "4"))
++_gqa_pv_f16 = os.environ.get("EXL3_ATTN_PV_F16", "0") != "0"
++GQA_MAX_NSUB = 4
++
++
++def gqa_geometry(bsz: int, n_kv_heads: int, h_blocks: int, grid_y: int, sm_count: int, block_n: int):
++    """(use_gqa, SPLITS, MIN_SPLIT): the GQA-fused kernel runs when the group spans 1..4 16-row
++    blocks. SPLITS targets _gqa_ctas_per_sm resident CTAs per SM over the bsz * n_kv_heads
++    programs, capped by the launched (programs, grid_y) grid."""
++    if not _gqa_enable or h_blocks > GQA_MAX_NSUB:
++        return False, 0, 0
++    min_split = _gqa_min_split or 4 * block_n
++    if min_split % block_n != 0 or min_split < 0:
++        raise ValueError(f"EXL3_ATTN_GQA_MIN_SPLIT must be a positive multiple of {block_n}")
++    splits = max(1, min(h_blocks * grid_y, (_gqa_ctas_per_sm * sm_count) // (bsz * n_kv_heads)))
++    return True, splits, min_split
++
++
+ _decode_sm_count = {}
+ 
+ def paged_attn_triton_decode(
+@@ -1191,6 +1482,14 @@
+         dev = q.device.index
+         if dev not in _decode_sm_count:
+             _decode_sm_count[dev] = torch.cuda.get_device_properties(q.device).multi_processor_count
++        use_gqa, gqa_splits, gqa_min_split = gqa_geometry(bsz, n_kv_heads, h_blocks, 128, _decode_sm_count[dev], block_n)
++        if use_gqa:
++            return _paged_attn_decode_gqa(
++                q, k, v, k_cache, v_cache, block_table, cache_seqlens, out, h32, sinks, has_sinks,
++                k_scales, v_scales, qck, qcv, kv_append_len, n_q_heads, n_kv_heads, page_size,
++                head_dim, hd_pad, softmax_scale, causal, window_left, window_right, softcap,
++                block_m, block_h, block_rows, block_n, h_blocks, gqa_splits, gqa_min_split,
++            )
+         target = 2 * _decode_sm_count[dev]
+         num_splits = max(1, min(target // programs, triton.cdiv(max_k_len, 4 * block_n), 128))
+     split_len = triton.cdiv(triton.cdiv(max_k_len, num_splits), block_n) * block_n
+@@ -1232,6 +1531,47 @@
+     return out
+ 
+ 
++def _paged_attn_decode_gqa(
++    q, k, v, k_cache, v_cache, block_table, cache_seqlens, out, h32, sinks, has_sinks,
++    k_scales, v_scales, qck, qcv, kv_append_len, n_q_heads, n_kv_heads, page_size,
++    head_dim, hd_pad, softmax_scale, causal, window_left, window_right, softcap,
++    block_m, block_h, block_rows, block_n, h_blocks, splits, min_split,
++):
++    """Dispatch-path launch of the GQA-fused split + combine kernels (see gqa_geometry)."""
++    bsz, q_len = q.shape[:2]
++    programs = bsz * n_kv_heads * h_blocks
++    grid_y = triton.cdiv(splits, h_blocks)
++    num_pages_per_seq = block_table.shape[1]
++    partial_o = torch.empty(bsz * n_kv_heads * splits * h_blocks * block_rows * hd_pad, dtype = torch.float32, device = q.device)
++    partial_ml = torch.empty(bsz * n_kv_heads * splits * h_blocks * block_rows * 2, dtype = torch.float32, device = q.device)
++    with torch.cuda.device(q.device):
++        if k is not None and kv_append_len:
++            update_block_d = triton.next_power_of_2(head_dim)
++            _paged_kv_update_kernel[(bsz * kv_append_len, n_kv_heads, triton.cdiv(head_dim, update_block_d))](
++                k, v, k_cache, v_cache, block_table, cache_seqlens,
++                num_pages_per_seq, kv_append_len, n_kv_heads, page_size, head_dim, update_block_d,
++                num_warps=2, num_stages=3,
++            )
++        _paged_attn_decode_gqa_split_kernel[(programs, grid_y)](
++            q, k_cache, v_cache, block_table, cache_seqlens, out, partial_o, partial_ml,
++            k_scales, v_scales, h32,
++            0, num_pages_per_seq, splits, sinks,
++            qck, qcv, q_len, kv_append_len, n_q_heads, n_kv_heads,
++            page_size, head_dim, hd_pad, float(softmax_scale),
++            bool(causal), int(window_left), int(window_right), float(softcap or 0.0),
++            False, has_sinks, block_m, block_h, block_rows, block_n,
++            h_blocks, grid_y, splits, min_split, _gqa_pv_f16,
++            num_warps=_gqa_warps, num_stages=2,
++        )
++        _paged_attn_decode_gqa_combine_kernel[(programs,)](
++            partial_o, partial_ml, out, h32,
++            splits, sinks, qcv, has_sinks, q_len, n_q_heads, n_kv_heads, head_dim, hd_pad,
++            block_m, block_h, block_rows, h_blocks, splits,
++            num_warps=4, num_stages=1,
++        )
++    return out
++
++
+ def fn_triton_paged_attn_decode(args: AttnArgs) -> torch.Tensor | None:
+     if (
+         args.is_varlen() or

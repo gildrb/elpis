@@ -16,7 +16,7 @@
     "path": "/opt/venv/lib/python3.13/site-packages/exllamav3_ext.cpython-313-x86_64-linux-gnu.so",
     "base_sha256": "6d30690fdb76b3c4ad3fb5e69f0479707e410fc9b6194e2a5e32f4d7fe1fd8b3"
   },
-  "series_sha256": "f8ef42e78f024da4ea45e1a731e5e8d978236b86fbae44e83c699639073d0c01",
+  "series_sha256": "5cd389958608e06eed0781cc90c3f0fd2bfdbdb71de5c2fbfd75e84967a59168",
   "patches": [
     {
       "name": "0001-gdn-shared-carveout.patch",
@@ -27,31 +27,19 @@
       "sha256": "4a46228f8042d18cf3f64ef58094691f68694826f9b6a0a9b69e4880f102bf55"
     },
     {
-      "name": "1001-gemm-fused-gate-up-silu.patch",
-      "sha256": "58051d13dd1cbb2e333822f79a18cf6b293d9204d774cc84bd4b66b359145c47"
-    },
-    {
       "name": "0003-gdn-history-free-verify.patch",
       "sha256": "11627b8cb98d214a36fa625307eef7997c9d71c9c7dec5909437db92e488624a"
     },
     {
       "name": "0004-gdn-commit-replay.patch",
       "sha256": "a4fdfebef14c5e8ab226c17c72e67119caa842cc66c25ec195ac29f704eda244"
+    },
+    {
+      "name": "3001-attn-exact.patch",
+      "sha256": "5f3a3377d4380021a546cc1289af2d40385d972f65a7e0d08d1fffa96dafcfd8"
     }
   ],
   "files": {
-    "exllamav3_ext/activation.cu": {
-      "pre": "41a88b084731e1cf855777d851d41e828c824e81e469e3f3171969d629a57c69",
-      "post": "92df18ff7a209142bebb3abfe55f69cdc1ecea694573280754ada2400e24102d"
-    },
-    "exllamav3_ext/activation_funcs.cuh": {
-      "pre": null,
-      "post": "dd5eca892be08f574c0495b74d784812aa86f6524344224b650525d771601739"
-    },
-    "exllamav3_ext/activation_kernels.cuh": {
-      "pre": "5a282a40b3f7bfc9a811a5a76797e42f3ebab808740c28cd5b646ca92064cb35",
-      "post": "5673f61c32a32898fa8baf2df063ed3afaef5fa13b1c3ec4370b50a96bbad1af"
-    },
     "exllamav3_ext/bindings.cpp": {
       "pre": "381d867b845335b15106f86aa79e284c9d6b7d316703dd555d8a86a13ed2b465",
       "post": "83a8713922e4b4b93a8bd4cc0e08a899eb5f14651b6f2acc6bf65fb29d2a73b1"
@@ -76,81 +64,13 @@
       "pre": "b281f169bd1df139919723b9e4cd8a418a788c5c21a9782ed041f8e007e923f0",
       "post": "738c2e7e5d7008d653fbc670651034a0a9998aa8bd547e9e05d0ac93dc996e20"
     },
-    "exllamav3_ext/libtorch/mlp.cpp": {
-      "pre": "3f5d326cabd970a9892b2b2ce69cfc5e7949a113462e5e22b572f6f77803ec85",
-      "post": "622ca5b26d4138108afbac7fe7ade8f516954f996f9047ff2ba70b9a7232d7c4"
-    },
     "exllamav3_ext/norm.cu": {
       "pre": "b7b43921a19aa64cbe56786a9911c2796b5d4327818f0cae73c4cf358e6907df",
       "post": "3c4564c8fe866346b5efffdca4a04370159a43fea5707719542b843f5135362e"
     },
-    "exllamav3_ext/quant/comp_units/exl3_gemm_gu_inst_k1.cu": {
-      "pre": null,
-      "post": "18f5c84e0c6a5299cb0ab03f88bb358724106f8c96279835bdf4464a0b370959"
-    },
-    "exllamav3_ext/quant/comp_units/exl3_gemm_gu_inst_k2.cu": {
-      "pre": null,
-      "post": "6a9bb6895ef419ec9c7d0dbb5119489582590f10a1b4856b73f4b4e48156777d"
-    },
-    "exllamav3_ext/quant/comp_units/exl3_gemm_gu_inst_k3.cu": {
-      "pre": null,
-      "post": "937533dc7dea7f7602e2a19df2961c2e99fb3606cb15d2f516dae782b3042ea3"
-    },
-    "exllamav3_ext/quant/comp_units/exl3_gemm_gu_inst_k4.cu": {
-      "pre": null,
-      "post": "24729399dee936c7a3df6d68ab1f1dc8c6ffdcc1b9a932b07e0c0be26c0deb0f"
-    },
-    "exllamav3_ext/quant/comp_units/exl3_gemm_gu_inst_k5.cu": {
-      "pre": null,
-      "post": "83313a2aed3a1c0a00d584d6e44229b230732ce3ec73b455c93c299203e7853a"
-    },
-    "exllamav3_ext/quant/comp_units/exl3_gemm_gu_inst_k6.cu": {
-      "pre": null,
-      "post": "353f8a6d1bf4bd9cfda5a242b03192637807b1c12064c8a3f04a43248c4939cc"
-    },
-    "exllamav3_ext/quant/comp_units/exl3_gemm_gu_inst_k7.cu": {
-      "pre": null,
-      "post": "1e91690dd3084f0f1b15f48047419b9cee821babb6110e16ccb4672aed9491b0"
-    },
-    "exllamav3_ext/quant/comp_units/exl3_gemm_gu_inst_k8.cu": {
-      "pre": null,
-      "post": "2bf16a3700107faa47a74727c8f3224a8934f3f082132fe3d12f078014d45530"
-    },
-    "exllamav3_ext/quant/coop_autotune.cu": {
-      "pre": "b685a7e18b470b86b68dfdddedc9d419b40e21462cb31c7738f44c105e86888c",
-      "post": "ed31438a085b1272520bc6bd5443f2ea742e90c35a300eda67204efff7b6e03a"
-    },
-    "exllamav3_ext/quant/coop_autotune.cuh": {
-      "pre": "1a2bfaae6151ea45229d839885099803a028896b8ad70fc322e832a4b5213b71",
-      "post": "4b3665dd6433bd1c38819b62729d428243f1f4f8536a9c0cb112e0002c31feb7"
-    },
-    "exllamav3_ext/quant/exl3_gemm.cu": {
-      "pre": "972840aaccde357ff102f0c7ea8c1004ab83e1035b8cb43016bca31f1700f202",
-      "post": "8521bd2e38a030165c6a96943d40ba4862e73cee62a0d5e6b2dc04d6d5dc7170"
-    },
-    "exllamav3_ext/quant/exl3_gemm.cuh": {
-      "pre": "820486720e4de26146b27a6ed5c2974a24fe840de70328b6a6f4e46c3843ea83",
-      "post": "7ecd0cfb0574f6e69018f2599546cb0521b14b93cbcb443571347279b799bce2"
-    },
-    "exllamav3_ext/quant/exl3_gemm_gu_kernel.cuh": {
-      "pre": null,
-      "post": "fa091c9a6856acb20d41aba40c1861d1ef5b96eead5c27b1716f214493cc6132"
-    },
-    "exllamav3_ext/quant/exl3_gemv.cu": {
-      "pre": "32e5c510215ae4758de63dd5b18daa99f4c5cd8f99a053e00d061b42bede1055",
-      "post": "f45b2aaab069042fc795ed05cf09c800544fb82ad09a8ab10e2eb76037b42ea8"
-    },
-    "exllamav3_ext/quant/exl3_gemv.cuh": {
-      "pre": "89b7974ce8d3f2a6c46893d01f5d4f430acbf8778ca7c1d1d931d26259ac3698",
-      "post": "eddb97e4210b9f50fbcdf37b4e6a35170c96b975b93fe22d081b12c2023baa19"
-    },
-    "exllamav3_ext/quant/exl3_kernel_map.cu": {
-      "pre": "aedddb3f53ade8b6526ead725c6ba08b2ab51da546c40e9801dcdeafa41e3e79",
-      "post": "8e3b938027c3753d38def1027d96246f6f426e549204f3103123165f6a04f441"
-    },
-    "exllamav3_ext/quant/exl3_kernel_map.cuh": {
-      "pre": "2dff59d25dfa7b05cc2773b34e69f1f0c49cfd30d218f4ace67f260bd9ecee79",
-      "post": "33c79c3507fec30a00f4dbeacadfca8c27dae51cd8b7f94a20482cd33ab70a34"
+    "modules/attention_fn/triton_paged.py": {
+      "pre": "910379b663acb08711c3be207cd3e9ed96658527cc110a6ce39c793f997836d9",
+      "post": "81cccd0b62f7466e9831cfca22ad6f0adc3360d6a7b4850dc769ca5648f00912"
     },
     "modules/gated_delta_net.py": {
       "pre": "955f2ae25509ccf695dac4b79721115bc51d9d63a7f6f1eeb0a42671b685cf5a",
