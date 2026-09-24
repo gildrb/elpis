@@ -21,7 +21,7 @@ type Engine<-S: Data, -Y: Data> is Data:
   Engine{row0: S, conv: List<&2, Y>, position: Nat, last_history: Nat}
 
 # Committed: the rewind launched and returned. Refused: the host raised before
-# any replay was launched (gdn_rewind.py:296-298 IndexError, replay_job's
+# any replay was launched (gdn_rewind.py:103-105 IndexError, replay_job's
 # assert, batched_state_replay's TORCH_CHECK), so row 0 still holds the
 # pre-verify state (a RULE_VERIFY launch writes no state row).
 type Outcome<-S: Data, -Y: Data> is Data:
@@ -117,10 +117,11 @@ def replay_checked(~S: Data, ~X: Data, ~Y: Data, ~step: S -> X -> S,
     case False{}:
       Refused{row0}
 
-# RewindPlans.rewind (gdn_rewind.py:288-305): launches has window + 1 entries
-# (num_tokens in range(window + 1), gdn_rewind.py:273); entry num_tokens holds
+# RewindPlans.rewind (gdn_rewind.py:95-112): launches has window + 1 entries
+# (num_tokens in range(window + 1), gdn_rewind.py:80); entry num_tokens holds
 # the conv job and the replay job of steps = window + 1 - num_tokens
-# (gdn_rewind.py:277-283); then position -= num_tokens, last_history = 0.
+# (gdn_rewind.py:80-90); then position -= num_tokens, last_history = 0
+# (gdn_rewind.py:110-111).
 def launch(~S: Data, ~X: Data, ~Y: Data, ~step: S -> X -> S, in_range: Bool,
     +K: Nat, +W: Nat, +window: Nat, +num: Nat, +xs: List<&2, X>, +row0: S,
     +buf: List<&2, Y>, +position: Nat) -> Outcome<S, Y>:

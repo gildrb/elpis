@@ -9,45 +9,6 @@ import ./exl3_round.bend as Impl
 import ./exl3_round_spec.bend as Spec
 import ./exl3_round_laws.bend as Laws
 
-def Laws.stop_commits_nothing(targets, count):
-  {==}
-
-def Laws.advance_replay_eos(count, k):
-  ({==}, {==})
-
-def Laws.advance_error_stops(eos, window, base, interval, position, budget,
-    anchor, checkpoint, stopped):
-  match stopped:
-    case True{}:
-      {==}
-    case False{}:
-      {==}
-
-def Laws.stop_absorbing(verdicts, window, base, interval, position, budget,
-    anchor, checkpoint):
-  match verdicts:
-    case Nil{}:
-      {==}
-    case Accept.Verdict{count, eos} <> rest:
-      Laws.stop_absorbing(rest, window, base, interval, position, budget,
-        anchor, checkpoint)
-
-def Laws.checkpoint_invariant(count, eos, window, base, interval, position,
-    budget, anchor, stopped):
-  match count:
-    case 0n:
-      match stopped:
-        case True{}:
-          {==}
-        case False{}:
-          {==}
-    case 1n+index:
-      match stopped:
-        case True{}:
-          {==}
-        case False{}:
-          {==}
-
 # List facts about the committed prefix.
 def take_length(+xs: List<&2, U32>, +n: Nat,
     le: {Nat.is_le(n, List.length(&2, U32, xs)) == True{} : Bool})
@@ -142,6 +103,13 @@ def add_one(+c: Nat) -> {1n+c == Nat.add(c, 1n) : Nat}:
       %add_one(p) : {2n+p == 1n+_ : Nat}
       {==}
 
+def sub_zero(+n: Nat) -> {Nat.sub(n, 0n) == n : Nat}:
+  match n:
+    case 0n:
+      {==}
+    case 1n+p:
+      {==}
+
 # Consumer arithmetic on the served domain count <= k + 1.
 def full_succ(+b: Bool, +p: Nat, +q: Nat)
   -> {Impl.full(b, 1n+p, 1n+q) == 1n+Impl.full(b, p, q) : Nat}:
@@ -168,31 +136,6 @@ def full_eq(+n: Nat, +k: Nat, le: {Nat.is_le(n, 1n+k) == True{} : Bool})
           full_succ(Nat.is_gt(p, q), p, q)) : {_ == 1n+p : Nat}
       %full_eq(p, q, le) : {1n+Impl.full(Nat.is_gt(p, q), p, q) == 1n+_ : Nat}
       {==}
-
-def keep_succ(+b: Bool, +p: Nat, +q: Nat)
-  -> {Impl.keep(b, 1n+p, 1n+q) == Impl.keep(b, p, q) : Nat}:
-  match b:
-    case True{}:
-      {==}
-    case False{}:
-      {==}
-
-def keep_eq(+n: Nat, +k: Nat, le: {Nat.is_le(n, 1n+k) == True{} : Bool})
-  -> {Impl.keep(Nat.is_gt(n, k), n, k) == Nat.sub(1n+k, n) : Nat}:
-  match n k:
-    case 0n 0n:
-      {==}
-    case 0n 1n+q:
-      {==}
-    case 1n 0n:
-      {==}
-    case 2n+r 0n:
-      {==}
-    case 1n+p 1n+q:
-      %Equal.sym(Nat, Impl.keep(Nat.is_gt(p, q), 1n+p, 1n+q),
-          Impl.keep(Nat.is_gt(p, q), p, q),
-          keep_succ(Nat.is_gt(p, q), p, q)) : {_ == Nat.sub(1n+q, p) : Nat}
-      keep_eq(p, q, le)
 
 # Budget exhaustion forces eos: the halting position of an explained verdict
 # reports eos, or its count is still below the budget.
@@ -287,143 +230,169 @@ def explains_ends(+count: Nat, +flag: Bool, +targets: List<&2, U32>,
             checkpoint, flag),
           explained))
 
-# The advance on an arbitrary decision count n <= |targets|.
-def position_gen(+n: Nat, -e: Bool, -k: Nat, -base: Nat, -interval: Nat,
+# A usable decision (1 <= n <= k + 1) on a running job commits.
+def advance_ok(+n: Nat, -e: Bool, +k: Nat, -base: Nat, -interval: Nat,
+    -position: Nat, -budget: Nat, -anchor: Nat, -ckpt: Nat,
+    ok: {Impl.writes(n, k) == True{} : Bool})
+  -> {Impl.advance(n, e, k, base, interval, Impl.State{position, budget, anchor, ckpt, False{}}) ==
+    Impl.commit(True{}, n, e, k, base, interval, position, budget, anchor, ckpt) : Impl.State}:
+  %Equal.sym(Bool, Impl.writes(n, k), True{}, ok)
+    : {Impl.commit(_, n, e, k, base, interval, position, budget, anchor, ckpt)
+      == Impl.commit(True{}, n, e, k, base, interval, position, budget, anchor, ckpt) : Impl.State}
+  {==}
+
+def ok_of(+n: Nat, -k: Nat, pos: {Nat.is_lt(0n, n) == True{} : Bool},
+    le: {Nat.is_le(n, 1n+k) == True{} : Bool})
+  -> {Impl.writes(n, k) == True{} : Bool}:
+  %Equal.sym(Bool, Nat.is_lt(0n, n), True{}, pos)
+    : {Bool.and(_, Nat.is_le(n, 1n+k)) == True{} : Bool}
+  le
+
+# The advance on a usable decision count n <= |targets|.
+def position_gen(+n: Nat, -e: Bool, +k: Nat, -base: Nat, -interval: Nat,
     +position: Nat, -budget: Nat, -anchor: Nat, -ckpt: Nat, +stopped: Bool,
     +targets: List<&2, U32>,
-    le: {Nat.is_le(n, List.length(&2, U32, targets)) == True{} : Bool})
+    le: {Nat.is_le(n, List.length(&2, U32, targets)) == True{} : Bool},
+    ok: {Impl.writes(n, k) == True{} : Bool})
   -> {Impl.position(Impl.advance(n, e, k, base, interval,
       Impl.State{position, budget, anchor, ckpt, stopped})) ==
     Nat.add(position, List.length(&2, U32, Spec.committed(targets, n,
       stopped))) : Nat}:
-  match n:
-    case 0n:
-      match stopped:
-        case True{}:
-          Equal.sym(Nat, Nat.add(position, 0n), position,
-            AcceptProof.add_zero(position))
-        case False{}:
-          %Equal.sym(Nat, List.length(&2, U32, List.take(&2, U32, targets, 0n)),
-              0n, take_length(targets, 0n, le))
-            : {position == Nat.add(position, _) : Nat}
-          Equal.sym(Nat, Nat.add(position, 0n), position,
-            AcceptProof.add_zero(position))
-    case 1n+i:
-      match stopped:
-        case True{}:
-          Equal.sym(Nat, Nat.add(position, 0n), position,
-            AcceptProof.add_zero(position))
-        case False{}:
-          %Equal.sym(Nat,
-              List.length(&2, U32, List.take(&2, U32, targets, 1n+i)), 1n+i,
-              take_length(targets, 1n+i, le))
-            : {Nat.add(position, 1n+i) == Nat.add(position, _) : Nat}
-          {==}
+  match stopped:
+    case True{}:
+      Equal.sym(Nat, Nat.add(position, 0n), position,
+        AcceptProof.add_zero(position))
+    case False{}:
+      %Equal.sym(Impl.State, Impl.advance(n, e, k, base, interval, Impl.State{position, budget, anchor, ckpt, False{}}), Impl.commit(True{}, n, e, k, base, interval, position, budget, anchor, ckpt),
+          advance_ok(n, e, k, base, interval, position, budget, anchor, ckpt,
+            ok))
+        : {Impl.position(_) == Nat.add(position,
+          List.length(&2, U32, Spec.committed(targets, n, False{}))) : Nat}
+      %Equal.sym(Nat, List.length(&2, U32, List.take(&2, U32, targets, n)), n,
+          take_length(targets, n, le))
+        : {Nat.add(position, n) == Nat.add(position, _) : Nat}
+      {==}
 
-def budget_gen(+n: Nat, -e: Bool, -k: Nat, -base: Nat, -interval: Nat,
+def budget_gen(+n: Nat, -e: Bool, +k: Nat, -base: Nat, -interval: Nat,
     -position: Nat, +budget: Nat, -anchor: Nat, -ckpt: Nat, +stopped: Bool,
     +targets: List<&2, U32>,
     le: {Nat.is_le(n, List.length(&2, U32, targets)) == True{} : Bool},
+    ok: {Impl.writes(n, k) == True{} : Bool},
     fits: {Nat.is_le(n, budget) == True{} : Bool})
   -> {Nat.add(Impl.budget(Impl.advance(n, e, k, base, interval,
       Impl.State{position, budget, anchor, ckpt, stopped})),
     List.length(&2, U32, Spec.committed(targets, n, stopped))) == budget
     : Nat}:
-  match n:
-    case 0n:
-      match stopped:
-        case True{}:
-          AcceptProof.add_zero(budget)
-        case False{}:
-          %Equal.sym(Nat, List.length(&2, U32, List.take(&2, U32, targets, 0n)),
-              0n, take_length(targets, 0n, le))
-            : {Nat.add(budget, _) == budget : Nat}
-          AcceptProof.add_zero(budget)
-    case 1n+i:
-      match stopped:
-        case True{}:
-          AcceptProof.add_zero(budget)
-        case False{}:
-          %Equal.sym(Nat,
-              List.length(&2, U32, List.take(&2, U32, targets, 1n+i)), 1n+i,
-              take_length(targets, 1n+i, le))
-            : {Nat.add(Nat.sub(budget, 1n+i), _) == budget : Nat}
-          sub_add(budget, 1n+i, fits)
+  match stopped:
+    case True{}:
+      AcceptProof.add_zero(budget)
+    case False{}:
+      %Equal.sym(Impl.State, Impl.advance(n, e, k, base, interval, Impl.State{position, budget, anchor, ckpt, False{}}), Impl.commit(True{}, n, e, k, base, interval, position, budget, anchor, ckpt),
+          advance_ok(n, e, k, base, interval, position, budget, anchor, ckpt,
+            ok))
+        : {Nat.add(Impl.budget(_),
+          List.length(&2, U32, Spec.committed(targets, n, False{}))) == budget
+          : Nat}
+      %Equal.sym(Nat, List.length(&2, U32, List.take(&2, U32, targets, n)), n,
+          take_length(targets, n, le))
+        : {Nat.add(Nat.sub(budget, n), _) == budget : Nat}
+      sub_add(budget, n, fits)
 
-def live_gen(+n: Nat, +stopped: Bool, +e: Bool, -k: Nat, -base: Nat,
+def live_commit(+n: Nat, +e: Bool, -k: Nat, -base: Nat, -interval: Nat,
+    -position: Nat, +budget: Nat, -anchor: Nat, -ckpt: Nat,
+    ends: {Bool.or(e, Nat.is_lt(n, budget)) == True{} : Bool})
+  -> {Bool.or(Impl.stopped(Impl.commit(True{}, n, e, k, base, interval, position, budget, anchor, ckpt)),
+    Nat.is_lt(0n, Impl.budget(Impl.commit(True{}, n, e, k, base, interval, position, budget, anchor, ckpt)))) == True{} : Bool}:
+  match e:
+    case True{}:
+      {==}
+    case False{}:
+      lt_sub(budget, n, ends)
+
+def live_gen(+n: Nat, +stopped: Bool, +e: Bool, +k: Nat, -base: Nat,
     -interval: Nat, -position: Nat, +budget: Nat, -anchor: Nat, -ckpt: Nat,
+    ok: {Impl.writes(n, k) == True{} : Bool},
     ends: {Bool.or(e, Nat.is_lt(n, budget)) == True{} : Bool})
   -> {Bool.or(Impl.stopped(Impl.advance(n, e, k, base, interval,
       Impl.State{position, budget, anchor, ckpt, stopped})),
     Nat.is_lt(0n, Impl.budget(Impl.advance(n, e, k, base, interval,
       Impl.State{position, budget, anchor, ckpt, stopped})))) == True{}
     : Bool}:
-  match n:
-    case 0n:
-      match stopped:
-        case True{}:
-          {==}
-        case False{}:
-          {==}
-    case 1n+i:
-      match stopped:
-        case True{}:
-          {==}
-        case False{}:
-          match e:
-            case True{}:
-              {==}
-            case False{}:
-              lt_sub(budget, 1n+i, ends)
+  match stopped:
+    case True{}:
+      {==}
+    case False{}:
+      %Equal.sym(Impl.State, Impl.advance(n, e, k, base, interval, Impl.State{position, budget, anchor, ckpt, False{}}), Impl.commit(True{}, n, e, k, base, interval, position, budget, anchor, ckpt),
+          advance_ok(n, e, k, base, interval, position, budget, anchor, ckpt,
+            ok))
+        : {Bool.or(Impl.stopped(_), Nat.is_lt(0n, Impl.budget(_))) == True{}
+          : Bool}
+      live_commit(n, e, k, base, interval, position, budget, anchor, ckpt, ends)
 
-def anchor_gen(+n: Nat, -e: Bool, -k: Nat, -base: Nat, -interval: Nat,
-    -position: Nat, -budget: Nat, -anchor: Nat, -ckpt: Nat,
-    +targets: List<&2, U32>,
+def anchor_commit(+n: Nat, +targets: List<&2, U32>,
     pos: {Nat.is_lt(0n, n) == True{} : Bool},
     le: {Nat.is_le(n, List.length(&2, U32, targets)) == True{} : Bool})
-  -> {List.get(&2, U32, targets, Impl.anchor(Impl.advance(n, e, k, base,
-      interval, Impl.State{position, budget, anchor, ckpt, False{}}))) ==
-    List.last(&2, U32, Spec.committed(targets, n, False{})) : Maybe<&2, U32>}:
+  -> {List.get(&2, U32, targets, Nat.sub(n, 1n)) ==
+    List.last(&2, U32, List.take(&2, U32, targets, n)) : Maybe<&2, U32>}:
   match n:
     case 0n:
-      Empty.absurd({List.get(&2, U32, targets, Impl.anchor(Impl.advance(0n, e,
-          k, base, interval, Impl.State{position, budget, anchor, ckpt,
-          False{}}))) ==
-        List.last(&2, U32, Spec.committed(targets, 0n, False{}))
-        : Maybe<&2, U32>}, AcceptProof.false_true(pos))
+      Empty.absurd({List.get(&2, U32, targets, 0n) ==
+        List.last(&2, U32, List.take(&2, U32, targets, 0n)) : Maybe<&2, U32>},
+        AcceptProof.false_true(pos))
     case 1n+i:
+      %Equal.sym(Nat, Nat.sub(i, 0n), i, sub_zero(i))
+        : {List.get(&2, U32, targets, _) ==
+          List.last(&2, U32, List.take(&2, U32, targets, 1n+i))
+          : Maybe<&2, U32>}
       Equal.sym(Maybe<&2, U32>,
         List.last(&2, U32, List.take(&2, U32, targets, 1n+i)),
         List.get(&2, U32, targets, i), get_last(targets, i, le))
 
-def refresh_gen(+n: Nat, -e: Bool, -k: Nat, -base: Nat, -interval: Nat,
-    +position: Nat, -budget: Nat, -anchor: Nat, -ckpt: Nat)
-  -> {Impl.refresh(position, n) == Impl.position(Impl.advance(n, e, k, base,
-      interval, Impl.State{position, budget, anchor, ckpt, False{}})) : Nat}:
-  match n:
-    case 0n:
-      AcceptProof.add_zero(position)
-    case 1n+i:
-      {==}
+def anchor_gen(+n: Nat, -e: Bool, +k: Nat, -base: Nat, -interval: Nat,
+    -position: Nat, -budget: Nat, -anchor: Nat, -ckpt: Nat,
+    +targets: List<&2, U32>,
+    pos: {Nat.is_lt(0n, n) == True{} : Bool},
+    le: {Nat.is_le(n, List.length(&2, U32, targets)) == True{} : Bool},
+    ok: {Impl.writes(n, k) == True{} : Bool})
+  -> {List.get(&2, U32, targets, Impl.anchor(Impl.advance(n, e, k, base, interval, Impl.State{position, budget, anchor, ckpt, False{}}))) ==
+    List.last(&2, U32, Spec.committed(targets, n, False{})) : Maybe<&2, U32>}:
+  %Equal.sym(Impl.State, Impl.advance(n, e, k, base, interval, Impl.State{position, budget, anchor, ckpt, False{}}), Impl.commit(True{}, n, e, k, base, interval, position, budget, anchor, ckpt),
+      advance_ok(n, e, k, base, interval, position, budget, anchor, ckpt, ok))
+    : {List.get(&2, U32, targets, Impl.anchor(_)) ==
+      List.last(&2, U32, Spec.committed(targets, n, False{})) : Maybe<&2, U32>}
+  anchor_commit(n, targets, pos, le)
 
-def eos_gen(+n: Nat, +stopped: Bool, +e: Bool, -k: Nat, -base: Nat,
+def refresh_gen(+n: Nat, -e: Bool, +k: Nat, -base: Nat, -interval: Nat,
+    +position: Nat, -budget: Nat, -anchor: Nat, -ckpt: Nat,
+    ok: {Impl.writes(n, k) == True{} : Bool})
+  -> {Impl.refresh(position, n) == Impl.position(Impl.advance(n, e, k, base, interval, Impl.State{position, budget, anchor, ckpt, False{}})) : Nat}:
+  %Equal.sym(Impl.State, Impl.advance(n, e, k, base, interval, Impl.State{position, budget, anchor, ckpt, False{}}), Impl.commit(True{}, n, e, k, base, interval, position, budget, anchor, ckpt),
+      advance_ok(n, e, k, base, interval, position, budget, anchor, ckpt, ok))
+    : {Impl.refresh(position, n) == Impl.position(_) : Nat}
+  {==}
+
+def eos_commit(+ok: Bool, -n: Nat, +e: Bool, -k: Nat, -base: Nat,
+    -interval: Nat, -position: Nat, -budget: Nat, -anchor: Nat, -ckpt: Nat,
+    ended: {e == True{} : Bool})
+  -> {Impl.stopped(Impl.commit(ok, n, e, k, base, interval, position, budget,
+      anchor, ckpt)) == True{} : Bool}:
+  match ok:
+    case False{}:
+      {==}
+    case True{}:
+      ended
+
+def eos_gen(+n: Nat, +stopped: Bool, +e: Bool, +k: Nat, -base: Nat,
     -interval: Nat, -position: Nat, -budget: Nat, -anchor: Nat, -ckpt: Nat,
     ended: {e == True{} : Bool})
   -> {Impl.stopped(Impl.advance(n, e, k, base, interval,
       Impl.State{position, budget, anchor, ckpt, stopped})) == True{} : Bool}:
-  match n:
-    case 0n:
-      match stopped:
-        case True{}:
-          {==}
-        case False{}:
-          {==}
-    case 1n+i:
-      match stopped:
-        case True{}:
-          {==}
-        case False{}:
-          ended
+  match stopped:
+    case True{}:
+      {==}
+    case False{}:
+      eos_commit(Impl.writes(n, k), n, e, k, base, interval, position, budget,
+        anchor, ckpt, ended)
 
 def steps_gen(+n: Nat, +e: Bool, +k: Nat, +targets: List<&2, U32>,
     live: {e == False{} : Bool},
@@ -448,12 +417,15 @@ def offset_gen(+n: Nat, +e: Bool, +k: Nat, +targets: List<&2, U32>,
   %Equal.sym(Bool, e, False{}, live)
     : {Impl.offset(n, _, k) ==
       List.length(&2, U32, Spec.uncommitted(targets, n)) : Nat}
+  %Equal.sym(Nat, Impl.full(Nat.is_gt(n, k), n, k), n, full_eq(n, k, le))
+    : {Nat.sub(1n+k, _) ==
+      List.length(&2, U32, Spec.uncommitted(targets, n)) : Nat}
   %Equal.sym(Nat, List.length(&2, U32, List.drop(&2, U32, targets, n)),
       Nat.sub(List.length(&2, U32, targets), n), drop_length(targets, n))
-    : {Impl.offset(n, False{}, k) == _ : Nat}
+    : {Nat.sub(1n+k, n) == _ : Nat}
   %Equal.sym(Nat, List.length(&2, U32, targets), 1n+k, shaped)
-    : {Impl.offset(n, False{}, k) == Nat.sub(_, n) : Nat}
-  keep_eq(n, k, le)
+    : {Nat.sub(1n+k, n) == Nat.sub(_, n) : Nat}
+  {==}
 
 # The two halves of accept_bounds.
 def count_le_targets(+targets: List<&2, U32>, +proposals: List<&2, U32>,
@@ -484,6 +456,16 @@ def count_le_window(+targets: List<&2, U32>, +proposals: List<&2, U32>,
     AcceptLaws.accept_bounds(targets, proposals, stops, budget, checkpoint,
       shaped))
 
+def usable(+targets: List<&2, U32>, +proposals: List<&2, U32>,
+    +stops: List<&2, U32>, +budget: Nat, +checkpoint: Nat,
+    +shaped: {List.length(&2, U32, targets) ==
+      1n+List.length(&2, U32, proposals) : Nat})
+  -> {Impl.writes(Accept.count(Accept.accept(targets, proposals, stops, budget, checkpoint)), List.length(&2, U32, proposals)) == True{} : Bool}:
+  ok_of(Accept.count(Accept.accept(targets, proposals, stops, budget, checkpoint)), List.length(&2, U32, proposals),
+    AcceptLaws.accept_progress(targets, proposals, stops, budget, checkpoint,
+      shaped),
+    count_le_window(targets, proposals, stops, budget, checkpoint, shaped))
+
 # The laws: instantiate at the verdict of Accept.accept, with the count's
 # bounds, progress, budget and characterization from the exl3_accept laws.
 def Laws.advance_position(targets, proposals, stops, budget, checkpoint, base,
@@ -492,7 +474,7 @@ def Laws.advance_position(targets, proposals, stops, budget, checkpoint, base,
     Accept.count(Accept.accept(targets, proposals, stops, budget, checkpoint)),
     Accept.eos(Accept.accept(targets, proposals, stops, budget, checkpoint)),
     List.length(&2, U32, proposals), base, interval, position, budget, anchor,
-    checkpoint, stopped, targets, count_le_targets(targets, proposals, stops, budget, checkpoint, shaped))
+    checkpoint, stopped, targets, count_le_targets(targets, proposals, stops, budget, checkpoint, shaped), usable(targets, proposals, stops, budget, checkpoint, shaped))
 
 def Laws.advance_replay(targets, proposals, stops, budget, checkpoint, shaped,
     live):
@@ -504,8 +486,7 @@ def Laws.advance_replay(targets, proposals, stops, budget, checkpoint, shaped,
       Accept.count(Accept.accept(targets, proposals, stops, budget, checkpoint)),
       Accept.eos(Accept.accept(targets, proposals, stops, budget, checkpoint)),
       List.length(&2, U32, proposals), targets, live, count_le_window(targets, proposals, stops, budget, checkpoint, shaped), shaped),
-    AcceptLaws.accept_progress(targets, proposals, stops, budget, checkpoint,
-      shaped))
+    usable(targets, proposals, stops, budget, checkpoint, shaped))
 
 def Laws.advance_refresh(targets, proposals, stops, budget, checkpoint, base,
     interval, position, anchor, shaped):
@@ -513,7 +494,7 @@ def Laws.advance_refresh(targets, proposals, stops, budget, checkpoint, base,
       Accept.count(Accept.accept(targets, proposals, stops, budget, checkpoint)),
       Accept.eos(Accept.accept(targets, proposals, stops, budget, checkpoint)),
       List.length(&2, U32, proposals), base, interval, position, budget,
-      anchor, checkpoint),
+      anchor, checkpoint, usable(targets, proposals, stops, budget, checkpoint, shaped)),
     count_le_window(targets, proposals, stops, budget, checkpoint, shaped))
 
 def Laws.advance_anchor(targets, proposals, stops, budget, checkpoint, base,
@@ -525,7 +506,7 @@ def Laws.advance_anchor(targets, proposals, stops, budget, checkpoint, base,
     checkpoint, targets,
     AcceptLaws.accept_progress(targets, proposals, stops, budget, checkpoint,
       shaped),
-    count_le_targets(targets, proposals, stops, budget, checkpoint, shaped))
+    count_le_targets(targets, proposals, stops, budget, checkpoint, shaped), usable(targets, proposals, stops, budget, checkpoint, shaped))
 
 def Laws.advance_budget(targets, proposals, stops, budget, checkpoint, base,
     interval, position, anchor, stopped, shaped, positive):
@@ -533,7 +514,7 @@ def Laws.advance_budget(targets, proposals, stops, budget, checkpoint, base,
     Accept.count(Accept.accept(targets, proposals, stops, budget, checkpoint)),
     Accept.eos(Accept.accept(targets, proposals, stops, budget, checkpoint)),
     List.length(&2, U32, proposals), base, interval, position, budget, anchor,
-    checkpoint, stopped, targets, count_le_targets(targets, proposals, stops, budget, checkpoint, shaped),
+    checkpoint, stopped, targets, count_le_targets(targets, proposals, stops, budget, checkpoint, shaped), usable(targets, proposals, stops, budget, checkpoint, shaped),
     AcceptLaws.accept_budget(targets, proposals, stops, budget, checkpoint,
       shaped, positive))
 
@@ -544,7 +525,7 @@ def Laws.advance_budget_live(targets, proposals, stops, budget, checkpoint,
     stopped,
     Accept.eos(Accept.accept(targets, proposals, stops, budget, checkpoint)),
     List.length(&2, U32, proposals), base, interval, position, budget, anchor,
-    checkpoint,
+    checkpoint, usable(targets, proposals, stops, budget, checkpoint, shaped),
     explains_ends(
       Accept.count(Accept.accept(targets, proposals, stops, budget, checkpoint)),
       Accept.eos(Accept.accept(targets, proposals, stops, budget, checkpoint)),
@@ -687,7 +668,7 @@ def le_add_succ(+o: Nat, -q: Nat, -bp: Nat,
 
 # No wrap while the remainder stays below the interval.
 def mod_add(+a: Nat, +j: Nat, +bp: Nat,
-    fits: {Nat.is_le(Nat.add(Nat.mod(a, 1n+bp), j), bp) == True{} : Bool})
+    +fits: {Nat.is_le(Nat.add(Nat.mod(a, 1n+bp), j), bp) == True{} : Bool})
   -> {Nat.mod(Nat.add(a, j), 1n+bp) == Nat.add(Nat.mod(a, 1n+bp), j) : Nat}:
   match j:
     case 0n:
@@ -715,13 +696,6 @@ def mod_add(+a: Nat, +j: Nat, +bp: Nat,
         : {wrap(1n+_, bp) == 1n+Nat.add(Nat.mod(a, 1n+bp), q) : Nat}
       wrap_id(Nat.add(Nat.mod(a, 1n+bp), q), bp,
         le_add_succ(Nat.mod(a, 1n+bp), q, bp, fits))
-
-def sub_zero(+n: Nat) -> {Nat.sub(n, 0n) == n : Nat}:
-  match n:
-    case 0n:
-      {==}
-    case 1n+p:
-      {==}
 
 def sub_add_comm(+position: Nat, +base: Nat, +j: Nat,
     above: {Nat.is_le(base, position) == True{} : Bool})
@@ -839,7 +813,7 @@ def room(+o: Nat, +bp: Nat, +j: Nat,
 # the distance 1 + bp - o to the next one.
 def no_within(+m: Nat, +position: Nat, +base: Nat, +bp: Nat,
     +above: {Nat.is_le(base, position) == True{} : Bool},
-    lt: {Nat.is_lt(m, Nat.sub(1n+bp,
+    +lt: {Nat.is_lt(m, Nat.sub(1n+bp,
       Nat.mod(Nat.sub(position, base), 1n+bp))) == True{} : Bool})
   -> {Spec.within(m, position, base, 1n+bp) == False{} : Bool}:
   match m:
@@ -885,6 +859,11 @@ def crosses_gen(+count: Nat, +position: Nat, +base: Nat, +bp: Nat,
         le_succ_lt(r, Nat.sub(1n+bp, Nat.mod(Nat.sub(position, base), 1n+bp)),
           le))
 
+def and_true(+a: Bool, -b: Bool, h: {a == True{} : Bool})
+  -> {Bool.and(a, b) == b : Bool}:
+  %Equal.sym(Bool, a, True{}, h) : {Bool.and(_, b) == b : Bool}
+  {==}
+
 # The count never exceeds the distance c to the next boundary: with c in
 # the window it is the accept checkpoint, else the window itself is below c.
 def count_le_c(+targets: List<&2, U32>, +proposals: List<&2, U32>,
@@ -923,9 +902,298 @@ def Laws.round_checkpoint(targets, proposals, stops, budget, base, interval,
             List.length(&2, U32, proposals)))),
         position, base, bp, above,
         count_le_c(targets, proposals, stops, budget,
-          Nat.is_le(Nat.sub(1n+bp, Nat.mod(Nat.sub(position, base), 1n+bp)),
-            List.length(&2, U32, proposals)),
+          Bool.and(Nat.is_lt(0n, Nat.sub(1n+bp, Nat.mod(Nat.sub(position, base),
+              1n+bp))),
+            Nat.is_le(Nat.sub(1n+bp, Nat.mod(Nat.sub(position, base), 1n+bp)),
+              List.length(&2, U32, proposals))),
           Nat.sub(1n+bp, Nat.mod(Nat.sub(position, base), 1n+bp)),
-          shaped, {==},
+          shaped,
+          and_true(Nat.is_lt(0n, Nat.sub(1n+bp,
+              Nat.mod(Nat.sub(position, base), 1n+bp))),
+            Nat.is_le(Nat.sub(1n+bp, Nat.mod(Nat.sub(position, base), 1n+bp)),
+              List.length(&2, U32, proposals)),
+            sub_pos(Nat.mod(Nat.sub(position, base), 1n+bp), bp,
+              mod_le(Nat.sub(position, base), bp))),
           sub_pos(Nat.mod(Nat.sub(position, base), 1n+bp), bp,
             mod_le(Nat.sub(position, base), bp))))
+
+# Laws on arbitrary decisions: the eos consumer values, failing closed and
+# the absorbing stop.
+def sub_self(+k: Nat) -> {Nat.sub(k, k) == 0n : Nat}:
+  match k:
+    case 0n:
+      {==}
+    case 1n+p:
+      sub_self(p)
+
+def lt_not_le(+w: Nat, +m: Nat, h: {Nat.is_lt(w, m) == True{} : Bool})
+  -> {Nat.is_le(m, w) == False{} : Bool}:
+  match w m:
+    case 0n 0n:
+      Empty.absurd({Nat.is_le(0n, 0n) == False{} : Bool},
+        AcceptProof.false_true(h))
+    case 0n 1n+q:
+      {==}
+    case 1n+p 0n:
+      Empty.absurd({Nat.is_le(0n, 1n+p) == False{} : Bool},
+        AcceptProof.false_true(h))
+    case 1n+p 1n+q:
+      lt_not_le(p, q, h)
+
+def gt_writes(+n: Nat, +w: Nat, h: {Nat.is_lt(1n+w, n) == True{} : Bool})
+  -> {Impl.writes(n, w) == False{} : Bool}:
+  match n:
+    case 0n:
+      Empty.absurd({Impl.writes(0n, w) == False{} : Bool},
+        AcceptProof.false_true(h))
+    case 1n+m:
+      lt_not_le(w, m, h)
+
+def ck_commit(+ok: Bool, -count: Nat, -eos: Bool, -window: Nat, -base: Nat,
+    -interval: Nat, -position: Nat, -budget: Nat, -anchor: Nat)
+  -> {Impl.checkpoint_of(Impl.commit(ok, count, eos, window, base, interval,
+      position, budget, anchor, Impl.checkpoint(position, base, interval,
+        window))) ==
+    Impl.checkpoint(Impl.position(Impl.commit(ok, count, eos, window, base,
+      interval, position, budget, anchor, Impl.checkpoint(position, base,
+        interval, window))), base, interval, window) : Nat}:
+  match ok:
+    case False{}:
+      {==}
+    case True{}:
+      {==}
+
+def Laws.stop_commits_nothing(targets, count):
+  {==}
+
+def Laws.advance_replay_eos(count, k):
+  ({==}, sub_self(k))
+
+def Laws.advance_error_stops(eos, window, base, interval, position, budget,
+    anchor, checkpoint, stopped):
+  match stopped:
+    case True{}:
+      {==}
+    case False{}:
+      {==}
+
+def Laws.advance_range_stops(count, eos, window, base, interval, position,
+    budget, anchor, checkpoint, stopped, above):
+  match stopped:
+    case True{}:
+      {==}
+    case False{}:
+      %Equal.sym(Bool, Impl.writes(count, window), False{},
+          gt_writes(count, window, above))
+        : {Impl.commit(_, count, eos, window, base, interval, position, budget,
+          anchor, checkpoint) ==
+          Impl.State{position, budget, anchor, checkpoint, True{}}
+          : Impl.State}
+      {==}
+
+def Laws.stop_absorbing(verdicts, window, base, interval, position, budget,
+    anchor, checkpoint):
+  match verdicts:
+    case Nil{}:
+      {==}
+    case Accept.Verdict{count, eos} <> rest:
+      Laws.stop_absorbing(rest, window, base, interval, position, budget,
+        anchor, checkpoint)
+
+def Laws.checkpoint_invariant(count, eos, window, base, interval, position,
+    budget, anchor, stopped):
+  match stopped:
+    case True{}:
+      {==}
+    case False{}:
+      ck_commit(Impl.writes(count, window), count, eos, window, base,
+        interval, position, budget, anchor)
+
+# The checkpoint formula against _greedy_checkpoint's first-boundary scan.
+def le_refl(+n: Nat) -> {Nat.is_le(n, n) == True{} : Bool}:
+  match n:
+    case 0n:
+      {==}
+    case 1n+p:
+      le_refl(p)
+
+def sub_succ(+o: Nat, +bp: Nat, le: {Nat.is_le(o, bp) == True{} : Bool})
+  -> {Nat.sub(1n+bp, o) == 1n+Nat.sub(bp, o) : Nat}:
+  match o bp:
+    case 0n _:
+      %Equal.sym(Nat, Nat.sub(bp, 0n), bp, sub_zero(bp))
+        : {1n+bp == 1n+_ : Nat}
+      {==}
+    case 1n+p 0n:
+      Empty.absurd({Nat.sub(1n, 1n+p) == 1n+Nat.sub(0n, 1n+p) : Nat},
+        AcceptProof.false_true(le))
+    case 1n+p 1n+q:
+      sub_succ(p, q, le)
+
+def add_sub(+o: Nat, +bp: Nat, le: {Nat.is_le(o, bp) == True{} : Bool})
+  -> {Nat.add(o, Nat.sub(bp, o)) == bp : Nat}:
+  match o bp:
+    case 0n _:
+      sub_zero(bp)
+    case 1n+p 0n:
+      Empty.absurd({Nat.add(1n+p, Nat.sub(0n, 1n+p)) == 0n : Nat},
+        AcceptProof.false_true(le))
+    case 1n+p 1n+q:
+      %add_sub(p, q, le) : {1n+Nat.add(p, Nat.sub(q, p)) == 1n+_ : Nat}
+      {==}
+
+def le_succ_is_lt(+a: Nat, +w: Nat)
+  -> {Nat.is_le(1n+a, w) == Nat.is_lt(a, w) : Bool}:
+  match a w:
+    case 0n 0n:
+      {==}
+    case 0n 1n:
+      {==}
+    case 0n 2n+q:
+      {==}
+    case 1n+p 0n:
+      {==}
+    case 1n+p 1n+q:
+      le_succ_is_lt(p, q)
+
+def or_left_false(+a: Bool, -b: Bool, h: {Bool.or(a, b) == False{} : Bool})
+  -> {a == False{} : Bool}:
+  match a:
+    case True{}:
+      Empty.absurd({True{} == False{} : Bool}, AcceptProof.true_false(h))
+    case False{}:
+      {==}
+
+def fits_at(+o: Nat, +bp: Nat, le: {Nat.is_le(o, bp) == True{} : Bool})
+  -> {Nat.is_le(Nat.add(o, Nat.sub(bp, o)), bp) == True{} : Bool}:
+  %Equal.sym(Nat, Nat.add(o, Nat.sub(bp, o)), bp, add_sub(o, bp, le))
+    : {Nat.is_le(_, bp) == True{} : Bool}
+  le_refl(bp)
+
+# c = 1 + bp - o steps from x reach the next multiple of 1 + bp.
+def mod_at(+x: Nat, +bp: Nat)
+  -> {Nat.mod(Nat.add(x, Nat.sub(1n+bp, Nat.mod(x, 1n+bp))), 1n+bp) == 0n
+    : Nat}:
+  %Equal.sym(Nat, Nat.sub(1n+bp, Nat.mod(x, 1n+bp)),
+      1n+Nat.sub(bp, Nat.mod(x, 1n+bp)),
+      sub_succ(Nat.mod(x, 1n+bp), bp, mod_le(x, bp)))
+    : {Nat.mod(Nat.add(x, _), 1n+bp) == 0n : Nat}
+  %Equal.sym(Nat, Nat.add(x, 1n+Nat.sub(bp, Nat.mod(x, 1n+bp))),
+      1n+Nat.add(x, Nat.sub(bp, Nat.mod(x, 1n+bp))),
+      AcceptProof.add_succ(x, Nat.sub(bp, Nat.mod(x, 1n+bp))))
+    : {Nat.mod(_, 1n+bp) == 0n : Nat}
+  %Equal.sym(Nat, Nat.mod(1n+Nat.add(x, Nat.sub(bp, Nat.mod(x, 1n+bp))), 1n+bp),
+      wrap(1n+Nat.mod(Nat.add(x, Nat.sub(bp, Nat.mod(x, 1n+bp))), 1n+bp), bp),
+      mod_succ(Nat.add(x, Nat.sub(bp, Nat.mod(x, 1n+bp))), bp))
+    : {_ == 0n : Nat}
+  %Equal.sym(Nat, Nat.mod(Nat.add(x, Nat.sub(bp, Nat.mod(x, 1n+bp))), 1n+bp),
+      Nat.add(Nat.mod(x, 1n+bp), Nat.sub(bp, Nat.mod(x, 1n+bp))),
+      mod_add(x, Nat.sub(bp, Nat.mod(x, 1n+bp)), bp,
+        fits_at(Nat.mod(x, 1n+bp), bp, mod_le(x, bp))))
+    : {wrap(1n+_, bp) == 0n : Nat}
+  %Equal.sym(Nat, Nat.add(Nat.mod(x, 1n+bp), Nat.sub(bp, Nat.mod(x, 1n+bp))),
+      bp, add_sub(Nat.mod(x, 1n+bp), bp, mod_le(x, bp)))
+    : {wrap(1n+_, bp) == 0n : Nat}
+  %Equal.sym(Bool, Nat.is_eq(bp, bp), True{}, eq_refl(bp))
+    : {pick0(_, 1n+bp) == 0n : Nat}
+  {==}
+
+def at_boundary(+position: Nat, +base: Nat, +bp: Nat,
+    above: {Nat.is_le(base, position) == True{} : Bool})
+  -> {Spec.boundary(Nat.add(position, Nat.sub(1n+bp, Nat.mod(Nat.sub(position, base), 1n+bp))), base, 1n+bp) == True{} : Bool}:
+  %Equal.sym(Nat, Nat.sub(Nat.add(position, Nat.sub(1n+bp, Nat.mod(Nat.sub(position, base), 1n+bp))), base),
+      Nat.add(Nat.sub(position, base), Nat.sub(1n+bp, Nat.mod(Nat.sub(position, base), 1n+bp))), sub_add_comm(position, base, Nat.sub(1n+bp, Nat.mod(Nat.sub(position, base), 1n+bp)), above))
+    : {Nat.is_eq(Nat.mod(_, 1n+bp), 0n) == True{} : Bool}
+  %Equal.sym(Nat, Nat.mod(Nat.add(Nat.sub(position, base), Nat.sub(1n+bp, Nat.mod(Nat.sub(position, base), 1n+bp))), 1n+bp), 0n, mod_at(Nat.sub(position, base), bp))
+    : {Nat.is_eq(_, 0n) == True{} : Bool}
+  {==}
+
+def no_boundary(+j: Nat, +position: Nat, +base: Nat, +bp: Nat,
+    above: {Nat.is_le(base, position) == True{} : Bool},
+    jpos: {Nat.is_lt(0n, j) == True{} : Bool},
+    jlt: {Nat.is_lt(j, Nat.sub(1n+bp, Nat.mod(Nat.sub(position, base), 1n+bp))) == True{} : Bool})
+  -> {Spec.boundary(Nat.add(position, j), base, 1n+bp) == False{} : Bool}:
+  match j:
+    case 0n:
+      Empty.absurd({Spec.boundary(Nat.add(position, 0n), base, 1n+bp) ==
+        False{} : Bool}, AcceptProof.false_true(jpos))
+    case 1n+r:
+      or_left_false(Spec.boundary(Nat.add(position, 1n+r), base, 1n+bp),
+        Spec.within(r, position, base, 1n+bp),
+        no_within(1n+r, position, base, bp, above, jlt))
+
+def lt_add(+start: Nat, +q: Nat)
+  -> {Nat.is_lt(start, 1n+Nat.add(q, start)) == True{} : Bool}:
+  match start:
+    case 0n:
+      {==}
+    case 1n+t:
+      %Equal.sym(Nat, Nat.add(q, 1n+t), 1n+Nat.add(q, t),
+          AcceptProof.add_succ(q, t)) : {Nat.is_lt(t, _) == True{} : Bool}
+      lt_add(t, q)
+
+def lt_of_sum(+q: Nat, +start: Nat, -c: Nat,
+    hsum: {Nat.add(1n+q, start) == c : Nat})
+  -> {Nat.is_lt(start, c) == True{} : Bool}:
+  %hsum : {Nat.is_lt(start, _) == True{} : Bool}
+  lt_add(start, q)
+
+# Scanning from start with d steps to the boundary c = start + d.
+def scan(+fuel: Nat, +start: Nat, +d: Nat, +position: Nat, +base: Nat,
+    +bp: Nat, +above: {Nat.is_le(base, position) == True{} : Bool},
+    spos: {Nat.is_lt(0n, start) == True{} : Bool},
+    +hsum: {Nat.add(d, start) == Nat.sub(1n+bp, Nat.mod(Nat.sub(position, base), 1n+bp)) : Nat})
+  -> {Spec.first(fuel, start, position, base, 1n+bp) ==
+    Impl.fit(Nat.is_lt(d, fuel), Nat.sub(1n+bp, Nat.mod(Nat.sub(position, base), 1n+bp))) : Nat}:
+  match fuel d:
+    case 0n 0n:
+      {==}
+    case 0n 1n+q:
+      {==}
+    case 1n+f 0n:
+      %Equal.sym(Nat, start, Nat.sub(1n+bp, Nat.mod(Nat.sub(position, base), 1n+bp)), hsum)
+        : {Spec.found(Spec.boundary(Nat.add(position, _), base, 1n+bp), _,
+          Spec.first(f, 1n+_, position, base, 1n+bp)) == Nat.sub(1n+bp, Nat.mod(Nat.sub(position, base), 1n+bp)) : Nat}
+      %Equal.sym(Bool, Spec.boundary(Nat.add(position, Nat.sub(1n+bp, Nat.mod(Nat.sub(position, base), 1n+bp))), base, 1n+bp),
+          True{}, at_boundary(position, base, bp, above))
+        : {Spec.found(_, Nat.sub(1n+bp, Nat.mod(Nat.sub(position, base), 1n+bp)), Spec.first(f, 1n+Nat.sub(1n+bp, Nat.mod(Nat.sub(position, base), 1n+bp)), position, base, 1n+bp)) ==
+          Nat.sub(1n+bp, Nat.mod(Nat.sub(position, base), 1n+bp)) : Nat}
+      {==}
+    case 1n+f 1n+q:
+      %Equal.sym(Bool, Spec.boundary(Nat.add(position, start), base, 1n+bp),
+          False{},
+          no_boundary(start, position, base, bp, above, spos,
+            lt_of_sum(q, start, Nat.sub(1n+bp, Nat.mod(Nat.sub(position, base), 1n+bp)), hsum)))
+        : {Spec.found(_, start, Spec.first(f, 1n+start, position, base, 1n+bp))
+          == Impl.fit(Nat.is_lt(q, f), Nat.sub(1n+bp, Nat.mod(Nat.sub(position, base), 1n+bp))) : Nat}
+      scan(f, 1n+start, q, position, base, bp, above, {==},
+        Equal.trans(Nat, Nat.add(q, 1n+start), 1n+Nat.add(q, start), Nat.sub(1n+bp, Nat.mod(Nat.sub(position, base), 1n+bp)),
+          AcceptProof.add_succ(q, start), hsum))
+
+def Laws.checkpoint_refinement(position, base, interval, window, positive,
+    above):
+  match interval:
+    case 0n:
+      Empty.absurd({Impl.checkpoint(position, base, 0n, window) ==
+        Spec.checkpoint(position, base, 0n, window) : Nat},
+        AcceptProof.false_true(positive))
+    case 1n+bp:
+      %Equal.sym(Bool,
+          Bool.and(Nat.is_lt(0n, Nat.sub(1n+bp, Nat.mod(Nat.sub(position, base), 1n+bp))), Nat.is_le(Nat.sub(1n+bp, Nat.mod(Nat.sub(position, base), 1n+bp)), window)),
+          Nat.is_le(Nat.sub(1n+bp, Nat.mod(Nat.sub(position, base), 1n+bp)), window),
+          and_true(Nat.is_lt(0n, Nat.sub(1n+bp, Nat.mod(Nat.sub(position, base), 1n+bp))), Nat.is_le(Nat.sub(1n+bp, Nat.mod(Nat.sub(position, base), 1n+bp)), window),
+            sub_pos(Nat.mod(Nat.sub(position, base), 1n+bp), bp, mod_le(Nat.sub(position, base), bp))))
+        : {Impl.fit(_, Nat.sub(1n+bp, Nat.mod(Nat.sub(position, base), 1n+bp))) == Spec.first(window, 1n, position, base, 1n+bp) : Nat}
+      %Equal.sym(Nat, Spec.first(window, 1n, position, base, 1n+bp), Impl.fit(Nat.is_lt(Nat.sub(bp, Nat.mod(Nat.sub(position, base), 1n+bp)), window), Nat.sub(1n+bp, Nat.mod(Nat.sub(position, base), 1n+bp))),
+          scan(window, 1n, Nat.sub(bp, Nat.mod(Nat.sub(position, base), 1n+bp)), position, base, bp, above, {==},
+            Equal.trans(Nat, Nat.add(Nat.sub(bp, Nat.mod(Nat.sub(position, base), 1n+bp)), 1n), 1n+Nat.sub(bp, Nat.mod(Nat.sub(position, base), 1n+bp)), Nat.sub(1n+bp, Nat.mod(Nat.sub(position, base), 1n+bp)),
+              Equal.sym(Nat, 1n+Nat.sub(bp, Nat.mod(Nat.sub(position, base), 1n+bp)), Nat.add(Nat.sub(bp, Nat.mod(Nat.sub(position, base), 1n+bp)), 1n), add_one(Nat.sub(bp, Nat.mod(Nat.sub(position, base), 1n+bp)))),
+              Equal.sym(Nat, Nat.sub(1n+bp, Nat.mod(Nat.sub(position, base), 1n+bp)), 1n+Nat.sub(bp, Nat.mod(Nat.sub(position, base), 1n+bp)), sub_succ(Nat.mod(Nat.sub(position, base), 1n+bp), bp, mod_le(Nat.sub(position, base), bp))))))
+        : {Impl.fit(Nat.is_le(Nat.sub(1n+bp, Nat.mod(Nat.sub(position, base), 1n+bp)), window), Nat.sub(1n+bp, Nat.mod(Nat.sub(position, base), 1n+bp))) == _ : Nat}
+      %Equal.sym(Nat, Nat.sub(1n+bp, Nat.mod(Nat.sub(position, base), 1n+bp)), 1n+Nat.sub(bp, Nat.mod(Nat.sub(position, base), 1n+bp)), sub_succ(Nat.mod(Nat.sub(position, base), 1n+bp), bp, mod_le(Nat.sub(position, base), bp)))
+        : {Impl.fit(Nat.is_le(_, window), Nat.sub(1n+bp, Nat.mod(Nat.sub(position, base), 1n+bp))) ==
+          Impl.fit(Nat.is_lt(Nat.sub(bp, Nat.mod(Nat.sub(position, base), 1n+bp)), window), Nat.sub(1n+bp, Nat.mod(Nat.sub(position, base), 1n+bp))) : Nat}
+      %Equal.sym(Bool, Nat.is_le(1n+Nat.sub(bp, Nat.mod(Nat.sub(position, base), 1n+bp)), window), Nat.is_lt(Nat.sub(bp, Nat.mod(Nat.sub(position, base), 1n+bp)), window),
+          le_succ_is_lt(Nat.sub(bp, Nat.mod(Nat.sub(position, base), 1n+bp)), window))
+        : {Impl.fit(_, Nat.sub(1n+bp, Nat.mod(Nat.sub(position, base), 1n+bp))) == Impl.fit(Nat.is_lt(Nat.sub(bp, Nat.mod(Nat.sub(position, base), 1n+bp)), window), Nat.sub(1n+bp, Nat.mod(Nat.sub(position, base), 1n+bp))) : Nat}
+      {==}

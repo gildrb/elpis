@@ -59,8 +59,8 @@ law advance_replay:
       Accept.count(Accept.accept(targets, proposals, stops, budget, checkpoint))))
     : Nat} &
   {Impl.writes(
-      Accept.count(Accept.accept(targets, proposals, stops, budget, checkpoint)))
-    == True{} : Bool}
+      Accept.count(Accept.accept(targets, proposals, stops, budget, checkpoint)),
+      List.length(&2, U32, proposals)) == True{} : Bool}
 
 # (b) An eos round fully commits the (discarded) GDN state of the ended job:
 # replay all k + 1 steps, no conv rewind.
@@ -205,6 +205,23 @@ law advance_error_stops:
   for +checkpoint: Nat
   for +stopped: Bool
   {Impl.advance(0n, eos, window, base, interval,
+      Impl.State{position, budget, anchor, checkpoint, stopped}) ==
+    Impl.State{position, budget, anchor, checkpoint, True{}} : Impl.State}
+
+# (e) A decision whose count exceeds window + 1 fails closed the same way.
+law advance_range_stops:
+  for +count: Nat
+  for +eos: Bool
+  for +window: Nat
+  for +base: Nat
+  for +interval: Nat
+  for +position: Nat
+  for +budget: Nat
+  for +anchor: Nat
+  for +checkpoint: Nat
+  for +stopped: Bool
+  for above: {Nat.is_lt(1n+window, count) == True{} : Bool}
+  {Impl.advance(count, eos, window, base, interval,
       Impl.State{position, budget, anchor, checkpoint, stopped}) ==
     Impl.State{position, budget, anchor, checkpoint, True{}} : Impl.State}
 

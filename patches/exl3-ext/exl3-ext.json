@@ -16,7 +16,7 @@
     "path": "/opt/venv/lib/python3.13/site-packages/exllamav3_ext.cpython-313-x86_64-linux-gnu.so",
     "base_sha256": "6d30690fdb76b3c4ad3fb5e69f0479707e410fc9b6194e2a5e32f4d7fe1fd8b3"
   },
-  "series_sha256": "0a4a5f3a7cb9de42e288a39d7f97d90b5eab704a09b433bfc95c9b72ad29d0da",
+  "series_sha256": "6d111f2be980c50b21334a0b6fdaa837a6bcfb4253ef19ca82f5afbb6d8f1c2f",
   "patches": [
     {
       "name": "0001-gdn-shared-carveout.patch",
@@ -53,6 +53,10 @@
     {
       "name": "6001-draft-graph.patch",
       "sha256": "40fdf0c622095dc2aa01f6262cfe5ac5c7c5216ee285bf61380caaf969f20c0e"
+    },
+    {
+      "name": "7001-norm-residual-fuse.patch",
+      "sha256": "e446ac76d805f9b7013de15d833dd4e32de134f16ab4a123745cba61f36c588d"
     }
   ],
   "files": {
@@ -102,7 +106,7 @@
     },
     "exllamav3_ext/norm.cu": {
       "pre": "b7b43921a19aa64cbe56786a9911c2796b5d4327818f0cae73c4cf358e6907df",
-      "post": "3c4564c8fe866346b5efffdca4a04370159a43fea5707719542b843f5135362e"
+      "post": "29045cccaf20255da0ff888e185b7dc4b09d695378fd0aaa0fad5c4634a612c8"
     },
     "exllamav3_ext/quant/exl3_gemm_m16.cu": {
       "pre": null,
@@ -120,6 +124,14 @@
       "pre": null,
       "post": "f7b9f4f2a970af9997a1af107dfa0c17383cc08b0690e35cabb97f96093fc3b8"
     },
+    "model/model.py": {
+      "pre": "013edc062e64d8fad98695491dd3fd504723752377db7e8f338c88e5afb85448",
+      "post": "cba42a2e9ea05ab0dc8c848e5af0759a3307d1c05dac8e380f98c38cb923f11b"
+    },
+    "model/model_ls.py": {
+      "pre": "b66c561c68d83b635d36606cc59df223c1b8259ffb39983d2b169ac69cebd915",
+      "post": "1fb0f910a3da229be6415c04dc4fa3d6ea1d372148edb44cb2e8069351467b2a"
+    },
     "modules/attention_fn/bc_attn.py": {
       "pre": "63f0768f313cb7015485d4655b433020f2e9e66bb44d971a9e6c65bc306994e0",
       "post": "75b26b226dd18fcfc101e252b7b3c9727a6a811348c6e580409a7237f3e4e9c1"
@@ -131,6 +143,10 @@
     "modules/gated_delta_net.py": {
       "pre": "955f2ae25509ccf695dac4b79721115bc51d9d63a7f6f1eeb0a42671b685cf5a",
       "post": "7541c964d13783a4ec0073fca2be1594decb290239880ea254084947632cf88b"
+    },
+    "modules/transformer.py": {
+      "pre": "6ea3147ffaf54568688a7fa10c385672ec06a1c21c3ab2cb30a1189b2d76bc4a",
+      "post": "558efd081bec60e114847477808f9351400855eb04c3835f01c52c9dd6b87480"
     }
   }
 }
