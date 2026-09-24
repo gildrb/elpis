@@ -44,7 +44,7 @@ BEND_DIRECTORY = "bend-exl3"
 BEND_IDENTITY = f"/opt/qwen/{BEND_DIRECTORY}/identity.json"
 BEND_SCHEMA = "litos-exl3-bend-accept/1"
 GPU_NAME = "NVIDIA GeForce RTX 3090"
-POWER_LIMIT_WATTS = 280.0
+POWER_LIMIT_WATTS = 350.0
 DRAFT_PROPOSALS = 7
 MANIFEST = ROOT / "prepare/exl3-manifest.json"
 VERIFIERS_REVISION = "ef47b2e96284a00bdcfc1012b9624b0c41ee6a0e"
@@ -531,7 +531,7 @@ def _gpu() -> dict[str, object]:
         name == GPU_NAME
         and float(limit) == POWER_LIMIT_WATTS
         and float(enforced) == POWER_LIMIT_WATTS,
-        "Measurement requires the declared RTX 3090 at 280 W; policy is never changed here",
+        "Measurement requires the declared RTX 3090 at 350 W; policy is never changed here",
     )
     return {
         "uuid": uuid,

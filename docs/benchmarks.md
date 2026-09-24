@@ -84,7 +84,7 @@ byte-identical identity (`identity-before.json`, `identity-after.json`):
 - Authenticated `/health` and `/v1/models` (`max_model_len` 262144 is the
   reported limit, not a capacity test).
 - Host `nvidia-smi`: exactly one `NVIDIA GeForce RTX 3090`, power limit and
-  enforced limit 280 W (declared operating point; never changed here), UUID,
+  enforced limit 350 W (declared operating point; never changed here), UUID,
   bus, driver and memory.
 - The host tokenizer file behind the target mount, whose bytes must equal both
   the served file and its manifest pin.
@@ -161,7 +161,9 @@ Not measured by this lane: TTFT, committed decode throughput, power/energy and
 
 ## 3. Power
 
-The declared operating point is 280 W, checked but never changed by the lane.
+The declared operating point is 350 W, the RTX 3090's default limit, set by the
+host NixOS power policy and checked but never changed by the lane. Segments
+measured at the earlier 280 W cap are not comparable with 350 W results.
 Sweep other caps only with explicit maintenance ownership, recording and
 restoring the original cap; containers must not modify host power or fans.
 Measure actual watts, clocks, temperature and throttle reasons over a stated
