@@ -16,7 +16,7 @@
     "path": "/opt/venv/lib/python3.13/site-packages/exllamav3_ext.cpython-313-x86_64-linux-gnu.so",
     "base_sha256": "6d30690fdb76b3c4ad3fb5e69f0479707e410fc9b6194e2a5e32f4d7fe1fd8b3"
   },
-  "series_sha256": "ed43026ef4aa6f68a058b81fc291de6ce17e471863638ef56ea4ed1406e7c55f",
+  "series_sha256": "55bb4c6ad7fda46053db6acdf1c5c0d4f30a18e34fc0c1d5ee3a03cda7ddf1cb",
   "patches": [
     {
       "name": "0001-gdn-shared-carveout.patch",
@@ -41,6 +41,10 @@
     {
       "name": "3002-attn-gqa-split.patch",
       "sha256": "610b04b44f477dc2456716a01a695c6508c672f881ca1e7e41208cdd506d8710"
+    },
+    {
+      "name": "2001-gemm-m16-swapab.patch",
+      "sha256": "0da35574e67eca7a487be3e4b36cd1c9ff835863f1ad8ff4dc628d89509396b2"
     }
   ],
   "files": {
@@ -68,9 +72,29 @@
       "pre": "b281f169bd1df139919723b9e4cd8a418a788c5c21a9782ed041f8e007e923f0",
       "post": "738c2e7e5d7008d653fbc670651034a0a9998aa8bd547e9e05d0ac93dc996e20"
     },
+    "exllamav3_ext/libtorch/mlp.cpp": {
+      "pre": "3f5d326cabd970a9892b2b2ce69cfc5e7949a113462e5e22b572f6f77803ec85",
+      "post": "55e3b7331602fb78b6a837629ca8659e88f68a3292cb6306917f9af12a6dfd8f"
+    },
     "exllamav3_ext/norm.cu": {
       "pre": "b7b43921a19aa64cbe56786a9911c2796b5d4327818f0cae73c4cf358e6907df",
       "post": "3c4564c8fe866346b5efffdca4a04370159a43fea5707719542b843f5135362e"
+    },
+    "exllamav3_ext/quant/exl3_gemm_m16.cu": {
+      "pre": null,
+      "post": "7f905123f535d2fb007b13af34ac978feac39554cfdc26b9027ad3b9cbad0150"
+    },
+    "exllamav3_ext/quant/exl3_gemm_m16.cuh": {
+      "pre": null,
+      "post": "dcb2871a90c232371536c4bdfff521e008032c7753b355ff1a4ece4a96187984"
+    },
+    "exllamav3_ext/quant/exl3_gemm_m16_kernel.cuh": {
+      "pre": null,
+      "post": "f7cd32cfd5459c2032fb3410fe5c46d0dd9656f21bf7027b0834892a397c311b"
+    },
+    "exllamav3_ext/quant/exl3_gemm_m16_op.cpp": {
+      "pre": null,
+      "post": "f7b9f4f2a970af9997a1af107dfa0c17383cc08b0690e35cabb97f96093fc3b8"
     },
     "modules/attention_fn/bc_attn.py": {
       "pre": "63f0768f313cb7015485d4655b433020f2e9e66bb44d971a9e6c65bc306994e0",
