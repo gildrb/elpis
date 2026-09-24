@@ -12,3 +12,6 @@ import ./bend/gemm_m16_partition_laws.bend as GemmM16PartitionLaws
 # Device round advance (DevicePipe advance kernel + count-reading consumers) over the Nat model
 # bend/exl3_round.bend, composed with the exl3_accept laws.
 import ./bend/exl3_round_laws.bend as Exl3RoundLaws
+# Residual add + RMSNorm fusion (ext patch 7001): the fused RES_IN register path and the layer
+# handshake (bend/norm_fuse.bend) against the unfused add + RES_NONE norm (bend/norm_fuse_spec.bend).
+import ./bend/norm_fuse_laws.bend as NormFuseLaws
