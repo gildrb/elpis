@@ -34,3 +34,8 @@ import ./bend/mlp_m16_sched_laws.bend as MlpM16SchedLaws
 # equals the host's fail-closed extent, over the Nat model bend/attn_bounds.bend.
 import ./bend/attn_bounds_laws.bend as AttnBoundsLaws
 import ./bend/gemm_m16_group_laws.bend as GemmM16GroupLaws
+# Fused GDN conv + gated delta rule + gated RMS norm verify kernel (ext patch 5101,
+# gdn_conv_rule_norm_kernel) and the per-thread token routine it shares with the commit replay: thread
+# maps, exactly-once coverage, conv channel ownership and the conv_sync handshake over the Nat model
+# bend/gdn_fast.bend (reference bend/gdn_fast_spec.bend; routine tied to bend/gdn_replay.bend).
+import ./bend/gdn_fast_laws.bend as GdnFastLaws
