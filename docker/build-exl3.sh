@@ -1,11 +1,14 @@
 #!/usr/bin/env bash
 # CPU-only image build. Never pull or retag the existing native EXL3 base.
-#   baseline  - installed engine unchanged
-#   candidate - baseline + the sha-pinned patches/exl3 series and proven acceptance artifact
+#   baseline          - installed engine unchanged
+#   candidate         - baseline + the sha-pinned patches/exl3 series and proven acceptance artifact
+#   candidate-rebuilt - candidate + exllamav3_ext recompiled from the unpatched pinned sources
+#   candidate-ext     - candidate + exllamav3_ext recompiled with the patches/exl3-ext series
 set -euo pipefail
 umask 077
-if (( $# != 2 )) || [[ "$1" != baseline && "$1" != candidate ]]; then
-  echo "Usage: bash docker/build-exl3.sh <baseline|candidate> <output-image-tag>" >&2
+variants=(baseline candidate candidate-rebuilt candidate-ext)
+if (( $# != 2 )) || [[ ! " ${variants[*]} " == *" $1 "* ]]; then
+  echo "Usage: bash docker/build-exl3.sh <${variants[*]// /|}> <output-image-tag>" >&2
   exit 1
 fi
 variant="$1"
@@ -32,9 +35,14 @@ label() {
   docker image inspect --format "{{ index .Config.Labels \"$2\" }}" "$1"
 }
 
+build() {
+  DOCKER_BUILDKIT=1 docker build --builder default --pull=false \
+    --file "$root/Dockerfile.exl3" "${build_args[@]}" "$@" "$root"
+}
+
 patches_sha=""
 build_args=()
-if [[ "$variant" == candidate ]]; then
+if [[ "$variant" != baseline ]]; then
   patches_sha="$(sha256sum -- "$root/patches/exl3/exl3-patches.json")"
   patches_sha="${patches_sha%% *}"
   build_args=(--build-arg "EXL3_PATCHES_SHA256=$patches_sha")
@@ -50,10 +58,31 @@ fi
 # before/after checks detect ordinary retagging, not a hostile Docker operator.
 check_base
 scratch="$(mktemp -d)"
-trap 'rm -f -- "$scratch/image-id"; rmdir -- "$scratch"' EXIT
-DOCKER_BUILDKIT=1 docker build --builder default --pull=false \
-  --file "$root/Dockerfile.exl3" --target "$variant" "${build_args[@]}" \
-  --iidfile "$scratch/image-id" "$root"
+trap 'rm -rf -- "$scratch"' EXIT
+if [[ "$variant" == candidate-rebuilt || "$variant" == candidate-ext ]]; then
+  # Both phases read the patch tools from one snapshot (named build context
+  # `patches`), so concurrent repository edits cannot split them. Phase one
+  # compiles the extension and exports the engine manifest composed around the
+  # built shared object; its SHA-256 becomes the final image's label, and the
+  # final stage recomposes the manifest from the installed object.
+  snap="$scratch/patches"
+  mkdir -p -- "$snap/exl3" "$snap/exl3-ext/upstream-355c6ee"
+  shopt -s nullglob
+  cp -- "$root"/patches/exl3/{series,exl3-patches.json,apply.py} "$root"/patches/exl3/*.patch \
+    "$snap/exl3/"
+  cp -- "$root"/patches/exl3-ext/{series,exl3-ext.json,ext.py} "$root"/patches/exl3-ext/*.patch \
+    "$snap/exl3-ext/"
+  shopt -u nullglob
+  cp -- "$root/patches/exl3-ext/upstream-355c6ee/setup.py" "$snap/exl3-ext/upstream-355c6ee/"
+  build_args+=(--build-context "patches=$snap")
+  kind=rebuilt
+  [[ "$variant" == candidate-ext ]] && kind=patched
+  build --target "ext-$kind-manifest" --output "type=local,dest=$scratch/manifest"
+  patches_sha="$(sha256sum -- "$scratch/manifest/exl3-patches.json")"
+  patches_sha="${patches_sha%% *}"
+  build_args+=(--build-arg "EXL3_ENGINE_MANIFEST_SHA256=$patches_sha")
+fi
+build --target "$variant" --iidfile "$scratch/image-id"
 check_base
 built_id="$(< "$scratch/image-id")"
 if [[ ! "$built_id" =~ ^sha256:[0-9a-f]{64}$ ||

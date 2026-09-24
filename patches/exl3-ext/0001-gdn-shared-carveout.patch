@@ -1,0 +1,122 @@
+--- a/exllamav3_ext/gdn.cu
++++ b/exllamav3_ext/gdn.cu
+@@ -9,6 +9,8 @@
+ #include "graph.cuh"
+ #include "gdn.cuh"
+ #include <cmath>
++#include <set>
++#include <utility>
+ 
+ using bfloat16 = __nv_bfloat16;
+ #define MAX_K_HEADS 32
+@@ -19,6 +21,21 @@
+ #define FUSED_OP_2_THREADS 512
+ #define FUSED_OP_3_THREADS 256
+ 
++// Match the tensor-core GEMMs' shared-memory carveout (see exl3_gemv_int8.cu): the small GDN
++// kernels interleave with them in every layer, and a smaller preferred carveout makes the GPU
++// drain and reconfigure the SMs on each transition. A launch-configuration hint only (numerics
++// are unaffected), set once per kernel and device before its first launch
++static std::set<std::pair<int, const void*>> gdn_carveout_set;
++
++static void gdn_max_shared_carveout(const void* fn)
++{
++    int device;
++    cudaGetDevice(&device);
++    if (!gdn_carveout_set.insert(std::make_pair(device, fn)).second) return;
++    cudaFuncSetAttribute(fn, cudaFuncAttributePreferredSharedMemoryCarveout, cudaSharedmemCarveoutMaxShared);
++    cuda_check(cudaPeekAtLastError());
++}
++
+ __device__ __forceinline__ float _sigmoid_fast_exp(float x)
+ {
+     return 1.0f / (1.0f + __expf(-x));
+@@ -954,6 +971,7 @@
+     // recurrent_state is kernel param 3 and slots is param 12, patched when running in a graph
+     #define LAUNCH_RULE(...)                                                              \
+     {                                                                                     \
++        gdn_max_shared_carveout((const void*) &__VA_ARGS__);                              \
+         __VA_ARGS__<<<blocks, threads, 0, stream>>>(KERNEL_ARGS);                         \
+         if (graph)                                                                        \
+         {                                                                                 \
+@@ -1470,6 +1488,7 @@
+     // conv_state is kernel param 1 and slots is param 2, patched when running in a graph
+     #define LAUNCH_CONV(...)                                                              \
+     {                                                                                     \
++        gdn_max_shared_carveout((const void*) &__VA_ARGS__);                              \
+         __VA_ARGS__<<<blocks, CONV1D_NUM_THREADS, 0, stream>>>(KERNEL_ARGS);              \
+         if (graph)                                                                        \
+         {                                                                                 \
+@@ -1613,9 +1632,15 @@
+         beta_scale
+ 
+     if (a_log_fp32)
++    {
++        gdn_max_shared_carveout((const void*) &gated_delta_net_fused_op_3_kernel<float>);
+         gated_delta_net_fused_op_3_kernel<<<blocks, FUSED_OP_3_THREADS, 0, stream>>>(ARGS(float));
++    }
+     else if (a_log_bf16)
++    {
++        gdn_max_shared_carveout((const void*) &gated_delta_net_fused_op_3_kernel<bfloat16>);
+         gated_delta_net_fused_op_3_kernel<<<blocks, FUSED_OP_3_THREADS, 0, stream>>>(ARGS(bfloat16));
++    }
+     else TORCH_CHECK(false, "gated_delta_net_fused_op_3: unsupported a_log dtype");
+ 
+     #undef ARGS
+@@ -1696,6 +1721,7 @@
+     const half* bias_ptr = (const half*) OPTPTR(bias);
+     dim3 blocks(CEIL_DIVIDE(n, BA_GEMV_WARPS), rows);
+ 
++    gdn_max_shared_carveout((const void*) &gdn_ba_gemv_kernel);
+     gdn_ba_gemv_kernel<<<blocks, BA_GEMV_WARPS * 32, 0, stream>>>
+     (
+         (const half*) x.data_ptr(),
+--- a/exllamav3_ext/norm.cu
++++ b/exllamav3_ext/norm.cu
+@@ -5,10 +5,26 @@
+ #include <ATen/cuda/CUDAContext.h>
+ #include "util.h"
+ #include "util.cuh"
++#include <set>
++#include <utility>
+ 
+ #define NUM_THREADS 1024
+ using bfloat16 = __nv_bfloat16;
+ 
++// Match the tensor-core GEMMs' shared-memory carveout (see exl3_gemv_int8.cu): the gated norm
++// runs between the GDN kernels and o_proj in every layer. A launch-configuration hint only
++// (numerics are unaffected), set once per kernel and device before its first launch
++static std::set<std::pair<int, const void*>> norm_carveout_set;
++
++static void norm_max_shared_carveout(const void* fn)
++{
++    int device;
++    cudaGetDevice(&device);
++    if (!norm_carveout_set.insert(std::make_pair(device, fn)).second) return;
++    cudaFuncSetAttribute(fn, cudaFuncAttributePreferredSharedMemoryCarveout, cudaSharedmemCarveoutMaxShared);
++    cuda_check(cudaPeekAtLastError());
++}
++
+ template <int num_threads>
+ __device__ inline float reduce(float sum, int warp_id, int lane_id)
+ {
+@@ -651,6 +667,9 @@
+     // Launch macro
+     #define __(_tx, __tx, _tw, __tw, _ty, __ty, _tg, __tg, _small, __num_threads)               \
+     if (small == _small && tx == at::_tx && tw == at::_tw && ty == at::_ty && tg == at::_tg)    \
++    {                                                                                           \
++        norm_max_shared_carveout(                                                               \
++            (const void*) &gated_rms_norm_kernel<__num_threads, __ty, __tw, __tg>);            \
+         gated_rms_norm_kernel<__num_threads><<<gridDim, blockDim, 0, stream>>>                  \
+         (                                                                                       \
+             (const __tx*) x.data_ptr(),                                                         \
+@@ -664,7 +683,8 @@
+             w_groups,                                                                           \
+             gate_first,                                                                         \
+             gate_act                                                                            \
+-        );
++        );                                                                                      \
++    }
+ 
+     //      x_type_____________  w_type_____________  y_type_______  g_type_____________  small  num_threads
+          __(kBFloat16, bfloat16, kFloat,    float,    kHalf,  half,  kBFloat16, bfloat16, true,  32         )

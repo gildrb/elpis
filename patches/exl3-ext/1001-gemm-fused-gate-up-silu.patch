@@ -1,0 +1,1156 @@
+--- a/exllamav3_ext/activation.cu
++++ b/exllamav3_ext/activation.cu
+@@ -11,11 +11,6 @@
+ 
+ #define NUM_THREADS 256
+ #define NUM_THREADS_P 1024
+-#define ACT_SILU 0
+-#define ACT_GELU 1
+-#define ACT_RELU2 2
+-#define ACT_SILU_OAI 3
+-#define ACT_RELU 4
+ 
+ #include "activation_kernels.cuh"
+ 
+--- /dev/null
++++ b/exllamav3_ext/activation_funcs.cuh
+@@ -0,0 +1,187 @@
++#pragma once
++
++// Elementwise activation device functions, shared by activation.cu (through activation_kernels.cuh)
++// and kernels that apply the gated activation as an epilogue (exl3_gemm_gu_kernel). Only
++// __device__ functions live here, so any number of translation units may include it
++
++#include <cuda_fp16.h>
++#include "compat.cuh"
++
++// Activation ids. hadamard_inner.cuh defines ACT_SILU and ACT_GELU with the same values
++#define ACT_SILU 0
++#define ACT_GELU 1
++#define ACT_RELU2 2
++#define ACT_SILU_OAI 3
++#define ACT_RELU 4
++
++__device__ inline half2 clamp_half2_to_finite(half2 v)
++{
++    const half2 max_h2 = __float2half2_rn(65504.0f);
++    const half2 min_h2 = __float2half2_rn(-65504.0f);
++    return __hmax2(__hmin2(v, max_h2), min_h2);
++}
++
++
++__device__ __forceinline__ half _silu(half x)
++{
++    half one = __float2half(1.0f);
++    half neg_x = __hneg(x);
++    half e = hexp(neg_x);
++    half sum = __hadd(one, e);
++    half r = hrcp(sum);
++    half result = __hmul(x, r);
++    return result;
++}
++
++
++__device__ __forceinline__ half2 _silu(half2 x)
++{
++    half2 one = __float2half2_rn(1.0f);
++    half2 neg_x = __hneg2(x);
++    half2 e = h2exp(neg_x);
++    half2 sum = __hadd2(one, e);
++    half2 r = h2rcp(sum);
++    half2 result = __hmul2(x, r);
++    return result;
++}
++
++
++__device__ __forceinline__ float _silu(float x)
++{
++    float e     = __expf(-x);
++    float recip = __fdividef(1.0f, 1.0f + e);
++    return x * recip;
++}
++
++
++__device__ __forceinline__ half _gelu(half x)
++{
++    float xf = __half2float(x);
++    const float c = 0.797884560803f;  // sqrt(2/Pi)
++    float tanh_arg = c * (xf + 0.044715f * xf * xf * xf);
++    xf = 0.5f * xf * (1.0 + tanh_opt(tanh_arg));
++    return __float2half_rn(xf);
++}
++
++
++__device__ __forceinline__ float _gelu(float x)
++{
++    const float c = 0.797884560803f;  // sqrt(2/Pi)
++    float tanh_arg = c * (x + 0.044715f * x * x * x);
++    x = 0.5f * x * (1.0 + tanh_opt(tanh_arg));
++    return x;
++}
++
++
++__device__ __forceinline__ half2 _gelu(half2 x)
++{
++    return __halves2half2(_gelu(__low2half(x)), _gelu(__high2half(x)));
++}
++
++
++__device__ __forceinline__ half _relu2(half x)
++{
++    float xf = __half2float(x);
++    xf = fmaxf(0.0f, xf);
++    xf = xf * xf;
++    return __float2half_rn(xf);
++}
++
++
++__device__ __forceinline__ float _relu2(float x)
++{
++    x = fmaxf(0.0f, x);
++    x = x * x;
++    return x;
++}
++
++
++__device__ __forceinline__ half2 _relu2(half2 x)
++{
++    return __halves2half2(_relu2(__low2half(x)), _relu2(__high2half(x)));
++}
++
++
++__device__ __forceinline__ float _relu(float x)
++{
++    return fmaxf(0.0f, x);
++}
++
++
++__device__ __forceinline__ half2 _relu(half2 x)
++{
++    return __hmax2(x, __float2half2_rn(0.0f));
++}
++
++
++__device__ __forceinline__ float _xielu(float x, float alpha_p, float alpha_n)
++{
++    const float eps = -9.9838e-07;  // -1e-6 with BF16 rounding error
++    const float beta = 0.5f;
++    return x > 0 ?
++        alpha_p * x * x + beta * x :
++        (expm1f(min(x, eps)) - x) * alpha_n + beta * x;
++}
++
++
++__device__ __forceinline__ float _sigmoid_fast_exp(float x)
++{
++    return 1.0f / (1.0f + __expf(-x));
++}
++
++
++// gpt-oss clamped swiglu: gate clamped from above only, up clamped symmetrically, both before
++// the activation, alpha = 1.702 inside the sigmoid and +1 on the up path
++__device__ __forceinline__ float _oai_swiglu(float g, float u, const float limit)
++{
++    if (limit != 0.0f)
++    {
++        g = fminf(g, limit);
++        u = fminf(fmaxf(u, -limit), limit);
++    }
++    float glu = g * _sigmoid_fast_exp(1.702f * g);
++    return (u + 1.0f) * glu;
++}
++
++
++__device__ __forceinline__ half2 _sigmoid(half2 x)
++{
++    half2 one = __float2half2_rn(1.0f);
++    half2 neg_x = __hneg2(x);
++    half2 e = h2exp(neg_x);
++    half2 sum = __hadd2(one, e);
++    return h2rcp(sum);
++}
++
++
++// act(x) * y for one half2 pair: the per-element math of act_mul_kernel_h
++template <int activation_type>
++__device__ __forceinline__ half2 act_mul_h2(half2 x2, half2 y2, const float act_limit)
++{
++    if constexpr (activation_type == ACT_SILU_OAI)
++    {
++        float2 xf = __half22float2(x2);
++        float2 yf = __half22float2(y2);
++        xf.x = _oai_swiglu(xf.x, yf.x, act_limit);
++        xf.y = _oai_swiglu(xf.y, yf.y, act_limit);
++        return __float22half2_rn(xf);
++    }
++
++    if constexpr (activation_type == ACT_SILU)
++        x2 = _silu(x2);
++    else if constexpr (activation_type == ACT_GELU)
++        x2 = _gelu(x2);
++    else if constexpr (activation_type == ACT_RELU2)
++        x2 = _relu2(x2);
++    else if constexpr (activation_type == ACT_RELU)
++        x2 = _relu(x2);
++
++    if (act_limit != 0.0f)
++    {
++        y2 = __hmax2(y2, __float2half2_rn(-act_limit));
++        y2 = __hmin2(y2, __float2half2_rn(act_limit));
++        x2 = __hmin2(x2, __float2half2_rn(act_limit));
++    }
++
++    return __hmul2(x2, y2);
++}
+--- a/exllamav3_ext/activation_kernels.cuh
++++ b/exllamav3_ext/activation_kernels.cuh
+@@ -1,142 +1,4 @@
+-
+-__device__ inline half2 clamp_half2_to_finite(half2 v)
+-{
+-    const half2 max_h2 = __float2half2_rn(65504.0f);
+-    const half2 min_h2 = __float2half2_rn(-65504.0f);
+-    return __hmax2(__hmin2(v, max_h2), min_h2);
+-}
+-
+-
+-__device__ __forceinline__ half _silu(half x)
+-{
+-    half one = __float2half(1.0f);
+-    half neg_x = __hneg(x);
+-    half e = hexp(neg_x);
+-    half sum = __hadd(one, e);
+-    half r = hrcp(sum);
+-    half result = __hmul(x, r);
+-    return result;
+-}
+-
+-
+-__device__ __forceinline__ half2 _silu(half2 x)
+-{
+-    half2 one = __float2half2_rn(1.0f);
+-    half2 neg_x = __hneg2(x);
+-    half2 e = h2exp(neg_x);
+-    half2 sum = __hadd2(one, e);
+-    half2 r = h2rcp(sum);
+-    half2 result = __hmul2(x, r);
+-    return result;
+-}
+-
+-
+-__device__ __forceinline__ float _silu(float x)
+-{
+-    float e     = __expf(-x);
+-    float recip = __fdividef(1.0f, 1.0f + e);
+-    return x * recip;
+-}
+-
+-
+-__device__ __forceinline__ half _gelu(half x)
+-{
+-    float xf = __half2float(x);
+-    const float c = 0.797884560803f;  // sqrt(2/Pi)
+-    float tanh_arg = c * (xf + 0.044715f * xf * xf * xf);
+-    xf = 0.5f * xf * (1.0 + tanh_opt(tanh_arg));
+-    return __float2half_rn(xf);
+-}
+-
+-
+-__device__ __forceinline__ float _gelu(float x)
+-{
+-    const float c = 0.797884560803f;  // sqrt(2/Pi)
+-    float tanh_arg = c * (x + 0.044715f * x * x * x);
+-    x = 0.5f * x * (1.0 + tanh_opt(tanh_arg));
+-    return x;
+-}
+-
+-
+-__device__ __forceinline__ half2 _gelu(half2 x)
+-{
+-    return __halves2half2(_gelu(__low2half(x)), _gelu(__high2half(x)));
+-}
+-
+-
+-__device__ __forceinline__ half _relu2(half x)
+-{
+-    float xf = __half2float(x);
+-    xf = fmaxf(0.0f, xf);
+-    xf = xf * xf;
+-    return __float2half_rn(xf);
+-}
+-
+-
+-__device__ __forceinline__ float _relu2(float x)
+-{
+-    x = fmaxf(0.0f, x);
+-    x = x * x;
+-    return x;
+-}
+-
+-
+-__device__ __forceinline__ half2 _relu2(half2 x)
+-{
+-    return __halves2half2(_relu2(__low2half(x)), _relu2(__high2half(x)));
+-}
+-
+-
+-__device__ __forceinline__ float _relu(float x)
+-{
+-    return fmaxf(0.0f, x);
+-}
+-
+-
+-__device__ __forceinline__ half2 _relu(half2 x)
+-{
+-    return __hmax2(x, __float2half2_rn(0.0f));
+-}
+-
+-
+-__device__ __forceinline__ float _xielu(float x, float alpha_p, float alpha_n)
+-{
+-    const float eps = -9.9838e-07;  // -1e-6 with BF16 rounding error
+-    const float beta = 0.5f;
+-    return x > 0 ?
+-        alpha_p * x * x + beta * x :
+-        (expm1f(min(x, eps)) - x) * alpha_n + beta * x;
+-}
+-
+-
+-__device__ __forceinline__ float _sigmoid_fast_exp(float x)
+-{
+-    return 1.0f / (1.0f + __expf(-x));
+-}
+-
+-
+-// gpt-oss clamped swiglu: gate clamped from above only, up clamped symmetrically, both before
+-// the activation, alpha = 1.702 inside the sigmoid and +1 on the up path
+-__device__ __forceinline__ float _oai_swiglu(float g, float u, const float limit)
+-{
+-    if (limit != 0.0f)
+-    {
+-        g = fminf(g, limit);
+-        u = fminf(fmaxf(u, -limit), limit);
+-    }
+-    float glu = g * _sigmoid_fast_exp(1.702f * g);
+-    return (u + 1.0f) * glu;
+-}
+-
+-
+-__device__ __forceinline__ half2 _sigmoid(half2 x)
+-{
+-    half2 one = __float2half2_rn(1.0f);
+-    half2 neg_x = __hneg2(x);
+-    half2 e = h2exp(neg_x);
+-    half2 sum = __hadd2(one, e);
+-    return h2rcp(sum);
+-}
++#include "activation_funcs.cuh"
+ 
+ 
+ template <int activation_type>
+@@ -156,33 +18,7 @@
+     half2 x2 = ((const half2*) x)[idx];
+     half2 y2 = ((const half2*) y)[idx];
+ 
+-    if constexpr (activation_type == ACT_SILU_OAI)
+-    {
+-        float2 xf = __half22float2(x2);
+-        float2 yf = __half22float2(y2);
+-        xf.x = _oai_swiglu(xf.x, yf.x, act_limit);
+-        xf.y = _oai_swiglu(xf.y, yf.y, act_limit);
+-        ((half2*) z)[idx] = __float22half2_rn(xf);
+-        return;
+-    }
+-
+-    if constexpr (activation_type == ACT_SILU)
+-        x2 = _silu(x2);
+-    else if constexpr (activation_type == ACT_GELU)
+-        x2 = _gelu(x2);
+-    else if constexpr (activation_type == ACT_RELU2)
+-        x2 = _relu2(x2);
+-    else if constexpr (activation_type == ACT_RELU)
+-        x2 = _relu(x2);
+-
+-    if (act_limit != 0.0f)
+-    {
+-        y2 = __hmax2(y2, __float2half2_rn(-act_limit));
+-        y2 = __hmin2(y2, __float2half2_rn(act_limit));
+-        x2 = __hmin2(x2, __float2half2_rn(act_limit));
+-    }
+-
+-    ((half2*) z)[idx] = __hmul2(x2, y2);
++    ((half2*) z)[idx] = act_mul_h2<activation_type>(x2, y2, act_limit);
+ }
+ 
+ 
+--- a/exllamav3_ext/libtorch/mlp.cpp
++++ b/exllamav3_ext/libtorch/mlp.cpp
+@@ -35,6 +35,7 @@
+     at::Tensor a_n       = a.slice(1, 0, num_tokens);
+     at::Tensor down_xh_n = down_xh.slice(1, 0, num_tokens);
+ 
++    bool act_done = false;
+     if (gu_ptrs_trellis)
+     {
+         exl3_mgemm_gr
+@@ -69,21 +70,39 @@
+         at::Tensor u2 = gu_n.select(0, 1);
+         at::Tensor gate_xh = guh_n.select(0, 0);
+         at::Tensor up_xh   = guh_n.select(0, 1);
+-        exl3_gemm_gr(x, gate->trellis, g2, gate->suh, gate_xh, gate->svh, -1, gate->mcg, gate->mul1, 0, graph);
+-        exl3_gemm_gr(x, up->trellis, u2, up->suh, up_xh, up->svh, -1, up->mcg, up->mul1, 0, graph);
+-        if (gate->bias) add_gr(g2, gate->bias.value(), g2, graph);
+-        if (up->bias) add_gr(u2, up->bias.value(), u2, graph);
+-    }
+-
+-    at::Tensor g = gu_n.select(0, 0).unsqueeze(0);
+-    at::Tensor u = gu_n.select(0, 1).unsqueeze(0);
+-
+-    if (act_silu)
+-        silu_mul_gr(g, u, a_n, act_limit, graph);
+-    else if (act_gelu)
+-        gelu_mul_gr(g, u, a_n, act_limit, graph);
+-    else if (act_relu2)
+-        relu2_mul_gr(g, u, a_n, act_limit, graph);
++
++        // Gate, up and the SiLU gate in one launch where that is bit-identical to the three
++        // launches below (exl3_gemm_gu_gr declines otherwise)
++        act_done =
++            act_silu && !gate->bias && !up->bias &&
++            gate->mcg == up->mcg && gate->mul1 == up->mul1 &&
++            exl3_gemm_gu_gr
++            (
++                x, gate->trellis, up->trellis, g2, u2, gate->suh, up->suh, gate_xh, up_xh,
++                gate->svh, up->svh, a_n, act_limit, gate->mcg, gate->mul1, graph
++            );
++
++        if (!act_done)
++        {
++            exl3_gemm_gr(x, gate->trellis, g2, gate->suh, gate_xh, gate->svh, -1, gate->mcg, gate->mul1, 0, graph);
++            exl3_gemm_gr(x, up->trellis, u2, up->suh, up_xh, up->svh, -1, up->mcg, up->mul1, 0, graph);
++            if (gate->bias) add_gr(g2, gate->bias.value(), g2, graph);
++            if (up->bias) add_gr(u2, up->bias.value(), u2, graph);
++        }
++    }
++
++    if (!act_done)
++    {
++        at::Tensor g = gu_n.select(0, 0).unsqueeze(0);
++        at::Tensor u = gu_n.select(0, 1).unsqueeze(0);
++
++        if (act_silu)
++            silu_mul_gr(g, u, a_n, act_limit, graph);
++        else if (act_gelu)
++            gelu_mul_gr(g, u, a_n, act_limit, graph);
++        else if (act_relu2)
++            relu2_mul_gr(g, u, a_n, act_limit, graph);
++    }
+ 
+     exl3_gemm_gr(a_n, down->trellis, d, down->suh, down_xh_n, down->svh, -1, down->mcg, down->mul1, 0, graph);
+     if (down->bias)
+--- /dev/null
++++ b/exllamav3_ext/quant/comp_units/exl3_gemm_gu_inst_k1.cu
+@@ -0,0 +1,10 @@
++#include <cuda_fp16.h>
++#include <cublas_v2.h>
++#include <cooperative_groups.h>
++namespace cg = cooperative_groups;
++#include "../../util.h"
++#include "../../util.cuh"
++#include "../../ptx.cuh"
++#include "../exl3_gemm_gu_kernel.cuh"
++
++EXL3_GEMM_GU_INSTANCES(1)
+--- /dev/null
++++ b/exllamav3_ext/quant/comp_units/exl3_gemm_gu_inst_k2.cu
+@@ -0,0 +1,10 @@
++#include <cuda_fp16.h>
++#include <cublas_v2.h>
++#include <cooperative_groups.h>
++namespace cg = cooperative_groups;
++#include "../../util.h"
++#include "../../util.cuh"
++#include "../../ptx.cuh"
++#include "../exl3_gemm_gu_kernel.cuh"
++
++EXL3_GEMM_GU_INSTANCES(2)
+--- /dev/null
++++ b/exllamav3_ext/quant/comp_units/exl3_gemm_gu_inst_k3.cu
+@@ -0,0 +1,10 @@
++#include <cuda_fp16.h>
++#include <cublas_v2.h>
++#include <cooperative_groups.h>
++namespace cg = cooperative_groups;
++#include "../../util.h"
++#include "../../util.cuh"
++#include "../../ptx.cuh"
++#include "../exl3_gemm_gu_kernel.cuh"
++
++EXL3_GEMM_GU_INSTANCES(3)
+--- /dev/null
++++ b/exllamav3_ext/quant/comp_units/exl3_gemm_gu_inst_k4.cu
+@@ -0,0 +1,10 @@
++#include <cuda_fp16.h>
++#include <cublas_v2.h>
++#include <cooperative_groups.h>
++namespace cg = cooperative_groups;
++#include "../../util.h"
++#include "../../util.cuh"
++#include "../../ptx.cuh"
++#include "../exl3_gemm_gu_kernel.cuh"
++
++EXL3_GEMM_GU_INSTANCES(4)
+--- /dev/null
++++ b/exllamav3_ext/quant/comp_units/exl3_gemm_gu_inst_k5.cu
+@@ -0,0 +1,10 @@
++#include <cuda_fp16.h>
++#include <cublas_v2.h>
++#include <cooperative_groups.h>
++namespace cg = cooperative_groups;
++#include "../../util.h"
++#include "../../util.cuh"
++#include "../../ptx.cuh"
++#include "../exl3_gemm_gu_kernel.cuh"
++
++EXL3_GEMM_GU_INSTANCES(5)
+--- /dev/null
++++ b/exllamav3_ext/quant/comp_units/exl3_gemm_gu_inst_k6.cu
+@@ -0,0 +1,10 @@
++#include <cuda_fp16.h>
++#include <cublas_v2.h>
++#include <cooperative_groups.h>
++namespace cg = cooperative_groups;
++#include "../../util.h"
++#include "../../util.cuh"
++#include "../../ptx.cuh"
++#include "../exl3_gemm_gu_kernel.cuh"
++
++EXL3_GEMM_GU_INSTANCES(6)
+--- /dev/null
++++ b/exllamav3_ext/quant/comp_units/exl3_gemm_gu_inst_k7.cu
+@@ -0,0 +1,10 @@
++#include <cuda_fp16.h>
++#include <cublas_v2.h>
++#include <cooperative_groups.h>
++namespace cg = cooperative_groups;
++#include "../../util.h"
++#include "../../util.cuh"
++#include "../../ptx.cuh"
++#include "../exl3_gemm_gu_kernel.cuh"
++
++EXL3_GEMM_GU_INSTANCES(7)
+--- /dev/null
++++ b/exllamav3_ext/quant/comp_units/exl3_gemm_gu_inst_k8.cu
+@@ -0,0 +1,10 @@
++#include <cuda_fp16.h>
++#include <cublas_v2.h>
++#include <cooperative_groups.h>
++namespace cg = cooperative_groups;
++#include "../../util.h"
++#include "../../util.cuh"
++#include "../../ptx.cuh"
++#include "../exl3_gemm_gu_kernel.cuh"
++
++EXL3_GEMM_GU_INSTANCES(8)
+--- a/exllamav3_ext/quant/coop_autotune.cu
++++ b/exllamav3_ext/quant/coop_autotune.cu
+@@ -673,3 +673,24 @@
+ 
+     return launch_config;
+ }
++
++bool CoopKernelAutotuner::lookup
++(
++    uint64_t hash,
++    const std::vector<CoopAutotuneCandidate>& candidates,
++    CoopAutotuneLaunch* launch_config
++)
++{
++    uint64_t salted_hash = salt_hash(hash);
++
++    auto cached = launch_cache.find(salted_hash);
++    if (cached != launch_cache.end())
++    {
++        *launch_config = cached->second;
++        return true;
++    }
++
++    if (!launch_from_disk_cache(salted_hash, candidates, launch_config)) return false;
++    launch_cache[salted_hash] = *launch_config;
++    return true;
++}
+--- a/exllamav3_ext/quant/coop_autotune.cuh
++++ b/exllamav3_ext/quant/coop_autotune.cuh
+@@ -44,4 +44,13 @@
+         cudaStream_t stream,
+         size_t numel_B = 1e9
+     );
++
++    // Tuned config for hash without launching or tuning: the in-process cache, then the disk
++    // cache (validated against candidates as in launch). False if the key has not been tuned
++    static bool lookup
++    (
++        uint64_t hash,
++        const std::vector<CoopAutotuneCandidate>& candidates,
++        CoopAutotuneLaunch* launch_config
++    );
+ };
+--- a/exllamav3_ext/quant/exl3_gemm.cu
++++ b/exllamav3_ext/quant/exl3_gemm.cu
+@@ -121,6 +121,45 @@
+     return h;
+ }
+ 
++// Autotune candidates of the regular kernel: every compatible shape, grid up to one block per
++// SM and at most one block per slice
++static std::vector<CoopAutotuneCandidate> gemm_autotune_candidates
++(
++    int size_m,
++    int size_k,
++    int size_n,
++    int K,
++    bool c_fp32,
++    int cb,
++    int num_sms
++)
++{
++    std::vector<CoopAutotuneCandidate> candidates;
++    for (int candidate_shape_idx = 1; candidate_shape_idx <= EXL3_GEMM_NUM_SHAPES; ++candidate_shape_idx)
++    {
++        if (!exl3_gemm_shape_compat(candidate_shape_idx, size_m, size_k, size_n, K)) continue;
++
++        fp_exl3_gemm_kernel candidate_kernel = get_gemm_kernel_ptr(K, candidate_shape_idx, c_fp32, cb);
++        if (!candidate_kernel) continue;
++
++        int tilesize_k = exl3_gemm_tilesize_k_g[candidate_shape_idx];
++        int tilesize_n = exl3_gemm_tilesize_n_g[candidate_shape_idx];
++        int max_slices = MAX(size_k / tilesize_k * size_n / tilesize_n, 1);
++        int max_candidate_sms = MAX(MIN(max_slices, num_sms), 1);
++
++        candidates.push_back
++        ({
++            (void*) candidate_kernel,
++            exl3_gemm_blockdim_g[candidate_shape_idx],
++            max_candidate_sms,
++            1,
++            max_candidate_sms,
++            candidate_shape_idx
++        });
++    }
++    return candidates;
++}
++
+ int exl3_gemm_gr
+ (
+     const at::Tensor& A,
+@@ -260,29 +299,7 @@
+             cuda_check(cudaPeekAtLastError());
+             return tuned.tag;
+         }
+-        std::vector<CoopAutotuneCandidate> candidates;
+-        for (int candidate_shape_idx = 1; candidate_shape_idx <= EXL3_GEMM_NUM_SHAPES; ++candidate_shape_idx)
+-        {
+-            if (!exl3_gemm_shape_compat(candidate_shape_idx, size_m, size_k, size_n, K)) continue;
+-
+-            fp_exl3_gemm_kernel candidate_kernel = get_gemm_kernel_ptr(K, candidate_shape_idx, c_fp32, cb);
+-            if (!candidate_kernel) continue;
+-
+-            int tilesize_k = exl3_gemm_tilesize_k_g[candidate_shape_idx];
+-            int tilesize_n = exl3_gemm_tilesize_n_g[candidate_shape_idx];
+-            int max_slices = MAX(size_k / tilesize_k * size_n / tilesize_n, 1);
+-            int max_candidate_sms = MAX(MIN(max_slices, num_sms), 1);
+-
+-            candidates.push_back
+-            ({
+-                (void*) candidate_kernel,
+-                exl3_gemm_blockdim_g[candidate_shape_idx],
+-                max_candidate_sms,
+-                1,
+-                max_candidate_sms,
+-                candidate_shape_idx
+-            });
+-        }
++        std::vector<CoopAutotuneCandidate> candidates = gemm_autotune_candidates(size_m, size_k, size_n, K, c_fp32, cb, num_sms);
+         TORCH_CHECK(!candidates.empty(), "exl3_gemm autotune: no compatible kernel shapes");
+ 
+         tuned = CoopKernelAutotuner::launch(autotune_key, candidates, kernelArgs, SMEM_MAX, stream, (size_t) size_k * size_n);
+@@ -350,6 +367,169 @@
+         force_num_sms,
+         nullptr
+     );
++}
++
++/*
++Fused gate/up projection with SiLU gate, one m16 row tile:
++
++    C_g = A @ gate, C_u = A @ up, act = silu(C_g) * C_u
++
++in a single cooperative launch (exl3_gemm_gu_kernel), replacing exl3_gemm_gr(gate),
++exl3_gemm_gr(up) and silu_mul_gr. Only taken when both exl3_gemm_gr calls would run the
++autotuned regular kernel (not the int8 or QTIP GEMV paths) and their shared tune key already
++has a config: the fused kernel then uses exactly that shape and grid, so each matrix gets the
++same slice partition, lock order and fp16 rounding points, and all three outputs are
++bit-identical to the unfused sequence. Returns false, launching nothing, otherwise; the caller
++then runs the unfused sequence, which also tunes the key on first use.
++
++- A: (.., m, k) float16 with m <= 16; gate/up trellises of equal shape (k // 16, n // 16, 16 * K)
++- A_had_g, A_had_u: input transform scratch, size of A each, not aliasing A or each other
++- C_g, C_u, act: (.., m, n) float16
++*/
++
++bool exl3_gemm_gu_gr
++(
++    const at::Tensor& A,
++    const at::Tensor& B_g,
++    const at::Tensor& B_u,
++    at::Tensor& C_g,
++    at::Tensor& C_u,
++    const at::Tensor& suh_g,
++    const at::Tensor& suh_u,
++    at::Tensor& A_had_g,
++    at::Tensor& A_had_u,
++    const at::Tensor& svh_g,
++    const at::Tensor& svh_u,
++    at::Tensor& act,
++    float act_limit,
++    bool mcg,
++    bool mul1,
++    Graph* graph
++)
++{
++    const at::cuda::OptionalCUDAGuard device_guard(A.device());
++    cudaStream_t stream = graph ? graph->capture_stream : at::cuda::getCurrentCUDAStream().stream();
++
++    TORCH_CHECK(!(mcg && mul1), "Specified both mcg and mul1")
++    TORCH_CHECK_DIM(B_g, 3);
++    TORCH_CHECK_DTYPE(A, kHalf);
++    TORCH_CHECK_DTYPE(B_g, kShort);
++    TORCH_CHECK_DTYPE(B_u, kShort);
++    if (B_g.sizes() != B_u.sizes()) return false;
++    if (C_g.dtype() != at::kHalf || C_u.dtype() != at::kHalf || act.dtype() != at::kHalf) return false;
++    if (A_had_g.data_ptr() == A.data_ptr() || A_had_u.data_ptr() == A.data_ptr() ||
++        A_had_g.data_ptr() == A_had_u.data_ptr()) return false;
++
++    int K = B_g.size(2) / 16;
++    int size_m = 1;
++    int dim = A.dim();
++    for (int d = 0; d < dim - 1; ++d) size_m *= A.size(d);
++    int size_k = A.size(-1);
++    int size_n = B_g.size(1) * 16;
++    TORCH_CHECK(size_k == B_g.size(0) * 16, "exl3_gemm_gu: A and B shapes don't match");
++    TORCH_CHECK(C_g.numel() == (int64_t) size_m * size_n && C_u.numel() == C_g.numel() && act.numel() == C_g.numel(),
++                "exl3_gemm_gu: output shapes don't match");
++
++    // Shapes 1..4 hold one m16 tile; more rows take the regular kernel's multi-tile loop
++    if (size_m > 16) return false;
++
++    int cb = 0;
++    if (mcg) cb = 1;
++    if (mul1) cb = 2;
++
++    // Routing of exl3_gemm_gr: the int8 GEMV only ever takes mul1 calls with m <= 2, then the
++    // QTIP GEMV heuristic, then the autotuned regular kernel
++    if (mul1 && size_m <= 2 && exl3_gemv_int8_enabled()) return false;
++
++    int device;
++    cudaGetDevice(&device);
++    if (exl3_gemv_would_launch(size_m, size_k, size_n, K, cb, false, true, device)) return false;
++
++    int num_sms = DevCtx::instance().get_num_sms(device);
++    int cc = DevCtx::instance().get_cc(device);
++    int* locks = DevCtx::instance().get_locks(device);
++
++    uint64_t autotune_key = gemm_autotune_hash(MAX(size_m, 2), size_k, size_n, K, false, device, cc, num_sms, cb);
++    std::vector<CoopAutotuneCandidate> candidates = gemm_autotune_candidates(size_m, size_k, size_n, K, false, cb, num_sms);
++    CoopAutotuneLaunch tuned;
++    if (!CoopKernelAutotuner::lookup(autotune_key, candidates, &tuned)) return false;
++    if (tuned.concurrency != 1) return false;
++
++    int shape_idx = tuned.tag;
++    fp_exl3_gemm_gu_kernel kernel = get_gemm_gu_kernel_ptr(K, shape_idx, cb);
++    if (!kernel) return false;
++    TORCH_CHECK(tuned.block_dim == exl3_gemm_blockdim_g[shape_idx], "exl3_gemm_gu: tuned block size mismatch");
++
++    const half* A_ptr = (const half*) A.data_ptr();
++    const uint16_t* B_g_ptr = (const uint16_t*) B_g.data_ptr();
++    const uint16_t* B_u_ptr = (const uint16_t*) B_u.data_ptr();
++    half* C_g_ptr = (half*) C_g.data_ptr();
++    half* C_u_ptr = (half*) C_u.data_ptr();
++    half* act_ptr = (half*) act.data_ptr();
++    const half* suh_g_ptr = (const half*) suh_g.data_ptr();
++    const half* suh_u_ptr = (const half*) suh_u.data_ptr();
++    half* A_had_g_ptr = (half*) A_had_g.data_ptr();
++    half* A_had_u_ptr = (half*) A_had_u.data_ptr();
++    const half* svh_g_ptr = (const half*) svh_g.data_ptr();
++    const half* svh_u_ptr = (const half*) svh_u.data_ptr();
++
++    void* kernelArgs[] =
++    {
++        (void*)& A_ptr,
++        (void*)& B_g_ptr,
++        (void*)& B_u_ptr,
++        (void*)& C_g_ptr,
++        (void*)& C_u_ptr,
++        (void*)& act_ptr,
++        (void*)& size_m,
++        (void*)& size_k,
++        (void*)& size_n,
++        (void*)& locks,
++        (void*)& suh_g_ptr,
++        (void*)& suh_u_ptr,
++        (void*)& A_had_g_ptr,
++        (void*)& A_had_u_ptr,
++        (void*)& svh_g_ptr,
++        (void*)& svh_u_ptr,
++        (void*)& act_limit
++    };
++
++    if (kernel_attr_set[device].find((void*) kernel) == kernel_attr_set[device].end())
++    {
++        cuda_check(cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, SMEM_MAX));
++        kernel_attr_set[device].insert((void*) kernel);
++    }
++    cuda_check(cudaLaunchCooperativeKernel
++    (
++        (void*) kernel,
++        tuned.num_sms,
++        tuned.block_dim,
++        kernelArgs,
++        SMEM_MAX,
++        stream
++    ));
++
++    // Sites in the order of the unfused sequence (gate's, then up's), so graph callers patch
++    // A and the two outputs with the same argument list either way
++    if (graph)
++    {
++        graph->record_param((void*) kernel, GP_gemm_A, 0);
++        graph->record_param((void*) kernel, GP_gemm_B_trellis, 1);
++        graph->record_param((void*) kernel, GP_gemm_C, 3);
++        graph->record_param((void*) kernel, GP_gemm_B_suh, 10);
++        graph->record_param((void*) kernel, GP_gemm_A_had, 12);
++        graph->record_param((void*) kernel, GP_gemm_B_svh, 14);
++        graph->record_param((void*) kernel, GP_gemm_A, 0);
++        graph->record_param((void*) kernel, GP_gemm_B_trellis, 2);
++        graph->record_param((void*) kernel, GP_gemm_C, 4);
++        graph->record_param((void*) kernel, GP_gemm_B_suh, 11);
++        graph->record_param((void*) kernel, GP_gemm_A_had, 13);
++        graph->record_param((void*) kernel, GP_gemm_B_svh, 15);
++        graph->record_param((void*) kernel, GP_end, 0);
++    }
++
++    cuda_check(cudaPeekAtLastError());
++    return true;
+ }
+ 
+ /*
+--- a/exllamav3_ext/quant/exl3_gemm.cuh
++++ b/exllamav3_ext/quant/exl3_gemm.cuh
+@@ -30,6 +30,29 @@
+     bool mcg,
+     bool mul1,
+     int force_num_sms
++);
++
++// Fused gate/up projection + SiLU gate for m <= 16 (see exl3_gemm.cu). Returns false, launching
++// nothing, where the result would not be bit-identical to exl3_gemm_gr(gate), exl3_gemm_gr(up),
++// silu_mul_gr
++bool exl3_gemm_gu_gr
++(
++    const at::Tensor& A,
++    const at::Tensor& B_g,
++    const at::Tensor& B_u,
++    at::Tensor& C_g,
++    at::Tensor& C_u,
++    const at::Tensor& suh_g,
++    const at::Tensor& suh_u,
++    at::Tensor& A_had_g,
++    at::Tensor& A_had_u,
++    const at::Tensor& svh_g,
++    const at::Tensor& svh_u,
++    at::Tensor& act,
++    float act_limit,
++    bool mcg,
++    bool mul1,
++    Graph* graph
+ );
+ 
+ int exl3_mgemm_gr
+--- /dev/null
++++ b/exllamav3_ext/quant/exl3_gemm_gu_kernel.cuh
+@@ -0,0 +1,65 @@
++#pragma once
++
++#include "exl3_gemm_kernel.cuh"
++#include "../activation_funcs.cuh"
++
++// Gate and up projections plus act = silu(C_g) * C_u in one cooperative launch, for a single
++// m16 row tile (size_m <= TILESIZE_M == 16). Per matrix the work is exactly exl3_gemm_kernel's:
++// input Hadamard of A into that matrix's A_had slab, then exl3_gemm_kernel_inner over the same
++// gridDim.x slice partition, output Hadamard by the last block of each column. Each block runs
++// its gate slice range and then its up slice range. Up's column locks sit size_n / 128 past
++// gate's, so the two lock chains never share a counter, and every lock ends the kernel reset to
++// zero as before. The epilogue applies act_mul_h2 (the per-element math of act_mul_kernel_h)
++// once both outputs are final
++template<EXL3_GEMM_T_ARGS>
++__global__ __launch_bounds__(EXL3_GEMM_BASE_THREADS * TILESIZE_K / 16)
++void exl3_gemm_gu_kernel(EXL3_GEMM_GU_ARGS)
++{
++    static_assert(!c_fp32 && TILESIZE_M == 16, "exl3_gemm_gu_kernel: fp16 output, one m16 tile");
++    auto grid = cg::this_grid();
++
++    // Input Hadamard for both matrices: independent 128-element jobs, gate's then up's
++    {
++        int total_warps = size_m * size_k / 128;
++        int warps_grid = gridDim.x * blockDim.x / 32;
++        int this_warp = threadIdx.x / 32 + blockDim.x / 32 * blockIdx.x;
++
++        for(; this_warp < 2 * total_warps; this_warp += warps_grid)
++        {
++            bool up = this_warp >= total_warps;
++            int w = up ? this_warp - total_warps : this_warp;
++            had_hf_r_128_inner<true, false>
++            (
++                A + w * 128,
++                (up ? A_had_u : A_had_g) + w * 128,
++                (up ? suh_u : suh_g) + (w * 128) % size_k,
++                0.088388347648f  // 1/sqrt(128)
++            );
++        }
++
++        grid.sync();
++    }
++
++    exl3_gemm_kernel_inner
++    <bits, c_fp32, cb, TILESIZE_M, TILESIZE_K, TILESIZE_N, SH_STAGES, FRAG_STAGES, true>
++    (A_had_g, B_g, (void*) C_g, size_m, size_k, size_n, locks, svh_g);
++
++    // The up pass reuses the block's shared memory pipeline
++    __syncthreads();
++
++    exl3_gemm_kernel_inner
++    <bits, c_fp32, cb, TILESIZE_M, TILESIZE_K, TILESIZE_N, SH_STAGES, FRAG_STAGES, true>
++    (A_had_u, B_u, (void*) C_u, size_m, size_k, size_n, locks + size_n / 128, svh_u);
++
++    grid.sync();
++
++    // Gated activation over the finished outputs. C_g and C_u were written by other blocks in
++    // this launch, so read them through L2
++    int pairs = size_m * size_n / 2;
++    for (int idx = blockIdx.x * blockDim.x + threadIdx.x; idx < pairs; idx += gridDim.x * blockDim.x)
++    {
++        half2 g2 = __ldcg(((const half2*) C_g) + idx);
++        half2 u2 = __ldcg(((const half2*) C_u) + idx);
++        ((half2*) act)[idx] = act_mul_h2<ACT_SILU>(g2, u2, act_limit);
++    }
++}
+--- a/exllamav3_ext/quant/exl3_gemv.cu
++++ b/exllamav3_ext/quant/exl3_gemv.cu
+@@ -89,9 +89,9 @@
+     return nullptr;
+ }
+ 
+-bool exl3_gemv_try_launch
+-(
+-    void** kernel_args,
++// Kernel, block size and grid the GEMV path uses for this call; false if it declines
++static bool exl3_gemv_plan
++(
+     int size_m,
+     int size_k,
+     int size_n,
+@@ -100,9 +100,10 @@
+     bool c_fp32,
+     bool has_su_sv,
+     int device,
+-    cudaStream_t stream,
+-    void** launched_kernel,
+-    bool force
++    bool force,
++    void** out_kernel,
++    int* out_block_dim,
++    int* out_grid
+ )
+ {
+     // Free integer checks first; the env read (~64 ns) and device queries only run for calls
+@@ -154,6 +155,34 @@
+     int grid = MIN(size_n / cols, max_blocks);
+     if (grid < 1) return false;
+ 
++    *out_kernel = kernel;
++    *out_block_dim = block_dim;
++    *out_grid = grid;
++    return true;
++}
++
++bool exl3_gemv_try_launch
++(
++    void** kernel_args,
++    int size_m,
++    int size_k,
++    int size_n,
++    int K,
++    int cb,
++    bool c_fp32,
++    bool has_su_sv,
++    int device,
++    cudaStream_t stream,
++    void** launched_kernel,
++    bool force
++)
++{
++    void* kernel;
++    int block_dim;
++    int grid;
++    if (!exl3_gemv_plan(size_m, size_k, size_n, K, cb, c_fp32, has_su_sv, device, force, &kernel, &block_dim, &grid))
++        return false;
++
+     cuda_check(cudaLaunchCooperativeKernel
+     (
+         kernel,
+@@ -166,6 +195,24 @@
+ 
+     if (launched_kernel) *launched_kernel = kernel;
+     return true;
++}
++
++bool exl3_gemv_would_launch
++(
++    int size_m,
++    int size_k,
++    int size_n,
++    int K,
++    int cb,
++    bool c_fp32,
++    bool has_su_sv,
++    int device
++)
++{
++    void* kernel;
++    int block_dim;
++    int grid;
++    return exl3_gemv_plan(size_m, size_k, size_n, K, cb, c_fp32, has_su_sv, device, false, &kernel, &block_dim, &grid);
+ }
+ 
+ void exl3_gemv
+--- a/exllamav3_ext/quant/exl3_gemv.cuh
++++ b/exllamav3_ext/quant/exl3_gemv.cuh
+@@ -26,6 +26,19 @@
+     bool force
+ );
+ 
++// Whether exl3_gemv_try_launch (force = false) would take this call, without launching
++bool exl3_gemv_would_launch
++(
++    int size_m,
++    int size_k,
++    int size_n,
++    int K,
++    int cb,
++    bool c_fp32,
++    bool has_su_sv,
++    int device
++);
++
+ // Direct entry point (testing): errors if the call is not hard-eligible
+ void exl3_gemv
+ (
+--- a/exllamav3_ext/quant/exl3_kernel_map.cu
++++ b/exllamav3_ext/quant/exl3_kernel_map.cu
+@@ -20,6 +20,9 @@
+ #include "comp_units/exl3_comp_unit_7.cuh"
+ #include "comp_units/exl3_comp_unit_8.cuh"
+ 
++EXL3_GEMM_GU_EXTERNS(1) EXL3_GEMM_GU_EXTERNS(2) EXL3_GEMM_GU_EXTERNS(3) EXL3_GEMM_GU_EXTERNS(4)
++EXL3_GEMM_GU_EXTERNS(5) EXL3_GEMM_GU_EXTERNS(6) EXL3_GEMM_GU_EXTERNS(7) EXL3_GEMM_GU_EXTERNS(8)
++
+ int select_gemm_shape(int cc, int size_m, int size_k, int size_n, int K, bool multi, int bszm_in, int bszm_out)
+ {
+     bool mod_256 = (size_n % 256 == 0);
+@@ -228,3 +231,18 @@
+     TORCH_CHECK(K >= 1 && K <= 8 && cb >= 0 && cb <= 2, "No kernel for GEMM shape");
+     return (c_fp32 ? tab_mgemm_fp32 : tab_mgemm_fp16)[K][cb][shape_idx];
+ }
++
++
++static fp_exl3_gemm_gu_kernel (* const tab_gemm_gu[9])[5] =
++{
++    nullptr,
++    tfp_exl3_gemm_gu_kernel_b1, tfp_exl3_gemm_gu_kernel_b2, tfp_exl3_gemm_gu_kernel_b3,
++    tfp_exl3_gemm_gu_kernel_b4, tfp_exl3_gemm_gu_kernel_b5, tfp_exl3_gemm_gu_kernel_b6,
++    tfp_exl3_gemm_gu_kernel_b7, tfp_exl3_gemm_gu_kernel_b8
++};
++
++fp_exl3_gemm_gu_kernel get_gemm_gu_kernel_ptr(int K, int shape_idx, int cb)
++{
++    if (K < 1 || K > 8 || cb < 0 || cb > 2 || shape_idx < 1 || shape_idx > 4) return nullptr;
++    return tab_gemm_gu[K][cb][shape_idx];
++}
+--- a/exllamav3_ext/quant/exl3_kernel_map.cuh
++++ b/exllamav3_ext/quant/exl3_kernel_map.cuh
+@@ -50,8 +50,30 @@
+     const int* __restrict__ had_src_list, \
+     const int num_had_src
+ 
++// Fused gate/up projection + SiLU gate (exl3_gemm_gu_kernel): one input, two EXL3 matrices of the
++// same shape, fp16 outputs C_g, C_u and act = silu(C_g) * C_u
++#define EXL3_GEMM_GU_ARGS \
++    const half* __restrict__ A, \
++    const uint16_t* __restrict__ B_g, \
++    const uint16_t* __restrict__ B_u, \
++    half* C_g, \
++    half* C_u, \
++    half* __restrict__ act, \
++    const int size_m, \
++    const int size_k, \
++    const int size_n, \
++    int* __restrict__ locks, \
++    const half* __restrict__ suh_g, \
++    const half* __restrict__ suh_u, \
++    half* __restrict__ A_had_g, \
++    half* __restrict__ A_had_u, \
++    const half* __restrict__ svh_g, \
++    const half* __restrict__ svh_u, \
++    const float act_limit
++
+ typedef void (*fp_exl3_gemm_kernel) (EXL3_GEMM_ARGS);
+ typedef void (*fp_exl3_mgemm_kernel) (EXL3_MGEMM_ARGS);
++typedef void (*fp_exl3_gemm_gu_kernel) (EXL3_GEMM_GU_ARGS);
+ 
+ #define EXL3_GEMM_SHAPE_1     16,     16,    128,     6,     5
+ #define EXL3_GEMM_SHAPE_2     16,     32,    128,     4,     3
+@@ -125,6 +147,28 @@
+         EXL3_MGEMM_KERNEL_INSTANCES(K, false, cb) \
+     };
+ 
++// Fused gate/up instances (exl3_gemm_gu_kernel): fp16 output, the M = 16 shapes 1..4 only,
++// indexed [cb][shape_idx], one translation unit per K (comp_units/exl3_gemm_gu_inst_kK.cu)
++#define EXL3_GEMM_GU_INSTANCES_CB(K, cb) \
++    { \
++        nullptr, \
++        exl3_gemm_gu_kernel<K, false, cb, EXL3_GEMM_SHAPE_1>, \
++        exl3_gemm_gu_kernel<K, false, cb, EXL3_GEMM_SHAPE_2>, \
++        exl3_gemm_gu_kernel<K, false, cb, EXL3_GEMM_SHAPE_3>, \
++        exl3_gemm_gu_kernel<K, false, cb, EXL3_GEMM_SHAPE_4> \
++    }
++
++#define EXL3_GEMM_GU_INSTANCES(K) \
++    fp_exl3_gemm_gu_kernel tfp_exl3_gemm_gu_kernel_b##K[3][5] = \
++    { \
++        EXL3_GEMM_GU_INSTANCES_CB(K, 0), \
++        EXL3_GEMM_GU_INSTANCES_CB(K, 1), \
++        EXL3_GEMM_GU_INSTANCES_CB(K, 2) \
++    };
++
++#define EXL3_GEMM_GU_EXTERNS(K) \
++    extern fp_exl3_gemm_gu_kernel tfp_exl3_gemm_gu_kernel_b##K[3][5];
++
+ fp_exl3_gemm_kernel select_exl3_gemm_kernel
+ (
+     const int cc,
+@@ -159,3 +203,5 @@
+ 
+ fp_exl3_gemm_kernel get_gemm_kernel_ptr(int K, int shape_idx, bool c_fp32, int cb);
+ fp_exl3_mgemm_kernel get_mgemm_kernel_ptr(int K, int shape_idx, bool c_fp32, int cb);
++// Fused gate/up kernel for (K, shape, cb), nullptr where no instance exists
++fp_exl3_gemm_gu_kernel get_gemm_gu_kernel_ptr(int K, int shape_idx, int cb);

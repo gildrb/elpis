@@ -3,9 +3,17 @@
 # Its recorded RepoDigest is not a downloadable registry manifest.
 #
 # Targets:
-#   baseline  - the installed engine unchanged.
-#   candidate - baseline plus the sha-pinned patches/exl3 series, which commits greedy
-#               speculative verification through the proven Bend acceptance artifact.
+#   baseline          - the installed engine unchanged.
+#   candidate         - baseline plus the sha-pinned patches/exl3 series, which commits
+#                       greedy speculative verification through the proven Bend
+#                       acceptance artifact.
+#   candidate-rebuilt - candidate with exllamav3_ext recompiled for sm_86 from the
+#                       pinned, unpatched 355c6ee sources: the toolchain control.
+#   candidate-ext     - candidate with exllamav3_ext recompiled from those sources
+#                       plus the sha-pinned patches/exl3-ext series.
+# The two extension targets are built in two docker/build-exl3.sh phases: the
+# ext-*-manifest stage exports the composed engine manifest, whose SHA-256 then
+# becomes the final image's patch label.
 FROM qwen-litos:exl3-native-comparison AS baseline
 LABEL io.litos.exl3.base-image-id="sha256:b35314f48c7684b4c9cf3d59f4c21395316aa1fc0925db782f460005aa2602ff"
 LABEL io.litos.exl3.variant="baseline"
@@ -62,4 +70,90 @@ RUN --mount=type=bind,source=patches/exl3,target=/tmp/exl3-patches \
     /opt/venv/bin/python -I -B -c \
       "from exllamav3.generator.greedy_accept import GreedyAccept; GreedyAccept(7)"
 ENV QWEN_EXL3_VARIANT=candidate
+USER runner
+
+# Compiler stage: the devel image of the original r0b0tlab build, with the
+# candidate's exact interpreter and venv (torch 2.10.0+cu130, setuptools, ninja).
+FROM nvidia/cuda:13.0.0-devel-ubuntu24.04@sha256:1e8ac7a54c184a1af8ef2167f28fa98281892a835c981ebcddb1fad04bdd452d AS ext-toolchain
+ENV DEBIAN_FRONTEND=noninteractive \
+    TORCH_CUDA_ARCH_LIST=8.6 \
+    MAX_JOBS=16 \
+    PATH=/opt/venv/bin:/usr/local/cuda/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+RUN apt-get update && apt-get install -y --no-install-recommends g++ && \
+    rm -rf /var/lib/apt/lists/*
+COPY --from=candidate /opt/uv-python /opt/uv-python
+COPY --from=candidate /opt/venv /opt/venv
+
+# The extension stages and targets read the patch tools from the `patches` named build
+# context: build-exl3.sh snapshots patches/exl3 and patches/exl3-ext once, so both
+# build phases see identical inputs. ext.py verifies the source tree, vendored
+# setup.py and base shared object pins, applies the series only for `patched`, and
+# lays out /src/exllamav3 like the upstream checkout; setup.py then compiles every
+# translation unit with its upstream flags. The smoke import needs no driver:
+# libcuda is dlopened lazily.
+FROM ext-toolchain AS ext-rebuilt
+RUN --mount=type=bind,from=patches,target=/tmp/litos/patches \
+    python -I -B /tmp/litos/patches/exl3-ext/ext.py prepare rebuilt /src/exllamav3
+WORKDIR /src/exllamav3
+RUN python -I -B -c "import torch; assert torch.version.cuda == '13.0', torch.version.cuda" && \
+    nvcc --version && g++ --version && \
+    python -I -B setup.py build_ext --inplace && \
+    python -I -B -c "import sys; sys.path.insert(0, '/src/exllamav3'); import torch, exllamav3_ext" && \
+    readelf -p .comment exllamav3_ext.cpython-313-x86_64-linux-gnu.so
+RUN --mount=type=bind,from=patches,target=/tmp/litos/patches \
+    python -I -B /tmp/litos/patches/exl3-ext/ext.py compose rebuilt \
+      exllamav3_ext.cpython-313-x86_64-linux-gnu.so > exl3-patches.json
+
+FROM scratch AS ext-rebuilt-manifest
+COPY --from=ext-rebuilt /src/exllamav3/exl3-patches.json /
+
+FROM ext-toolchain AS ext-patched
+RUN --mount=type=bind,from=patches,target=/tmp/litos/patches \
+    python -I -B /tmp/litos/patches/exl3-ext/ext.py prepare patched /src/exllamav3
+WORKDIR /src/exllamav3
+RUN python -I -B -c "import torch; assert torch.version.cuda == '13.0', torch.version.cuda" && \
+    nvcc --version && g++ --version && \
+    python -I -B setup.py build_ext --inplace && \
+    python -I -B -c "import sys; sys.path.insert(0, '/src/exllamav3'); import torch, exllamav3_ext"
+RUN --mount=type=bind,from=patches,target=/tmp/litos/patches \
+    python -I -B /tmp/litos/patches/exl3-ext/ext.py compose patched \
+      exllamav3_ext.cpython-313-x86_64-linux-gnu.so > exl3-patches.json
+
+FROM scratch AS ext-patched-manifest
+COPY --from=ext-patched /src/exllamav3/exl3-patches.json /
+
+# record rehashes the installed shared object and every patched file, recomposes
+# the engine manifest in place, and it must equal the one exported in phase one.
+FROM candidate AS candidate-rebuilt
+ARG EXL3_ENGINE_MANIFEST_SHA256=
+LABEL io.litos.exl3.variant="candidate-rebuilt"
+LABEL io.litos.exl3.patches-sha256="${EXL3_ENGINE_MANIFEST_SHA256}"
+USER root
+COPY --from=ext-rebuilt /src/exllamav3/exllamav3_ext.cpython-313-x86_64-linux-gnu.so \
+  /opt/venv/lib/python3.13/site-packages/
+RUN --mount=type=bind,from=patches,target=/tmp/litos/patches \
+    /opt/venv/bin/python -I -B /tmp/litos/patches/exl3-ext/ext.py record rebuilt \
+      /opt/qwen/exl3-patches.json && \
+    echo "${EXL3_ENGINE_MANIFEST_SHA256}  /opt/qwen/exl3-patches.json" | sha256sum --check --strict && \
+    /opt/venv/bin/python -I -B /opt/qwen/bend-exl3/exl3_bend_accept.py /opt/qwen/bend-exl3 && \
+    /opt/venv/bin/python -I -B -c \
+      "import torch, exllamav3_ext; from exllamav3.generator.greedy_accept import GreedyAccept; GreedyAccept(7)"
+USER runner
+
+FROM candidate AS candidate-ext
+ARG EXL3_ENGINE_MANIFEST_SHA256=
+LABEL io.litos.exl3.variant="candidate-ext"
+LABEL io.litos.exl3.patches-sha256="${EXL3_ENGINE_MANIFEST_SHA256}"
+USER root
+COPY --from=ext-patched /opt/venv/lib/python3.13/site-packages/exllamav3/ \
+  /opt/venv/lib/python3.13/site-packages/exllamav3/
+COPY --from=ext-patched /src/exllamav3/exllamav3_ext.cpython-313-x86_64-linux-gnu.so \
+  /opt/venv/lib/python3.13/site-packages/
+RUN --mount=type=bind,from=patches,target=/tmp/litos/patches \
+    /opt/venv/bin/python -I -B /tmp/litos/patches/exl3-ext/ext.py record patched \
+      /opt/qwen/exl3-patches.json && \
+    echo "${EXL3_ENGINE_MANIFEST_SHA256}  /opt/qwen/exl3-patches.json" | sha256sum --check --strict && \
+    /opt/venv/bin/python -I -B /opt/qwen/bend-exl3/exl3_bend_accept.py /opt/qwen/bend-exl3 && \
+    /opt/venv/bin/python -I -B -c \
+      "import torch, exllamav3_ext; from exllamav3.generator.greedy_accept import GreedyAccept; GreedyAccept(7)"
 USER runner

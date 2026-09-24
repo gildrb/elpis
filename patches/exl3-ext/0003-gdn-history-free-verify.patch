@@ -1,0 +1,390 @@
+--- a/exllamav3_ext/gdn.cu
++++ b/exllamav3_ext/gdn.cu
+@@ -871,54 +871,46 @@
+ // of re-reading them from global memory twice per step. The arithmetic is the original's, op
+ // for op: the same q/k l2norm with the same warp reductions, the same j-ordered sum/state/v_out
+ // FMA chains per element, and the same fixed-order SUBK reductions through shared memory. The
+-// v columns never interact, so 32-column blocks produce identical results for any bsz. State
+-// rows are written as they are produced (history rows s + 1, the final state into row 0) and
+-// never read back
+-template <bool save_history>
+-__global__ __launch_bounds__(32 * SUBK)
+-void cuda_recurrent_gated_delta_rule_kernel_128_reg
++// v columns never interact, so 32-column blocks produce identical results for any bsz.
++//
++// Modes differ only in where state goes (never in how it is computed):
++//   RULE_INPLACE  final state into row 0
++//   RULE_HISTORY  state after token s into row s + 1, the final state into row 0
++//   RULE_VERIFY   no state writes: row 0 keeps the pre-verify state for a later commit
++//   RULE_COMMIT   replay the first `steps` verified tokens from row 0, final state into row 0,
++//                 no attention output. With the verify's own inputs this reproduces exactly the
++//                 state RULE_HISTORY would have stored in row `steps`
++enum { RULE_INPLACE = 0, RULE_HISTORY = 1, RULE_VERIFY = 2, RULE_COMMIT = 3 };
++
++template <int MODE>
++__device__ __forceinline__ void gated_delta_rule_128_reg
+ (
+-    const bfloat16* __restrict__ mixed_qkv,     // [bsz, seqlen, (k_dim + k_dim + v_dim)]
+-    const float* __restrict__ g,                // [bsz, seqlen, (group * num_k_heads)]
+-    const bfloat16* __restrict__ beta,          // [bsz, seqlen, (group * num_k_heads)]
+-    float* __restrict__ recurrent_state,        // [num_slots, max_history + 1, (group * num_k_heads), 128, 128]
+-    bfloat16* __restrict__ core_attn_out,       // [bsz, seqlen, num_v_heads, 128]
+-    const int bsz,
+-    const int seqlen,
++    const bfloat16* __restrict__ mixed_qkv,     // this batch row's [seqlen, (k_dim + k_dim + v_dim)]
++    const float* __restrict__ g,                // this batch row's [seqlen, (group * num_k_heads)]
++    const bfloat16* __restrict__ beta,          // this batch row's [seqlen, (group * num_k_heads)]
++    float* __restrict__ slot_state,             // [max_history + 1, (group * num_k_heads), 128, 128]
++    bfloat16* __restrict__ core_attn_out,       // this batch row's [seqlen, num_v_heads, 128]
++    const int steps,
+     const int num_k_heads,
+     const int num_v_heads,
+-    const int k_head_dim,
+-    const int v_head_dim,
+     const float scale,
+-    const int* __restrict__ slots,              // [bsz]
+-    const int history_stride,                   // max_history + 1
+-    const float* __restrict__ D                 // unused, matches the generic kernel signature
++    const size_t state_size,
++    const int head,
++    const int v_chunk
+ )
+ {
+     constexpr int HEAD_DIM = 128;
+     constexpr int V_CHUNK_DIM = 32;
+     constexpr int BTS = HEAD_DIM / SUBK;
+     static_assert(BTS == 32 && HEAD_DIM % 32 == 0, "one warp per k-slice, one lane per v column");
+-
+-    int group = num_v_heads / num_k_heads;
+     constexpr size_t HEAD_STATE_SIZE = HEAD_DIM * HEAD_DIM;
+-    const size_t state_size = group * num_k_heads * HEAD_STATE_SIZE;
+-    const size_t slot_size = (size_t) history_stride * state_size;
+-
+-    int bi = blockIdx.x;
+-    mixed_qkv +=        bi * seqlen * (3 * HEAD_DIM * num_k_heads + HEAD_DIM * (num_v_heads - num_k_heads));
+-    g +=                (size_t) bi * seqlen * (group * num_k_heads);
+-    beta +=             bi * seqlen * (group * num_k_heads);
+-    int state_slot = slots ? slots[bi] : bi;
+-    float* slot_state = recurrent_state + (size_t) state_slot * slot_size;
+-    core_attn_out +=    bi * seqlen * num_v_heads * HEAD_DIM;
+ 
++    int group = num_v_heads / num_k_heads;
+     int t = threadIdx.x;        // q/k element; lane = v column, warp = k-slice
+     int lane = t % 32;
+     int warp = t / 32;
+-    int head = blockIdx.y;
+     int k_head = head / group;
+-    int v_start = blockIdx.z * V_CHUNK_DIM;
++    int v_start = v_chunk * V_CHUNK_DIM;
+ 
+     __shared__ float sh_red[2][HEAD_DIM / 32];
+     __shared__ float sh_k[HEAD_DIM];
+@@ -932,12 +924,11 @@
+     #pragma unroll
+     for (int j = 0; j < BTS; ++j) state[j] = slot_state[elem + j * HEAD_DIM];
+ 
+-    for (int s = 0; s < seqlen; ++s)
++    for (int s = 0; s < steps; ++s)
+     {
+         const bfloat16* gl_q = mixed_qkv + k_head * HEAD_DIM;
+         const bfloat16* gl_k = mixed_qkv + (num_k_heads + k_head) * HEAD_DIM;
+         const bfloat16* gl_v = mixed_qkv + (2 * num_k_heads * HEAD_DIM) + head * HEAD_DIM + v_start;
+-        bfloat16* out = core_attn_out + head * HEAD_DIM + v_start;
+ 
+         float q = __bfloat162float(gl_q[t]);
+         float k = __bfloat162float(gl_k[t]);
+@@ -994,21 +985,22 @@
+             float v_out = 0.0f;
+             const float* sh_k_rd = sh_k + warp * BTS;
+             const float* sh_q_rd = sh_q + warp * BTS;
+-            float* rs_w = slot_state + (s == seqlen - 1 ? 0 : (size_t) (s + 1) * state_size) + elem;
++            float* rs_w = slot_state + (s == steps - 1 ? 0 : (size_t) (s + 1) * state_size) + elem;
+ 
+             #pragma unroll
+             for (int j = 0; j < BTS; ++j)
+             {
+                 state[j] = state[j] * g_h + sh_k_rd[j] * v * beta_h;
+-                if constexpr (save_history) rs_w[j * HEAD_DIM] = state[j];
++                if constexpr (MODE == RULE_HISTORY) rs_w[j * HEAD_DIM] = state[j];
+                 v_out = v_out + sh_q_rd[j] * state[j];
+             }
+             sh_dot2[warp][lane] = v_out;
+         }
+         __syncthreads();
+ 
+-        if (warp == 0)
++        if (MODE != RULE_COMMIT && warp == 0)
+         {
++            bfloat16* out = core_attn_out + (size_t) s * num_v_heads * HEAD_DIM + head * HEAD_DIM + v_start;
+             float v_out = 0.0f;
+             #pragma unroll
+             for (int i = 0; i < SUBK; ++i) v_out += sh_dot2[i][lane];
+@@ -1018,16 +1010,57 @@
+         mixed_qkv +=        2 * HEAD_DIM * num_k_heads + HEAD_DIM * num_v_heads;
+         g +=                num_v_heads;
+         beta +=             num_v_heads;
+-        core_attn_out +=    num_v_heads * HEAD_DIM;
+     }
+ 
+-    if constexpr (!save_history)
++    if constexpr (MODE == RULE_INPLACE || MODE == RULE_COMMIT)
+     {
+         #pragma unroll
+         for (int j = 0; j < BTS; ++j) slot_state[elem + j * HEAD_DIM] = state[j];
+     }
+ }
+ 
++template <int MODE>
++__global__ __launch_bounds__(32 * SUBK)
++void cuda_recurrent_gated_delta_rule_kernel_128_reg
++(
++    const bfloat16* __restrict__ mixed_qkv,     // [bsz, seqlen, (k_dim + k_dim + v_dim)]
++    const float* __restrict__ g,                // [bsz, seqlen, (group * num_k_heads)]
++    const bfloat16* __restrict__ beta,          // [bsz, seqlen, (group * num_k_heads)]
++    float* __restrict__ recurrent_state,        // [num_slots, max_history + 1, (group * num_k_heads), 128, 128]
++    bfloat16* __restrict__ core_attn_out,       // [bsz, seqlen, num_v_heads, 128]
++    const int bsz,
++    const int seqlen,
++    const int num_k_heads,
++    const int num_v_heads,
++    const int k_head_dim,
++    const int v_head_dim,
++    const float scale,
++    const int* __restrict__ slots,              // [bsz]
++    const int history_stride,                   // max_history + 1
++    const float* __restrict__ D                 // unused, matches the generic kernel signature
++)
++{
++    static_assert(MODE != RULE_COMMIT, "commits run through batched_state_replay_kernel");
++    constexpr int HEAD_DIM = 128;
++    int group = num_v_heads / num_k_heads;
++    const size_t state_size = group * num_k_heads * (size_t) (HEAD_DIM * HEAD_DIM);
++    const size_t slot_size = (size_t) history_stride * state_size;
++
++    int bi = blockIdx.x;
++    mixed_qkv +=        bi * seqlen * (3 * HEAD_DIM * num_k_heads + HEAD_DIM * (num_v_heads - num_k_heads));
++    g +=                (size_t) bi * seqlen * (group * num_k_heads);
++    beta +=             bi * seqlen * (group * num_k_heads);
++    int state_slot = slots ? slots[bi] : bi;
++    float* slot_state = recurrent_state + (size_t) state_slot * slot_size;
++    core_attn_out +=    bi * seqlen * num_v_heads * HEAD_DIM;
++
++    gated_delta_rule_128_reg<MODE>
++    (
++        mixed_qkv, g, beta, slot_state, core_attn_out, seqlen,
++        num_k_heads, num_v_heads, scale, state_size, blockIdx.y, blockIdx.z
++    );
++}
++
+ void cuda_recurrent_gated_delta_rule_gr
+ (
+     const at::Tensor& mixed_qkv,
+@@ -1041,12 +1074,15 @@
+     int v_head_dim,
+     const c10::optional<at::Tensor>& slots,
+     bool history,
+-    Graph* graph
++    Graph* graph,
++    bool replay_verify
+ )
+ {
+     const at::cuda::OptionalCUDAGuard device_guard(mixed_qkv.device());
+     cudaStream_t stream = graph ? graph->capture_stream : at::cuda::getCurrentCUDAStream().stream();
+     TORCH_CHECK(!graph || slots.has_value(), "cuda_recurrent_gated_delta_rule: graph capture requires slots");
++    TORCH_CHECK(!replay_verify || (history && g.dim() == 3 && k_head_dim == 128 && v_head_dim == 128),
++                "cuda_recurrent_gated_delta_rule: replay_verify needs a 128x128 per-head-decay history launch");
+ 
+     int bsz = mixed_qkv.size(0);
+     int seqlen = mixed_qkv.size(1);
+@@ -1162,8 +1198,9 @@
+         // One thread per (k-slice, v column) chain, 32 v columns per block, for any bsz
+         blocks = dim3(bsz, num_v_heads, 128 / 32);
+         threads = dim3(32 * SUBK);
+-        if (history) LAUNCH_RULE(cuda_recurrent_gated_delta_rule_kernel_128_reg<true>)
+-        else         LAUNCH_RULE(cuda_recurrent_gated_delta_rule_kernel_128_reg<false>)
++        if (replay_verify) LAUNCH_RULE(cuda_recurrent_gated_delta_rule_kernel_128_reg<RULE_VERIFY>)
++        else if (history)  LAUNCH_RULE(cuda_recurrent_gated_delta_rule_kernel_128_reg<RULE_HISTORY>)
++        else               LAUNCH_RULE(cuda_recurrent_gated_delta_rule_kernel_128_reg<RULE_INPLACE>)
+     }
+     else if (!history)
+     {
+@@ -2195,3 +2232,70 @@
+         cuda_check(cudaPeekAtLastError());
+     }
+ }
++
++// Commit of history-free verifies (RULE_VERIFY), one job per recurrent layer and slot: replays
++// the first `steps` verified tokens of batch row `row` through gated_delta_rule_128_reg from
++// the pre-verify state in row 0, reading the verify's own conv output / g / beta, and writes the
++// result back to row 0 -- bit-identical to the row-`steps` state a RULE_HISTORY verify stores,
++// which batched_state_rewind would have copied into row 0
++struct StateReplayJobBatch { StateReplayJob jobs[REWIND_MAX_JOBS]; int num_jobs; };
++static_assert(sizeof(StateReplayJobBatch) <= 4096, "StateReplayJobBatch exceeds the kernel parameter limit");
++
++__global__ __launch_bounds__(32 * SUBK)
++void batched_state_replay_kernel(StateReplayJobBatch batch)
++{
++    int job_idx = blockIdx.z;
++    if (job_idx >= batch.num_jobs) return;
++    StateReplayJob j = batch.jobs[job_idx];
++    if ((int) blockIdx.y >= j.num_v_heads) return;
++
++    constexpr int HEAD_DIM = 128;
++    size_t F = 2 * HEAD_DIM * j.num_k_heads + HEAD_DIM * j.num_v_heads;
++    size_t row_tokens = (size_t) j.row * j.seqlen;
++    gated_delta_rule_128_reg<RULE_COMMIT>
++    (
++        (const bfloat16*) j.mixed_qkv + row_tokens * F,
++        (const float*) j.g + row_tokens * j.num_v_heads,
++        (const bfloat16*) j.beta + row_tokens * j.num_v_heads,
++        (float*) j.state,
++        nullptr,
++        j.steps,
++        j.num_k_heads,
++        j.num_v_heads,
++        0.0f,
++        (size_t) j.num_v_heads * HEAD_DIM * HEAD_DIM,
++        blockIdx.y,
++        blockIdx.x
++    );
++}
++
++void batched_state_replay(std::vector<StateReplayJob> const& jobs, int device_index)
++{
++    if (jobs.empty()) return;
++    c10::cuda::CUDAGuard device_guard((c10::DeviceIndex) device_index);
++    cudaStream_t stream = at::cuda::getCurrentCUDAStream().stream();
++
++    for (size_t base = 0; base < jobs.size(); base += REWIND_MAX_JOBS)
++    {
++        int n = (int) MIN(jobs.size() - base, (size_t) REWIND_MAX_JOBS);
++        StateReplayJobBatch batch;
++        batch.num_jobs = n;
++        int max_heads = 0;
++        for (int i = 0; i < n; ++i)
++        {
++            const StateReplayJob& j = jobs[base + i];
++            TORCH_CHECK(j.mixed_qkv && j.g && j.beta && j.state, "batched_state_replay: null pointer");
++            TORCH_CHECK(1 <= j.steps && j.steps <= j.seqlen && 0 <= j.row,
++                        "batched_state_replay: steps must be in 1..seqlen");
++            TORCH_CHECK(j.num_k_heads >= 1 && j.num_v_heads % j.num_k_heads == 0 && j.num_v_heads <= 65535,
++                        "batched_state_replay: bad head counts");
++            batch.jobs[i] = j;
++            max_heads = MAX(max_heads, j.num_v_heads);
++        }
++
++        gdn_max_shared_carveout((const void*) &batched_state_replay_kernel);
++        dim3 blocks(128 / 32, max_heads, n);
++        batched_state_replay_kernel<<<blocks, 32 * SUBK, 0, stream>>>(batch);
++        cuda_check(cudaPeekAtLastError());
++    }
++}
+--- a/exllamav3_ext/gdn.cuh
++++ b/exllamav3_ext/gdn.cuh
+@@ -61,7 +61,9 @@
+     int v_head_dim,
+     const c10::optional<at::Tensor>& slots,
+     bool history,
+-    Graph* graph
++    Graph* graph,
++    bool replay_verify = false      // history launch that leaves every state row untouched, for
++                                    // a later batched_state_replay commit (128x128 heads only)
+ );
+ 
+ // Mamba2 discretization: dt = clamp(softplus(dt_raw + dt_bias), dt_min, dt_max), g = -exp(a_log) * dt
+@@ -246,5 +248,29 @@
+         src(_src), dst(_dst), num_elements(_num_elements) {}
+ };
+ 
++// Commit of a replay_verify launch: recurrent_state[slot, 0] <- state after the first `steps` of
++// the `seqlen` verified tokens of batch row `row`, recomputed from the pre-verify state in row 0
++// with the verify's own inputs (conv output [bsz, seqlen, F] bf16, g [bsz, seqlen, H] float,
++// beta [bsz, seqlen, H] bf16). `state` addresses recurrent_state[slot, 0].
++struct StateReplayJob
++{
++    uintptr_t mixed_qkv;
++    uintptr_t g;
++    uintptr_t beta;
++    uintptr_t state;
++    int row;
++    int seqlen;
++    int steps;
++    int num_k_heads;
++    int num_v_heads;
++
++    StateReplayJob() = default;
++    StateReplayJob(uintptr_t _mixed_qkv, uintptr_t _g, uintptr_t _beta, uintptr_t _state, int _row,
++                   int _seqlen, int _steps, int _num_k_heads, int _num_v_heads) :
++        mixed_qkv(_mixed_qkv), g(_g), beta(_beta), state(_state), row(_row), seqlen(_seqlen),
++        steps(_steps), num_k_heads(_num_k_heads), num_v_heads(_num_v_heads) {}
++};
++
+ void batched_conv_rewind(std::vector<ConvRewindJob> const& jobs, int device_index);
+ void batched_state_rewind(std::vector<StateRewindJob> const& jobs, int device_index);
++void batched_state_replay(std::vector<StateReplayJob> const& jobs, int device_index);
+--- a/exllamav3_ext/bindings.cpp
++++ b/exllamav3_ext/bindings.cpp
+@@ -222,6 +222,9 @@
+         .def(py::init<uintptr_t, uintptr_t, int64_t>());
+     m.def("batched_conv_rewind", &batched_conv_rewind, py::arg("jobs"), py::arg("device_index"));
+     m.def("batched_state_rewind", &batched_state_rewind, py::arg("jobs"), py::arg("device_index"));
++    py::class_<StateReplayJob>(m, "StateReplayJob")
++        .def(py::init<uintptr_t, uintptr_t, uintptr_t, uintptr_t, int, int, int, int, int>());
++    m.def("batched_state_replay", &batched_state_replay, py::arg("jobs"), py::arg("device_index"));
+ 
+     m.def("argmax_sample", &argmax_sample, "argmax_sample");
+     m.def("gumbel_sample", &gumbel_sample, "gumbel_sample");
+--- a/exllamav3_ext/libtorch/gated_delta_net.cpp
++++ b/exllamav3_ext/libtorch/gated_delta_net.cpp
+@@ -69,6 +69,15 @@
+     return !slot(bsz, seqlen, history).configured;
+ }
+ 
++void BC_GatedDeltaNetSplit::set_replay_verify(bool enable)
++{
++    TORCH_CHECK(!enable || (!kda && k_head_dim == 128 && v_head_dim == 128),
++                "BC_GatedDeltaNetSplit: replay_verify needs 128x128 per-head-decay heads");
++    for (const Slot& s : slots_hist)
++        TORCH_CHECK(!s.configured, "BC_GatedDeltaNetSplit: replay_verify must be set before any history slot");
++    replay_verify = enable;
++}
++
+ void BC_GatedDeltaNetSplit::configure_slot
+ (
+     int bsz,
+@@ -313,7 +322,8 @@
+         v_head_dim,
+         slots,
+         history,
+-        graph
++        graph,
++        history && replay_verify
+     );
+ 
+     norm->run_gr(s.core_attn_out, s.core_attn_out_f, s.z, graph);
+--- a/exllamav3_ext/libtorch/gated_delta_net.h
++++ b/exllamav3_ext/libtorch/gated_delta_net.h
+@@ -156,6 +156,13 @@
+     at::Tensor g_a_weight_t;      // (Hv, hidden) half
+     at::Tensor g_b_weight_t;      // (Nv*Hv, Hv) half
+ 
++    // History launches leave every recurrent-state row untouched (see
++    // cuda_recurrent_gated_delta_rule_gr, replay_verify); the caller commits accepted tokens with
++    // batched_state_replay from this layer's history-slot conv_out / g / beta statics. Fixed
++    // before the first history slot is configured, since captured graphs bake the kernel in
++    bool replay_verify = false;
++    void set_replay_verify(bool enable);
++
+     struct Slot
+     {
+         bool configured = false;
+--- a/exllamav3_ext/libtorch/gated_delta_net_bc.h
++++ b/exllamav3_ext/libtorch/gated_delta_net_bc.h
+@@ -165,6 +165,7 @@
+     py::arg("o_xh")
+ )
+ .def("run_bszN", &BC_GatedDeltaNetSplit::run_bszN)
++.def("set_replay_verify", &BC_GatedDeltaNetSplit::set_replay_verify, py::arg("enable"))
+ .def("set_qkvz_bundle", &BC_GatedDeltaNetSplit::set_qkvz_bundle,
+     py::arg("ptrs_trellis"),
+     py::arg("ptrs_suh"),

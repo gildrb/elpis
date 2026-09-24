@@ -1,0 +1,255 @@
+--- a/modules/gated_delta_net.py
++++ b/modules/gated_delta_net.py
+@@ -42,24 +42,31 @@
+             # l.device may be a plain string ("cuda:0") in some TP contexts rather than a
+             # torch.device, so normalize rather than assume a .index attribute
+             device_index = torch.device(l.device).index
+-            conv_jobs, state_jobs = jobs_by_device.setdefault(device_index, ([], []))
++            conv_jobs, state_jobs, replay_jobs = jobs_by_device.setdefault(device_index, ([], [], []))
+             cj = l.rewind_conv_job(slot, last_history, num_tokens)
+             if cj is not None:
+                 conv_jobs.append(cj)
++            # A layer whose last verify ran history-free replays its accepted tokens instead of
++            # copying a history row; rewind_state_job yields nothing for it
+             sj = l.rewind_state_job(slot, last_history, num_tokens)
+             if sj is not None:
+                 state_jobs.append(sj)
++            rj = l.rewind_replay_job(slot, last_history, num_tokens)
++            if rj is not None:
++                replay_jobs.append(rj)
+         else:
+             l.rewind(slot, last_history, num_tokens)
+     return jobs_by_device
+ 
+ 
+ def _dispatch_rewind_jobs(jobs_by_device):
+-    for device_index, (conv_jobs, state_jobs) in jobs_by_device.items():
++    for device_index, (conv_jobs, state_jobs, replay_jobs) in jobs_by_device.items():
+         if conv_jobs:
+             ext.batched_conv_rewind(conv_jobs, device_index)
+         if state_jobs:
+             ext.batched_state_rewind(state_jobs, device_index)
++        if replay_jobs:
++            ext.batched_state_replay(replay_jobs, device_index)
+ 
+ 
+ def mp_cache_recurrent_rewind(local_context: dict, cache_id: int, slot: int, last_history, num_tokens):
+@@ -193,6 +200,16 @@
+         self.max_history = max_history
+         self.max_batch_size = max_batch_size
+         self.cache_id = cache_id
++        # slot -> (conv_out, g, beta, row, seqlen) of a history-free verify (replay_verify) whose
++        # tokens are not yet in recurrent_state[slot, 0]: row 0 still holds the pre-verify state,
++        # and the verify's per-layer inputs (batch row `row`) stay untouched until this layer's
++        # next forward. Every reader of row 0 commits first, so row 0 is always observed exactly
++        # as the history-mode kernel would have left it
++        self.pending = {}
++        # Slots whose pending verify was committed in full before any rewind (commit_pending):
++        # their history rows were never written, so a later rewind of that verify must fail
++        # rather than copy a stale row. Cleared by the slot's next forward, rewind, clear or unstash
++        self.flushed = set()
+ 
+ 
+     def get_checkpoint_size(self):
+@@ -212,20 +229,65 @@
+         self.conv_state.zero_()
+         self.recurrent_state.zero_()
+         self.device = device
++        self.pending.clear()
++        self.flushed.clear()
+ 
+ 
+     def free(self):
+         self.conv_state = torch.empty_like(self.conv_state, device = "meta")
+         self.recurrent_state = torch.empty_like(self.recurrent_state, device = "meta")
+         self.device = None
++        self.pending.clear()
++        self.flushed.clear()
+ 
+ 
+     def clear(self, idx: int):
++        self.pending.pop(idx, None)
++        self.flushed.discard(idx)
+         if self.device is not None:
+             self.conv_state[idx].zero_()
+             self.recurrent_state[idx].zero_()
+ 
+ 
++    def replay_job(self, slot: int, steps: int):
++        """Job for ext.batched_state_replay committing the first `steps` tokens of the slot's
++        pending verify into recurrent_state[slot, 0]; the verify is no longer pending."""
++        conv_out, g, beta, row, seqlen = self.pending.pop(slot)
++        assert 1 <= steps <= seqlen
++        rs = self.recurrent_state
++        return ext.StateReplayJob(
++            conv_out.data_ptr(),
++            g.data_ptr(),
++            beta.data_ptr(),
++            rs.data_ptr() + slot * rs.stride(0) * rs.element_size(),
++            row,
++            seqlen,
++            steps,
++            self.module.num_k_heads,
++            self.module.num_v_heads,
++        )
++
++
++    def commit_pending(self, slots = None):
++        """Commit every verified token of the pending verifies of `slots` (default: all), leaving
++        row 0 as the history-mode kernel did after the whole verify."""
++        jobs = []
++        for slot, pending in list(self.pending.items()):
++            if slots is None or slot in slots:
++                jobs.append(self.replay_job(slot, pending[4]))
++                self.flushed.add(slot)
++        if jobs:
++            ext.batched_state_replay(jobs, torch.device(self.device).index)
++
++
++    def check_history_rows(self, slot: int, num_tokens: int):
++        """Refuse to rewind into history rows a history-free verify never wrote."""
++        if slot in self.flushed:
++            self.flushed.discard(slot)
++            if num_tokens > 0:
++                raise RuntimeError("GDNLayerState: rewind of a history-free verify after its full commit")
++
++
+     def get_state_tensors(self):
+         return (
+             self.conv_state,
+@@ -235,10 +297,18 @@
+ 
+     def rewind(self, slot: int, last_history: int, num_tokens: int):
+         assert num_tokens <= last_history
+-        if num_tokens > 0:
+-            r_state = self.recurrent_state[slot, 0]
+-            r_state_rewind = self.recurrent_state[slot, last_history + 1 - num_tokens]
+-            r_state.copy_(r_state_rewind)
++        if slot in self.pending:
++            assert self.pending[slot][4] == last_history + 1
++            ext.batched_state_replay(
++                [self.replay_job(slot, last_history + 1 - num_tokens)],
++                torch.device(self.device).index,
++            )
++        else:
++            self.check_history_rows(slot, num_tokens)
++            if num_tokens > 0:
++                r_state = self.recurrent_state[slot, 0]
++                r_state_rewind = self.recurrent_state[slot, last_history + 1 - num_tokens]
++                r_state.copy_(r_state_rewind)
+         cdim = self.module.conv_kernel_size
+         if last_history > 0:
+             c_state = self.conv_state[slot, :, :cdim]
+@@ -273,6 +343,9 @@
+     def rewind_state_job(self, slot: int, last_history: int, num_tokens: int):
+         """Job descriptor for the batched recurrent-state rewind kernel (ext.batched_state_rewind),
+         computed without performing any copy. Same gating condition as rewind()'s state branch."""
++        if slot in self.pending:
++            return None
++        self.check_history_rows(slot, num_tokens)
+         if num_tokens == 0:
+             return None
+         rs = self.recurrent_state
+@@ -285,7 +358,18 @@
+         )
+ 
+ 
++    def rewind_replay_job(self, slot: int, last_history: int, num_tokens: int):
++        """Job descriptor for ext.batched_state_replay when the slot's last verify ran history-free:
++        commits the last_history + 1 - num_tokens accepted tokens, the same count whose history
++        row rewind() copies otherwise. Same effect as rewind()'s state branch."""
++        if slot not in self.pending:
++            return None
++        assert num_tokens <= last_history and self.pending[slot][4] == last_history + 1
++        return self.replay_job(slot, last_history + 1 - num_tokens)
++
++
+     def stash(self, slot, position: int = 0):
++        self.commit_pending((slot,))
+         cdim = self.module.conv_kernel_size
+         return (
+             self.recurrent_state[slot, :1].cpu(),
+@@ -294,6 +378,8 @@
+ 
+ 
+     def unstash(self, slot, stashed, position: int = 0):
++        self.pending.pop(slot, None)
++        self.flushed.discard(slot)
+         cdim = self.module.conv_kernel_size
+         s, c = stashed
+         self.recurrent_state[slot, :1].copy_(s)
+@@ -570,6 +656,12 @@
+         self.ba_weight_t = None
+         self.ba_bias = None
+         self.ba_weight_filled = False
++        # History-free verify with commit-time replay (see GDNLayerState.pending); per-layer
++        # rule-kernel inputs of each history slot, keyed by (bsz, seqlen), and the layer states
++        # (of any cache) that may hold verifies pending on them
++        self.replay_verify = False
++        self.replay_statics = {}
++        self.replay_owners = set()
+ 
+         self.recurrent_layers = []
+         self.tp_recurrent_lookup = {}
+@@ -699,6 +791,8 @@
+                 self.beta_scale
+             )
+             self.bc_split = True
++            self.replay_verify = self.k_head_dim == 128 and self.v_head_dim == 128
++            self.bc.set_replay_verify(self.replay_verify)
+ 
+             # Sliced qkv+z bundle: both projections read x and are cut into equal-width column
+             # slices run as one launch (SlicedMultiLinear); the graph object gets the tables, the
+@@ -810,6 +904,8 @@
+         self.ba_weight_t = None
+         self.ba_bias = None
+         self.ba_weight_filled = False
++        self.replay_verify = False
++        self.replay_statics = {}
+         self.multi_qkvz = None
+         self.prealloc_qkvz_carrier = None
+         self.a_log = None
+@@ -945,6 +1041,14 @@
+         g               = g_tensor_cache.get(device, (bsz, seqlen, nv), torch.float, "s_g")
+         mixed_qkv       = g_tensor_cache.get(device, (bsz, f, seqlen), torch.bfloat16, "s_mqkv")
+         conv_out        = g_tensor_cache.get(device, (bsz, seqlen, f), torch.bfloat16, "s_conv")
++        if history and self.replay_verify:
++            # A history-free verify is committed from its own inputs after the whole model ran,
++            # so this layer keeps private copies of the rule kernel's inputs (the shared cache
++            # entries above are overwritten by every later layer)
++            beta     = torch.empty((bsz, seqlen, nv), dtype = torch.bfloat16, device = device)
++            g        = torch.empty((bsz, seqlen, nv), dtype = torch.float, device = device)
++            conv_out = torch.empty((bsz, seqlen, f), dtype = torch.bfloat16, device = device)
++            self.replay_statics[(bsz, seqlen)] = (conv_out, g, beta)
+         core_attn_out   = g_tensor_cache.get(device, (bsz, seqlen, nv, hv), torch.bfloat16, "s_cao")
+         core_attn_out_f = g_tensor_cache.get(device, (bsz, seqlen, nv * hv), torch.half, "s_caof")
+         qkv_xh = g_tensor_cache.get(device, (bsz, seqlen, self.hidden_size), torch.half, "s_qkv_xh")
+@@ -998,6 +1102,14 @@
+                 rsl = rsg[0].cache.get_recurrent_layer(layer_instance)
+             conv_state, recurrent_state = rsl.get_state_tensors()
+             save_state = True
++            # This forward may read row 0 of a pending slot and overwrites the statics every
++            # pending verify of this layer, in any cache, would replay from: commit them in full
++            # first, leaving row 0 as the history-mode kernel did. Slots this forward advances
++            # get fresh history, so their full commit no longer blocks a rewind
++            for owner in self.replay_owners:
++                owner.commit_pending()
++            self.replay_owners.clear()
++            rsl.flushed.difference_update(r.slot for r in rsg)
+         else:
+             recurrent_slots = None
+             conv_state, recurrent_state = None, None
+@@ -1043,6 +1155,13 @@
+                     self._bc_configure_slot(bsz, seqlen, save_history)
+             y = torch.empty_like(x, dtype = self.out_dtype or torch.half)
+             self.bc.run_bszN(x, y, conv_state, recurrent_state, recurrent_slots, save_history)
++            if save_history and self.replay_verify:
++                # History-free verify: row 0 still holds the pre-verify state of every slot, the
++                # accepted tokens are committed from this layer's statics at rewind
++                conv_out, g, beta = self.replay_statics[(bsz, seqlen)]
++                for row, r in enumerate(rsg):
++                    rsl.pending[r.slot] = (conv_out, g, beta, row, seqlen)
++                self.replay_owners.add(rsl)
+             if self.tp_reduce:
+                 params["backend"].all_reduce(y)
+             return to2(y, out_dtype, self.out_dtype)
