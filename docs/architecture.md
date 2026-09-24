@@ -31,8 +31,8 @@ Bend states laws for decisions the serving path must get right and proves the
 production definitions against them (`LAWS.bend` → `PROOF.bend`). The current
 focus is EXL3 greedy speculative acceptance: the accepted-prefix and bonus-token
 decision for each DFlash2 block, proved in Bend and executed in the serving path.
-`bend/selector*.bend` records the selector-order and window lessons from the
-native DFlash2 stack. A Bend proof covers the Bend definition; it does not certify
+The artifact is built by `bend/exl3_build.py` with the pinned Bend 2.0.27.
+A Bend proof covers the Bend definition; it does not certify
 the CUDA kernels, the Python server or measured speed. Those need their own
 evidence.
 
