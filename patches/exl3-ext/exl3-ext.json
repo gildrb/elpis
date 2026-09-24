@@ -16,7 +16,7 @@
     "path": "/opt/venv/lib/python3.13/site-packages/exllamav3_ext.cpython-313-x86_64-linux-gnu.so",
     "base_sha256": "6d30690fdb76b3c4ad3fb5e69f0479707e410fc9b6194e2a5e32f4d7fe1fd8b3"
   },
-  "series_sha256": "5cd389958608e06eed0781cc90c3f0fd2bfdbdb71de5c2fbfd75e84967a59168",
+  "series_sha256": "ed43026ef4aa6f68a058b81fc291de6ce17e471863638ef56ea4ed1406e7c55f",
   "patches": [
     {
       "name": "0001-gdn-shared-carveout.patch",
@@ -37,6 +37,10 @@
     {
       "name": "3001-attn-exact.patch",
       "sha256": "5f3a3377d4380021a546cc1289af2d40385d972f65a7e0d08d1fffa96dafcfd8"
+    },
+    {
+      "name": "3002-attn-gqa-split.patch",
+      "sha256": "610b04b44f477dc2456716a01a695c6508c672f881ca1e7e41208cdd506d8710"
     }
   ],
   "files": {
@@ -68,9 +72,13 @@
       "pre": "b7b43921a19aa64cbe56786a9911c2796b5d4327818f0cae73c4cf358e6907df",
       "post": "3c4564c8fe866346b5efffdca4a04370159a43fea5707719542b843f5135362e"
     },
+    "modules/attention_fn/bc_attn.py": {
+      "pre": "63f0768f313cb7015485d4655b433020f2e9e66bb44d971a9e6c65bc306994e0",
+      "post": "75b26b226dd18fcfc101e252b7b3c9727a6a811348c6e580409a7237f3e4e9c1"
+    },
     "modules/attention_fn/triton_paged.py": {
       "pre": "910379b663acb08711c3be207cd3e9ed96658527cc110a6ce39c793f997836d9",
-      "post": "81cccd0b62f7466e9831cfca22ad6f0adc3360d6a7b4850dc769ca5648f00912"
+      "post": "06d96660c166270d2fdb94cc557df2b9ad6c8122048d563758564595f8e57194"
     },
     "modules/gated_delta_net.py": {
       "pre": "955f2ae25509ccf695dac4b79721115bc51d9d63a7f6f1eeb0a42671b685cf5a",
