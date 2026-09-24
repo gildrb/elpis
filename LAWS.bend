@@ -15,3 +15,9 @@ import ./bend/exl3_round_laws.bend as Exl3RoundLaws
 # Residual add + RMSNorm fusion (ext patch 7001): the fused RES_IN register path and the layer
 # handshake (bend/norm_fuse.bend) against the unfused add + RES_NONE norm (bend/norm_fuse_spec.bend).
 import ./bend/norm_fuse_laws.bend as NormFuseLaws
+# Verify-attention split/combine partition (ext patch 3003, attn_verify.cu): exactly-once causal
+# coverage and combine/split agreement over the Nat model bend/attn_split.bend.
+import ./bend/attn_split_laws.bend as AttnSplitLaws
+# DRAM roofline of one verify round: safetensors-header byte model (bend/roofline.bend) equal to the
+# config-shape enumeration (bend/roofline_spec.bend); bandwidth/tokens ceilings and loss ledger over Nat.
+import ./bend/roofline_laws.bend as RooflineLaws
