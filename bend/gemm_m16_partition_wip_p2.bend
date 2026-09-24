@@ -212,3 +212,202 @@ def Laws.contributors_contiguous(mats, n, k, G, g, b, grid, shaped, fits, group)
     (p2_lo_le_hi(g, Impl.kt(k), Impl.total(mats, n, k), G, gp, fp, kp),
       p2_hi_lt(g, Impl.kt(k), Impl.total(mats, n, k), G, gp, kp,
         p2_m_le(g, Impl.groups(mats, n), Impl.kt(k), group))))
+
+# ---- slot_in_range / slot_injective, generic in KT, I, G ----
+
+# x <= y gives x < y + 1.
+def p2_lt_add1(+x: Nat, +y: Nat, h: {Nat.is_le(x, y) == True{} : Bool})
+  -> {Nat.is_lt(x, Nat.add(y, 1n)) == True{} : Bool}:
+  %Equal.sym(Nat, Nat.add(y, 1n), Nat.add(1n, y), Arith.ar_add_comm(y, 1n)) : {Nat.is_lt(x, _) == True{} : Bool}
+  p2_tr(Nat.is_lt(x, 1n+y), Nat.is_le(1n+x, 1n+y), Arith.ar_lt_succ_le(x, 1n+y), h)
+
+def p2_le_hi(+b: Nat, +lo: Nat, +hi: Nat, lohi: {Nat.is_le(lo, hi) == True{} : Bool},
+    bhi: {Nat.is_le(b, hi) == True{} : Bool})
+  -> {Nat.is_le(b, Nat.add(lo, Nat.sub(hi, lo))) == True{} : Bool}:
+  %Equal.sym(Nat, Nat.add(lo, Nat.sub(hi, lo)), hi, Arith.ar_sub_add(hi, lo, lohi)) : {Nat.is_le(b, _) == True{} : Bool}
+  bhi
+
+# lo <= b <= hi gives b - lo <= hi - lo.
+def p2_off_le(+b: Nat, +lo: Nat, +hi: Nat, lob: {Nat.is_le(lo, b) == True{} : Bool},
+    +bhi: {Nat.is_le(b, hi) == True{} : Bool})
+  -> {Nat.is_le(Nat.sub(b, lo), Nat.sub(hi, lo)) == True{} : Bool}:
+  p2_tr(Nat.is_le(Nat.sub(b, lo), Nat.sub(hi, lo)), Nat.is_le(b, Nat.add(lo, Nat.sub(hi, lo))),
+    Arith.ar_le_sub_iff(b, lo, Nat.sub(hi, lo)),
+    p2_le_hi(b, lo, hi, Arith.ar_le_trans(lo, b, hi, lob, bhi), bhi))
+
+# A contributor's slot b - b_lo is below nc.
+def p2_off_lt_nc(+b: Nat, +g: Nat, +KT: Nat, +I: Nat, +G: Nat,
+    lob: {Nat.is_le(Impl.b_lo(g, KT, I, G), b) == True{} : Bool},
+    bhi: {Nat.is_le(b, Impl.b_hi(g, KT, I, G)) == True{} : Bool})
+  -> {Nat.is_lt(Nat.sub(b, Impl.b_lo(g, KT, I, G)), Impl.nc(g, KT, I, G)) == True{} : Bool}:
+  p2_lt_add1(Nat.sub(b, Impl.b_lo(g, KT, I, G)), Nat.sub(Impl.b_hi(g, KT, I, G), Impl.b_lo(g, KT, I, G)),
+    p2_off_le(b, Impl.b_lo(g, KT, I, G), Impl.b_hi(g, KT, I, G), lob, bhi))
+
+# max_contrib.pick keeps the larger of n and mc.
+def p2_pick_n_go(bigger: Bool, +n: Nat, +mc: Nat, e: {Nat.is_gt(n, mc) == bigger : Bool})
+  -> {Nat.is_le(n, Impl.max_contrib.pick(bigger, n, mc)) == True{} : Bool}:
+  match bigger:
+    case True{}:
+      Arith.ar_le_refl(n)
+    case False{}:
+      p2_not_false(Nat.is_le(n, mc),
+        Equal.trans(Bool, Bool.not(Nat.is_le(n, mc)), Nat.is_gt(n, mc), False{},
+          Equal.sym(Bool, Nat.is_gt(n, mc), Bool.not(Nat.is_le(n, mc)),
+            Equal.trans(Bool, Nat.is_gt(n, mc), Nat.is_lt(mc, n), Bool.not(Nat.is_le(n, mc)),
+              Arith.ar_gt_flip(n, mc), Arith.ar_lt_not_le(mc, n))),
+          e))
+
+def p2_pick_mc_go(bigger: Bool, +n: Nat, +mc: Nat, e: {Nat.is_gt(n, mc) == bigger : Bool})
+  -> {Nat.is_le(mc, Impl.max_contrib.pick(bigger, n, mc)) == True{} : Bool}:
+  match bigger:
+    case True{}:
+      Arith.ar_lt_le(mc, n,
+        Equal.trans(Bool, Nat.is_lt(mc, n), Nat.is_gt(n, mc), True{},
+          Equal.sym(Bool, Nat.is_gt(n, mc), Nat.is_lt(mc, n), Arith.ar_gt_flip(n, mc)), e))
+    case False{}:
+      Arith.ar_le_refl(mc)
+
+# The running maximum never drops below its accumulator.
+def p2_mc_go_mc(+left: Nat, +g0: Nat, +KT: Nat, +I: Nat, +G: Nat, +mc: Nat)
+  -> {Nat.is_le(mc, Impl.max_contrib.go(left, g0, KT, I, G, mc)) == True{} : Bool}:
+  match left:
+    case 0n:
+      Arith.ar_le_refl(mc)
+    case 1n+rest:
+      Arith.ar_le_trans(mc, Impl.max_contrib.pick(Nat.is_gt(Impl.nc(g0, KT, I, G), mc), Impl.nc(g0, KT, I, G), mc),
+        Impl.max_contrib.go(rest, 1n+g0, KT, I, G, Impl.max_contrib.pick(Nat.is_gt(Impl.nc(g0, KT, I, G), mc), Impl.nc(g0, KT, I, G), mc)),
+        p2_pick_mc_go(Nat.is_gt(Impl.nc(g0, KT, I, G), mc), Impl.nc(g0, KT, I, G), mc, {==}),
+        p2_mc_go_mc(rest, 1n+g0, KT, I, G, Impl.max_contrib.pick(Nat.is_gt(Impl.nc(g0, KT, I, G), mc), Impl.nc(g0, KT, I, G), mc)))
+
+# The running maximum over groups [g0, g0 + left) bounds nc(d + g0) for every d < left.
+def p2_mc_go_nc(+d: Nat, +left: Nat, +g0: Nat, +KT: Nat, +I: Nat, +G: Nat, +mc: Nat,
+    small: {Nat.is_lt(d, left) == True{} : Bool})
+  -> {Nat.is_le(Impl.nc(Nat.add(d, g0), KT, I, G), Impl.max_contrib.go(left, g0, KT, I, G, mc))
+    == True{} : Bool}:
+  match d left:
+    case 0n 0n:
+      Empty.absurd({Nat.is_le(Impl.nc(g0, KT, I, G), mc) == True{} : Bool}, Arith.ar_false_true(small))
+    case 1n+dp 0n:
+      Empty.absurd({Nat.is_le(Impl.nc(1n+Nat.add(dp, g0), KT, I, G), mc) == True{} : Bool},
+        Arith.ar_false_true(small))
+    case 0n 1n+rest:
+      Arith.ar_le_trans(Impl.nc(g0, KT, I, G), Impl.max_contrib.pick(Nat.is_gt(Impl.nc(g0, KT, I, G), mc), Impl.nc(g0, KT, I, G), mc),
+        Impl.max_contrib.go(rest, 1n+g0, KT, I, G, Impl.max_contrib.pick(Nat.is_gt(Impl.nc(g0, KT, I, G), mc), Impl.nc(g0, KT, I, G), mc)),
+        p2_pick_n_go(Nat.is_gt(Impl.nc(g0, KT, I, G), mc), Impl.nc(g0, KT, I, G), mc, {==}),
+        p2_mc_go_mc(rest, 1n+g0, KT, I, G, Impl.max_contrib.pick(Nat.is_gt(Impl.nc(g0, KT, I, G), mc), Impl.nc(g0, KT, I, G), mc)))
+    case 1n+dp 1n+rest:
+      %Arith.ar_add_succ_r(dp, g0) : {Nat.is_le(Impl.nc(_, KT, I, G), Impl.max_contrib.go(rest, 1n+g0, KT, I, G, Impl.max_contrib.pick(Nat.is_gt(Impl.nc(g0, KT, I, G), mc), Impl.nc(g0, KT, I, G), mc))) == True{} : Bool}
+      p2_mc_go_nc(dp, rest, 1n+g0, KT, I, G, Impl.max_contrib.pick(Nat.is_gt(Impl.nc(g0, KT, I, G), mc), Impl.nc(g0, KT, I, G), mc), small)
+
+# nc(g) <= max_contrib for every group g < Gr.
+def p2_nc_le_mc(+g: Nat, +Gr: Nat, +KT: Nat, +I: Nat, +G: Nat,
+    group: {Nat.is_lt(g, Gr) == True{} : Bool})
+  -> {Nat.is_le(Impl.nc(g, KT, I, G), Impl.max_contrib(Gr, KT, I, G)) == True{} : Bool}:
+  %Arith.ar_add_zero_r(g) : {Nat.is_le(Impl.nc(_, KT, I, G), Impl.max_contrib(Gr, KT, I, G)) == True{} : Bool}
+  p2_mc_go_nc(g, Gr, 0n, KT, I, G, 1n, group)
+
+# g * mc + r < (g + 1) * mc when r < mc.
+def p2_addr_step(+g: Nat, +mc: Nat, +r: Nat, rlt: {Nat.is_lt(r, mc) == True{} : Bool})
+  -> {Nat.is_lt(Nat.add(Nat.mul(g, mc), r), Nat.mul(1n+g, mc)) == True{} : Bool}:
+  %Arith.ar_add_comm(Nat.mul(g, mc), mc) : {Nat.is_lt(Nat.add(Nat.mul(g, mc), r), _) == True{} : Bool}
+  p2_rt(Nat.is_lt(r, mc), Nat.is_lt(Nat.add(Nat.mul(g, mc), r), Nat.add(Nat.mul(g, mc), mc)),
+    Equal.sym(Bool, Nat.is_lt(Nat.add(Nat.mul(g, mc), r), Nat.add(Nat.mul(g, mc), mc)),
+      Nat.is_lt(r, mc), Arith.ar_lt_add_cancel(Nat.mul(g, mc), r, mc)),
+    rlt)
+
+def p2_addr_lt(+g: Nat, +Gr: Nat, +mc: Nat, +r: Nat, rlt: {Nat.is_lt(r, mc) == True{} : Bool},
+    group: {Nat.is_lt(g, Gr) == True{} : Bool})
+  -> {Nat.is_lt(Nat.add(Nat.mul(g, mc), r), Nat.mul(Gr, mc)) == True{} : Bool}:
+  Arith.ar_lt_le_trans(Nat.add(Nat.mul(g, mc), r), Nat.mul(1n+g, mc), Nat.mul(Gr, mc),
+    p2_addr_step(g, mc, r, rlt), p2_m_le(g, Gr, mc, group))
+
+# A touching block lies in [b_lo(g), b_hi(g)].
+def p2_touch_and(+b: Nat, +g: Nat, +KT: Nat, +I: Nat, +G: Nat,
+    +gpos: {Nat.is_lt(0n, G) == True{} : Bool},
+    +fits: {Nat.is_le(G, I) == True{} : Bool},
+    kpos: {Nat.is_lt(0n, KT) == True{} : Bool},
+    touch: {Spec.touches(b, g, KT, I, G) == True{} : Bool})
+  -> {Bool.and(Nat.is_le(Impl.b_lo(g, KT, I, G), b), Nat.is_le(b, Impl.b_hi(g, KT, I, G))) == True{} : Bool}:
+  p2_rt(Spec.touches(b, g, KT, I, G),
+    Bool.and(Nat.is_le(Impl.b_lo(g, KT, I, G), b), Nat.is_le(b, Impl.b_hi(g, KT, I, G))),
+    p2_contig1(b, g, KT, I, G, gpos, fits, kpos), touch)
+
+def p2_lo_le_b(+b: Nat, +g: Nat, +KT: Nat, +I: Nat, +G: Nat,
+    +gpos: {Nat.is_lt(0n, G) == True{} : Bool},
+    +fits: {Nat.is_le(G, I) == True{} : Bool},
+    kpos: {Nat.is_lt(0n, KT) == True{} : Bool},
+    touch: {Spec.touches(b, g, KT, I, G) == True{} : Bool})
+  -> {Nat.is_le(Impl.b_lo(g, KT, I, G), b) == True{} : Bool}:
+  Arith.ar_and_l(Nat.is_le(Impl.b_lo(g, KT, I, G), b), Nat.is_le(b, Impl.b_hi(g, KT, I, G)),
+    p2_touch_and(b, g, KT, I, G, gpos, fits, kpos, touch))
+
+def p2_b_le_hi(+b: Nat, +g: Nat, +KT: Nat, +I: Nat, +G: Nat,
+    +gpos: {Nat.is_lt(0n, G) == True{} : Bool},
+    +fits: {Nat.is_le(G, I) == True{} : Bool},
+    kpos: {Nat.is_lt(0n, KT) == True{} : Bool},
+    touch: {Spec.touches(b, g, KT, I, G) == True{} : Bool})
+  -> {Nat.is_le(b, Impl.b_hi(g, KT, I, G)) == True{} : Bool}:
+  Arith.ar_and_r(Nat.is_le(Impl.b_lo(g, KT, I, G), b), Nat.is_le(b, Impl.b_hi(g, KT, I, G)),
+    p2_touch_and(b, g, KT, I, G, gpos, fits, kpos, touch))
+
+# A contributor's slot b - b_lo(g) is below max_contrib.
+def p2_off_lt_mc(+b: Nat, +g: Nat, +Gr: Nat, +KT: Nat, +I: Nat, +G: Nat,
+    +gpos: {Nat.is_lt(0n, G) == True{} : Bool},
+    +fits: {Nat.is_le(G, I) == True{} : Bool},
+    +kpos: {Nat.is_lt(0n, KT) == True{} : Bool},
+    +touch: {Spec.touches(b, g, KT, I, G) == True{} : Bool},
+    group: {Nat.is_lt(g, Gr) == True{} : Bool})
+  -> {Nat.is_lt(Nat.sub(b, Impl.b_lo(g, KT, I, G)), Impl.max_contrib(Gr, KT, I, G)) == True{} : Bool}:
+  Arith.ar_lt_le_trans(Nat.sub(b, Impl.b_lo(g, KT, I, G)), Impl.nc(g, KT, I, G), Impl.max_contrib(Gr, KT, I, G),
+    p2_off_lt_nc(b, g, KT, I, G, p2_lo_le_b(b, g, KT, I, G, gpos, fits, kpos, touch),
+      p2_b_le_hi(b, g, KT, I, G, gpos, fits, kpos, touch)),
+    p2_nc_le_mc(g, Gr, KT, I, G, group))
+
+# Equal slots, both above their b_lo, name the same block.
+def p2_same_block(+b: Nat, +c: Nat, +g: Nat, +h: Nat, +KT: Nat, +I: Nat, +G: Nat,
+    gh: {g == h : Nat},
+    rr: {Nat.sub(b, Impl.b_lo(g, KT, I, G)) == Nat.sub(c, Impl.b_lo(h, KT, I, G)) : Nat},
+    lob: {Nat.is_le(Impl.b_lo(g, KT, I, G), b) == True{} : Bool},
+    loc: {Nat.is_le(Impl.b_lo(h, KT, I, G), c) == True{} : Bool})
+  -> {b == c : Nat}:
+  %Arith.ar_sub_add(b, Impl.b_lo(g, KT, I, G), lob) : {_ == c : Nat}
+  %Equal.sym(Nat, Nat.sub(b, Impl.b_lo(g, KT, I, G)), Nat.sub(c, Impl.b_lo(h, KT, I, G)), rr) : {Nat.add(Impl.b_lo(g, KT, I, G), _) == c : Nat}
+  %Equal.sym(Nat, g, h, gh) : {Nat.add(Impl.b_lo(_, KT, I, G), Nat.sub(c, Impl.b_lo(h, KT, I, G))) == c : Nat}
+  Arith.ar_sub_add(c, Impl.b_lo(h, KT, I, G), loc)
+
+def p2_inj_finish(+b: Nat, +c: Nat, +g: Nat, +h: Nat, +KT: Nat, +I: Nat, +G: Nat,
+    both: {g == h : Nat} & {Nat.sub(b, Impl.b_lo(g, KT, I, G)) == Nat.sub(c, Impl.b_lo(h, KT, I, G)) : Nat},
+    lob: {Nat.is_le(Impl.b_lo(g, KT, I, G), b) == True{} : Bool},
+    loc: {Nat.is_le(Impl.b_lo(h, KT, I, G), c) == True{} : Bool})
+  -> {g == h : Nat} & {b == c : Nat}:
+  (gh, rr) = both
+  +ghp = gh
+  (ghp, p2_same_block(b, c, g, h, KT, I, G, ghp, rr, lob, loc))
+
+def Laws.slot_in_range(mats, n, k, G, g, b, grid, shaped, fits, group, contributor):
+  +gp = grid
+  +fp = fits
+  +gr = group
+  +tc = contributor
+  +kp = p2_kt_pos(k, shaped)
+  +off = p2_off_lt_nc(b, g, Impl.kt(k), Impl.total(mats, n, k), G,
+    p2_lo_le_b(b, g, Impl.kt(k), Impl.total(mats, n, k), G, gp, fp, kp, tc),
+    p2_b_le_hi(b, g, Impl.kt(k), Impl.total(mats, n, k), G, gp, fp, kp, tc))
+  +ncle = p2_nc_le_mc(g, Impl.groups(mats, n), Impl.kt(k), Impl.total(mats, n, k), G, gr)
+  (off, (ncle, p2_addr_lt(g, Impl.groups(mats, n), Impl.max_contrib(Impl.groups(mats, n), Impl.kt(k), Impl.total(mats, n, k), G), Nat.sub(b, Impl.b_lo(g, Impl.kt(k), Impl.total(mats, n, k), G)),
+    Arith.ar_lt_le_trans(Nat.sub(b, Impl.b_lo(g, Impl.kt(k), Impl.total(mats, n, k), G)), Impl.nc(g, Impl.kt(k), Impl.total(mats, n, k), G), Impl.max_contrib(Impl.groups(mats, n), Impl.kt(k), Impl.total(mats, n, k), G), off, ncle), gr)))
+
+def Laws.slot_injective(mats, n, k, G, g, b, h, c, grid, shaped, fits, group_g, group_h,
+    touch_b, touch_c, same):
+  +gp = grid
+  +fp = fits
+  +tb = touch_b
+  +tc = touch_c
+  +kp = p2_kt_pos(k, shaped)
+  p2_inj_finish(b, c, g, h, Impl.kt(k), Impl.total(mats, n, k), G,
+    Arith.ar_divmod_inj(g, Nat.sub(b, Impl.b_lo(g, Impl.kt(k), Impl.total(mats, n, k), G)), h, Nat.sub(c, Impl.b_lo(h, Impl.kt(k), Impl.total(mats, n, k), G)), Impl.max_contrib(Impl.groups(mats, n), Impl.kt(k), Impl.total(mats, n, k), G),
+      p2_off_lt_mc(b, g, Impl.groups(mats, n), Impl.kt(k), Impl.total(mats, n, k), G, gp, fp, kp, tb, group_g),
+      p2_off_lt_mc(c, h, Impl.groups(mats, n), Impl.kt(k), Impl.total(mats, n, k), G, gp, fp, kp, tc, group_h),
+      same),
+    p2_lo_le_b(b, g, Impl.kt(k), Impl.total(mats, n, k), G, gp, fp, kp, tb),
+    p2_lo_le_b(c, h, Impl.kt(k), Impl.total(mats, n, k), G, gp, fp, kp, tc))

@@ -16,7 +16,7 @@
     "path": "/opt/venv/lib/python3.13/site-packages/exllamav3_ext.cpython-313-x86_64-linux-gnu.so",
     "base_sha256": "6d30690fdb76b3c4ad3fb5e69f0479707e410fc9b6194e2a5e32f4d7fe1fd8b3"
   },
-  "series_sha256": "8201a31a81729d74193e0495fb3aeb6ae31e6bd4c560fd4ea159c2221f52e4f2",
+  "series_sha256": "0a4a5f3a7cb9de42e288a39d7f97d90b5eab704a09b433bfc95c9b72ad29d0da",
   "patches": [
     {
       "name": "0001-gdn-shared-carveout.patch",
@@ -49,12 +49,20 @@
     {
       "name": "2001-gemm-m16-swapab.patch",
       "sha256": "0da35574e67eca7a487be3e4b36cd1c9ff835863f1ad8ff4dc628d89509396b2"
+    },
+    {
+      "name": "6001-draft-graph.patch",
+      "sha256": "40fdf0c622095dc2aa01f6262cfe5ac5c7c5216ee285bf61380caaf969f20c0e"
     }
   ],
   "files": {
+    "architecture/dflash2.py": {
+      "pre": "03f93098649173a3f023a584e68d2db6124480508354aebd2cc56e5855bf7ee7",
+      "post": "b3aaa77b327feb57c837cf5133ba6e4ea2472a8a27342459804238617b0f4260"
+    },
     "exllamav3_ext/bindings.cpp": {
       "pre": "381d867b845335b15106f86aa79e284c9d6b7d316703dd555d8a86a13ed2b465",
-      "post": "83a8713922e4b4b93a8bd4cc0e08a899eb5f14651b6f2acc6bf65fb29d2a73b1"
+      "post": "14c389468f9189c12edc5309cd3523b5275d75852b210360078be1c1205afb07"
     },
     "exllamav3_ext/gdn.cu": {
       "pre": "a06effe57ac621eea19d908796b4848135f675438d5b3eedbd3c4e67d336eaf0",
@@ -63,6 +71,18 @@
     "exllamav3_ext/gdn.cuh": {
       "pre": "c64e35c29d7ebc40b7b10b64d4015dff7a5ab1409865f7ebf8cd38a903ab05fd",
       "post": "3816d088a1ced5a6893f1a4b80a05bdadd19f29d8686875f508fd96b9bc7d05f"
+    },
+    "exllamav3_ext/graph.cu": {
+      "pre": "8e57b2f599df4df9ac7cdd06dd7e175d511e5780b59e9b6f3570c3476f0a7901",
+      "post": "0502525da0ab11c8af5443c4e21539a66e63ba20c21fb3bcc18423cd7ed4512b"
+    },
+    "exllamav3_ext/graph.cuh": {
+      "pre": "6fe8e3d3ab39d885ff8447f6f8f3397c35387619722fca0222eddcc753b6d074",
+      "post": "4ab7589140d207270f3b8caae1ec862b45d542b43c533734dcbee1b55d51901d"
+    },
+    "exllamav3_ext/libtorch/attention.cpp": {
+      "pre": "78ed122f0cf0a345755a306713ed982137b2bfbee62f6b17cf8bf4b0056427e4",
+      "post": "5f03987609bd1d6c65c8ac711e213b4365bc3e2fdd15ec64d6305e06102c5ace"
     },
     "exllamav3_ext/libtorch/gated_delta_net.cpp": {
       "pre": "d8a31ef61e42ce753f7a9ee2a55c7e25a1c51e0a0a8d148d6058f9d96120dfef",
@@ -78,7 +98,7 @@
     },
     "exllamav3_ext/libtorch/mlp.cpp": {
       "pre": "3f5d326cabd970a9892b2b2ce69cfc5e7949a113462e5e22b572f6f77803ec85",
-      "post": "55e3b7331602fb78b6a837629ca8659e88f68a3292cb6306917f9af12a6dfd8f"
+      "post": "d9cee0843d44a5207718a4dfba4c8c35ea73085a186b062335651561aaeea6fb"
     },
     "exllamav3_ext/norm.cu": {
       "pre": "b7b43921a19aa64cbe56786a9911c2796b5d4327818f0cae73c4cf358e6907df",

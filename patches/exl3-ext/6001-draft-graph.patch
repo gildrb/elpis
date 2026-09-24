@@ -1,0 +1,332 @@
+--- a/exllamav3_ext/graph.cuh
++++ b/exllamav3_ext/graph.cuh
+@@ -135,5 +135,16 @@
+     void launch(std::vector<PPTR> params, cudaStream_t stream);
+ 
+     void inspect_graph();
++
++private:
++    void embed(cudaStream_t stream);
+ };
+ 
++// Outer capture: while enabled on the calling thread, the caller is capturing a whole forward pass into its own
++// CUDA graph on the current stream. A graph launch cannot be captured, so Graph::launch then inserts this call's
++// graph, with the same patched parameters it would launch, as a child graph node of the ongoing capture. The
++// modules' own first-call warmup and graph capture are refused in this mode: they would record other kernels
++// (eager fallbacks, autotuning) than the graph the module replays
++void set_graph_outer_capture(bool enable);
++bool graph_outer_capture();
++
+--- a/exllamav3_ext/graph.cu
++++ b/exllamav3_ext/graph.cu
+@@ -11,6 +11,18 @@
+ 
+ //#define GRAPHDEBUG 1
+ 
++static thread_local bool outer_capture = false;
++
++void set_graph_outer_capture(bool enable)
++{
++    outer_capture = enable;
++}
++
++bool graph_outer_capture()
++{
++    return outer_capture;
++}
++
+ Graph::Graph()
+ {
+     ready = false;
+@@ -33,6 +45,8 @@
+         printf("Begin graph capture\n");
+     #endif
+ 
++    TORCH_CHECK(!outer_capture, "Graph: cannot capture a module graph during an outer capture; warm the module up first");
++
+     // Make sure nothing is pending
+     cudaDeviceSynchronize();
+ 
+@@ -170,6 +184,12 @@
+         if (n == graph_node_sites.size()) TORCH_CHECK(false, "Graph update failed");
+     }
+ 
++    if (outer_capture)
++    {
++        embed(stream);
++        return;
++    }
++
+     for (int n = 0; n < nodes.size(); ++n)
+     {
+         if (!node_needs_update[n]) continue;
+@@ -186,6 +206,24 @@
+     cuda_check(cudaGraphLaunch(graph_exec, stream));
+ }
+ 
++void Graph::embed(cudaStream_t stream)
++{
++    // The parameter walk above patched the values in place: kernelParams returned by the node-param getters
++    // point at the template nodes' own argument storage (the exec update applies those same values), so the
++    // template graph now holds exactly what this launch would run. A child graph node clones it into the
++    // capture; the exec keeps its pending node updates for the next direct launch
++    cudaStreamCaptureStatus status;
++    cudaGraph_t outer_graph;
++    const cudaGraphNode_t* deps;
++    size_t num_deps;
++    cuda_check(cudaStreamGetCaptureInfo(stream, &status, nullptr, &outer_graph, &deps, nullptr, &num_deps));
++    TORCH_CHECK(status == cudaStreamCaptureStatusActive, "Graph: outer capture mode but the stream is not capturing");
++
++    cudaGraphNode_t child;
++    cuda_check(cudaGraphAddChildGraphNode(&child, outer_graph, deps, num_deps, graph));
++    cuda_check(cudaStreamUpdateCaptureDependencies(stream, &child, nullptr, 1, cudaStreamSetCaptureDependencies));
++}
++
+ void Graph::inspect_graph()
+ {
+     // Get the number of nodes in the graph
+--- a/exllamav3_ext/bindings.cpp
++++ b/exllamav3_ext/bindings.cpp
+@@ -222,6 +222,8 @@
+         .def(py::init<uintptr_t, uintptr_t, int64_t>());
+     m.def("batched_conv_rewind", &batched_conv_rewind, py::arg("jobs"), py::arg("device_index"));
+     m.def("batched_state_rewind", &batched_state_rewind, py::arg("jobs"), py::arg("device_index"));
++    m.def("set_graph_outer_capture", &set_graph_outer_capture, py::arg("enable"));
++    m.def("graph_outer_capture", &graph_outer_capture);
+     py::class_<StateReplayJob>(m, "StateReplayJob")
+         .def(py::init<uintptr_t, uintptr_t, uintptr_t, uintptr_t, int, int, int, int, int>());
+     m.def("batched_state_replay", &batched_state_replay, py::arg("jobs"), py::arg("device_index"));
+--- a/exllamav3_ext/libtorch/attention.cpp
++++ b/exllamav3_ext/libtorch/attention.cpp
+@@ -868,6 +868,7 @@
+     // captured, then launched below like every later run, with only the I/O pointers patched
+     if (s.runs == 0)
+     {
++        TORCH_CHECK(!graph_outer_capture(), "BC_Attention: outer capture before the slot graph is warmed up");
+         run_gr(bsz, q_len, s, x, y, cache_seqlens, block_table, position, positions, position_ids, inv_freq_override, regime, t_total, nullptr);
+         s.runs = 1;
+         return;
+--- a/exllamav3_ext/libtorch/mlp.cpp
++++ b/exllamav3_ext/libtorch/mlp.cpp
+@@ -125,6 +125,7 @@
+ 
+     if (g.disabled || (!g.ready && !g.ready_to_record))
+     {
++        TORCH_CHECK(g.disabled || !graph_outer_capture(), "BC_GatedMLP: outer capture before the bsz graph is warmed up");
+         run_bszN_gr(x, d, num_tokens, nullptr);
+         g.ready_to_record = true;
+     }
+@@ -214,6 +215,7 @@
+ 
+     if (graph_bsz1.disabled || (!graph_bsz1.ready && !graph_bsz1.ready_to_record))
+     {
++        TORCH_CHECK(graph_bsz1.disabled || !graph_outer_capture(), "BC_MLP: outer capture before the graph is warmed up");
+         run_bsz1_gr(x, d, nullptr);
+         graph_bsz1.ready_to_record = true;
+     }
+--- a/architecture/dflash2.py
++++ b/architecture/dflash2.py
+@@ -1,5 +1,6 @@
+ from __future__ import annotations
+ from typing_extensions import override
++import os
+ import torch
+ import weakref
+ 
+@@ -13,6 +14,7 @@
+ from .dflash import DFlashConfig, dflash_update_kv_from_target
+ from ..util.tensor import get_for_device
+ from ..util.device_copy import to_device
++from ..ext import exllamav3_ext as ext
+ 
+ # DFlash2 draft model: the DFlash encoder (fc + hidden_norm over the concatenated target taps)
+ # and SWA/GQA layers, with grouped dynamic convolutions around every attention/MLP sublayer and
+@@ -74,6 +76,141 @@
+             "DFlash2 selector_top_k must be between 1 and vocab_size"
+ 
+ 
++class _DraftGraph:
++    """
++    One captured draft forward (every module after the input layer) for one batch shape and block-table width.
++    The graph reads the block, block table and cache lengths from its static buffers and writes the final
++    state into a static output that the next replay overwrites.
++    """
++    __slots__ = ("graph", "x", "block_table", "cache_seqlens", "out")
++
++    def replay(self, x: torch.Tensor, block_table: torch.Tensor, cache_seqlens: torch.Tensor) -> torch.Tensor:
++        self.x.copy_(x, non_blocking = x.is_pinned())
++        self.block_table.copy_(block_table, non_blocking = block_table.is_pinned())
++        self.cache_seqlens.copy_(cache_seqlens, non_blocking = cache_seqlens.is_pinned())
++        self.graph.replay()
++        return self.out
++
++
++class _DraftGraphs:
++    """
++    The DFlash2 draft forward, blocks through the final norm, replayed as one CUDA graph instead of a few hundred
++    Python-issued launches. The draft always runs a fixed block per sequence, so a graph serves every round of
++    its (batch shape, block-table width): the block table and cache lengths are the only per-round inputs, read
++    from static device buffers the replay fills. The table width stays a graph key because the attention graph
++    derives its split configuration from it.
++
++    The attention and MLP modules replay graphs of their own. Under capture they are embedded as child graphs
++    with their parameters patched exactly as their own launch would (ext.set_graph_outer_capture), so the
++    captured forward runs the same kernels with the same arguments as the eager one. Those module graphs exist
++    only after two eager forwards of the shape; capturing waits for them. A capture that fails (anything in the
++    forward that the stream capture rejects) permanently leaves that key eager.
++    """
++
++    WARMUP = 2
++    MAX_GRAPHS = 4
++
++    def __init__(self):
++        self.enabled = os.environ.get("EXL3_DRAFT_GRAPH", "1") != "0"
++        self.graphs = {}
++        self.eager_runs = {}
++        self.failed = set()
++
++
++    def clear(self):
++        self.graphs.clear()
++        self.eager_runs.clear()
++        self.failed.clear()
++
++
++    @staticmethod
++    def key(model: Model, x: torch.Tensor, params: dict) -> tuple | None:
++        """
++        Graph key of a draft forward, or None when the forward depends on per-round host values the graph would
++        freeze or runs outside a single CUDA device
++        """
++        block_table = params.get("block_table")
++        cache_seqlens = params.get("cache_seqlens")
++        positions = params.get("positions")
++        if (
++            params.get("attn_mode") != "flash_attn" or
++            not isinstance(block_table, torch.Tensor) or
++            not isinstance(cache_seqlens, torch.Tensor) or
++            params.get("position", 0) != 0 or
++            (positions is not None and positions is not cache_seqlens) or
++            params.get("position_ids") is not None or
++            params.get("inv_freq") is not None or
++            params.get("indexed_embeddings") or
++            getattr(model.config, "moe_cpu_hosts", None)
++        ):
++            return None
++        devices = {torch.device(module.device) for module, _, _ in model.fwd_modules[1:]}
++        if len(devices) != 1:
++            return None
++        device = devices.pop()
++        if device.type != "cuda":
++            return None
++        return (
++            device, tuple(x.shape), x.dtype,
++            tuple(block_table.shape), block_table.dtype, tuple(cache_seqlens.shape), cache_seqlens.dtype,
++            params.get("positions") is not None, params.get("causal", True), id(params.get("cache")),
++        )
++
++
++    def forward(self, model: Model, x: torch.Tensor, params: dict) -> torch.Tensor:
++        """
++        The forward of every module after the input layer, x the input layer's output
++        """
++        key = self.key(model, x, params) if self.enabled else None
++        if key is None or key in self.failed:
++            return model.forward_blocks(x, params)
++        entry = self.graphs.get(key)
++        if entry is None:
++            warm_key = key[:3]
++            runs = self.eager_runs.get(warm_key, 0)
++            if runs < self.WARMUP:
++                self.eager_runs[warm_key] = runs + 1
++                return model.forward_blocks(x, params)
++            entry = self.capture(model, key, x, params)
++            if entry is None:
++                self.failed.add(key)
++                return model.forward_blocks(x, params)
++        return entry.replay(x, params["block_table"], params["cache_seqlens"])
++
++
++    def capture(self, model: Model, key: tuple, x: torch.Tensor, params: dict) -> _DraftGraph | None:
++        device = key[0]
++        block_table = params["block_table"]
++        cache_seqlens = params["cache_seqlens"]
++        entry = _DraftGraph()
++        entry.x = torch.empty(x.shape, dtype = x.dtype, device = device)
++        entry.block_table = torch.empty(block_table.shape, dtype = block_table.dtype, device = device)
++        entry.cache_seqlens = torch.empty(cache_seqlens.shape, dtype = cache_seqlens.dtype, device = device)
++
++        # The captured forward sees only the static buffers; positions alias the cache lengths as in the eager
++        # forward's params
++        static_params = {k: v for k, v in params.items() if k != "dev_cache"}
++        static_params["block_table"] = entry.block_table
++        static_params["cache_seqlens"] = entry.cache_seqlens
++        if params.get("positions") is not None:
++            static_params["positions"] = entry.cache_seqlens
++
++        if len(self.graphs) >= self.MAX_GRAPHS:
++            del self.graphs[next(iter(self.graphs))]
++        entry.graph = torch.cuda.CUDAGraph()
++        ext.set_graph_outer_capture(True)
++        try:
++            with torch.cuda.device(device), torch.cuda.graph(entry.graph, capture_error_mode = "thread_local"):
++                entry.out = model.forward_blocks(entry.x, static_params)
++        except Exception:
++            return None
++        finally:
++            ext.set_graph_outer_capture(False)
++        self.graphs[key] = entry
++        return entry
++
++
++
+ class DFlash2Model(Model):
+     config_class = DFlash2Config
+ 
+@@ -215,6 +352,7 @@
+         })
+ 
+         self.attached_model = None
++        self.draft_graphs = _DraftGraphs()
+ 
+         self.draft_verifier_params.update({
+             "export_state_layers": set(config.target_layer_ids),
+@@ -247,6 +385,38 @@
+         self.input_layer.attached_model = weakref.ref(target)
+ 
+ 
++    @override
++    def forward_ls(self, x: torch.Tensor, params: dict):
++        """
++        The input layer embeds the block (host-resident target embedding), every later module runs as one
++        captured graph when the forward qualifies (see _DraftGraphs)
++        """
++        module, instance, _ = self.fwd_modules[0]
++        if module is not self.input_layer or getattr(self.config, "moe_cpu_hosts", None):
++            return super().forward_ls(x, params)
++        params["layer_instance"] = instance
++        x = module.prepare_for_device(x, params)
++        x = module.forward(x, params)
++        return self.draft_graphs.forward(self, x, params)
++
++
++    def forward_blocks(self, x: torch.Tensor, params: dict) -> torch.Tensor:
++        """
++        forward_ls from the first module after the input layer
++        """
++        for module, instance, _ in self.fwd_modules[1:]:
++            params["layer_instance"] = instance
++            x = module.prepare_for_device(x, params)
++            x = module.forward(x, params)
++        return x
++
++
++    @override
++    def unload(self):
++        self.draft_graphs.clear()
++        super().unload()
++
++
+     def update_kv_from_target(
+         self,
+         target_hidden: list,

@@ -1,0 +1,95 @@
+--- a/modules/arch_specific/dflash.py
++++ b/modules/arch_specific/dflash.py
+@@ -75,6 +75,12 @@
+         # Populated by attach_to()
+         self.attached_model = None
+ 
++        # Staged draft-block upload (see _forward_staged)
++        self._mask_key = None
++        self._mask_rows = None
++        self._block_staging = {}
++        self._upload_done = None
++
+         self.caps.update({"x_cpu": True})
+ 
+ 
+@@ -87,6 +93,15 @@
+         super().load(device, **kwargs)
+ 
+ 
++    @override
++    def unload(self):
++        self._mask_key = None
++        self._mask_rows = None
++        self._block_staging = {}
++        self._upload_done = None
++        super().unload()
++
++
+     def prepare_for_device(self, x: torch.Tensor, params: dict) -> torch.Tensor:
+         return x
+ 
+@@ -98,6 +113,10 @@
+         out_dtype: torch.dtype | None = None
+     ):
+         bsz, seqlen = x.shape
++        if seqlen == 1 and not self.attached_model().loaded_tp and not params.get("indexed_embeddings"):
++            staged = self._forward_staged(x)
++            if staged is not None:
++                return staged
+         noise_mask = torch.full((bsz, self.native_draft_len - 1), self.mask_token_id, dtype = torch.long)
+         x = torch.cat((x, noise_mask), dim = -1)
+         if not self.attached_model().loaded_tp:
+@@ -108,3 +127,52 @@
+         if self.input_embedding_scale != 1.0:
+             x = x * self.input_embedding_scale
+         return x
++
++
++    def _forward_staged(self, x: torch.Tensor) -> torch.Tensor | None:
++        """
++        The draft block [anchor, mask x (block - 1)] embedded by a host-resident target embedding and uploaded
++        to this layer's device, or None when the embedding is not on the host. The mask rows are constant: they
++        are embedded once into a reused pinned buffer, so a round embeds only the anchor rows on the host and
++        uploads the block without blocking. The embedding (lookup, multiplier, dtype conversion, normalization)
++        and the input scale act row by row, so the block holds exactly the rows the full-block path computes.
++        """
++        device = torch.device(self.device)
++        if device.type != "cuda":
++            return None
++        embedding = self.attached_model().modules[0]
++        mask_key = (id(embedding), embedding.embedding.weight.data_ptr())
++        if self._mask_key != mask_key:
++            mask_ids = torch.full((1, self.native_draft_len - 1), self.mask_token_id, dtype = torch.long)
++            mask_rows = embedding.forward(mask_ids, {})
++            if self.input_embedding_scale != 1.0:
++                mask_rows = mask_rows * self.input_embedding_scale
++            self._mask_key = mask_key
++            self._mask_rows = mask_rows if mask_rows.device.type == "cpu" else None
++            self._block_staging = {}
++            self._upload_done = None
++        if self._mask_rows is None:
++            return None
++
++        # The previous round's upload has long completed (the generator synchronizes every round); waiting on it
++        # only guards the reused buffer
++        if self._upload_done is not None:
++            self._upload_done.synchronize()
++        bsz = x.shape[0]
++        block = self._block_staging.get(bsz)
++        if block is None:
++            block = torch.empty(
++                (bsz, self.native_draft_len, self._mask_rows.shape[-1]),
++                dtype = self._mask_rows.dtype,
++                pin_memory = True,
++            )
++            block[:, 1:].copy_(self._mask_rows.expand(bsz, -1, -1))
++            self._block_staging[bsz] = block
++        anchor_rows = embedding.forward(x, {})
++        if self.input_embedding_scale != 1.0:
++            anchor_rows = anchor_rows * self.input_embedding_scale
++        block[:, :1].copy_(anchor_rows)
++        out = block.to(device, non_blocking = True)
++        self._upload_done = torch.cuda.Event()
++        self._upload_done.record(torch.cuda.current_stream(device))
++        return out
