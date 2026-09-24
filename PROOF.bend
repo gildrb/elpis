@@ -12,3 +12,4 @@ import ./bend/roofline_proof.bend as RooflineProof
 import ./bend/draft_head_partition_proof.bend as DraftHeadPartitionProof
 import ./bend/mlp_m16_sched_proof.bend as MlpM16SchedProof
 import ./bend/attn_bounds_proof.bend as AttnBoundsProof
+import ./bend/gemm_m16_group_proof.bend as GemmM16GroupProof

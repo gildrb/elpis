@@ -33,3 +33,4 @@ import ./bend/mlp_m16_sched_laws.bend as MlpM16SchedLaws
 # combine grids store or read lies inside the dense_partial_blocks allocation, which is tight and
 # equals the host's fail-closed extent, over the Nat model bend/attn_bounds.bend.
 import ./bend/attn_bounds_laws.bend as AttnBoundsLaws
+import ./bend/gemm_m16_group_laws.bend as GemmM16GroupLaws
