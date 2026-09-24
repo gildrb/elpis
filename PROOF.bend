@@ -9,3 +9,4 @@ import ./bend/exl3_round_proof.bend as Exl3RoundProof
 import ./bend/norm_fuse_proof.bend as NormFuseProof
 import ./bend/attn_split_proof.bend as AttnSplitProof
 import ./bend/roofline_proof.bend as RooflineProof
+import ./bend/draft_head_partition_proof.bend as DraftHeadPartitionProof

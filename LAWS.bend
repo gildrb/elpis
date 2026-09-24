@@ -21,3 +21,7 @@ import ./bend/attn_split_laws.bend as AttnSplitLaws
 # DRAM roofline of one verify round: safetensors-header byte model (bend/roofline.bend) equal to the
 # config-shape enumeration (bend/roofline_spec.bend); bandwidth/tokens ceilings and loss ledger over Nat.
 import ./bend/roofline_laws.bend as RooflineLaws
+# Draft-only int4 head kernel (ext patch 9001): tile partition (every vocab tile computed by exactly
+# one warp) and per-tile fixed chunk / scale-group fold order over the Nat model
+# bend/draft_head_partition.bend, reusing the m16 finisher law finish_jobs_once.
+import ./bend/draft_head_partition_laws.bend as DraftHeadPartitionLaws
