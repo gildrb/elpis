@@ -25,3 +25,7 @@ import ./bend/roofline_laws.bend as RooflineLaws
 # one warp) and per-tile fixed chunk / scale-group fold order over the Nat model
 # bend/draft_head_partition.bend, reusing the m16 finisher law finish_jobs_once.
 import ./bend/draft_head_partition_laws.bend as DraftHeadPartitionLaws
+# Fused-MLP schedule of ext 8201 (persistent gate+up / finish / down launch): exactly-once coverage,
+# counter totals, deadlock-free levels, cp.async ring, v2 split-K order and finish jobs over the
+# Nat model bend/mlp_m16_sched.bend (table bend/MLP_M16_SCHED_TABLE.bend).
+import ./bend/mlp_m16_sched_laws.bend as MlpM16SchedLaws
