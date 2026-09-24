@@ -22,23 +22,21 @@ The frozen GraphWalks quick selection takes the first8 source-order tasks per op
 
 ## Exact tokenizer and native inputs
 
-- Reproduced artifact: `/tmp/inference-full-reproduction-vz5z4cf0/attempt/conversion/artifact`.
-- `tokenizer.json`, `tokenizer_config.json`, `chat_template.jinja`, `config.json`, `generation_config.json` and `processor_config.json` all match their expected SHA256 values in `prepare/artifact.sha256`. This diagnostic did not rehash model weight shards.
-- Native image: `sha256:8a1eeb69ca67af0d54688cf11b46700448f15cde5395f013b0b5484244f1dfb7`. Transformers 5.12.1, tokenizers 0.22.2, native `Qwen2Tokenizer`.
+- Tokenizer source: the retired W4A16 model artifact. Its `tokenizer.json`, `tokenizer_config.json`, `chat_template.jinja`, `config.json`, `generation_config.json` and `processor_config.json` SHA256 values are recorded in `token-budget.json`. This diagnostic did not rehash model weight shards.
+- The EXL3 target has the identical `chat_template.jinja` but different `tokenizer.json`/`tokenizer_config.json` bytes; recount with the EXL3 tokenizer before relying on exact depths.
+- Transformers 5.12.1, tokenizers 0.22.2, native `Qwen2Tokenizer`, in a pinned CPU-only container.
 - Each unchanged environment loaded its own smoke/quick configs and datasets through its existing isolated project. The exporter used native `vf.load_environment`, `get_eval_dataset`, system-prompt resolution/message normalization and GraphWalks’s first-turn `get_prompt_messages`. No task or scoring code was copied. MRCR serialized original-task prompts were checked against the exported messages, and original tasks had no extra system prompt or tools.
 - Native exports were restricted to two CPU cores. The tokenizer ran with a 2-CPU Docker limit, no GPU, no network, read-only image/model mounts and private owned work/cache space. No dependency installation, tests, client construction, endpoint call, scoring or model execution occurred.
 
-## Template and serving-path accounting
+## Template accounting
 
 The native request has one user message, no task/Harness system message, and no tools. **The artifact template nevertheless injects a system message.** With `enable_thinking=true` and no effort override, its default is `xhigh`:
 
 > Reasoning effort is set to xhigh. Please think carefully through the task, validate key assumptions, consider plausible alternatives, and prioritize correctness, consistency, and clarity in the final answer.
 
-The template also adds the user delimiters and assistant generation prefix `<|im_start|>assistant\n<think>\n`. All are included. The measured template difference is 50–52 tokens, not merely an estimated role overhead. MRCR raw-user counts are 66772 and266643, versus templated 66824 and266695.
+The template also adds the user delimiters and assistant generation prefix `<|im_start|>assistant\n<think>\n`. All are included. The measured template difference is 50–52 tokens, not merely an estimated role overhead. MRCR raw-user counts are 66772 and266643, versus templated 66824 and266695. Every one of 35 entries produced identical IDs through native `apply_chat_template(tokenize=true)`, render+encode and default/no-special encoding. The tokenizer’s default encoding of the empty string has no special tokens.
 
-The exact image’s `serving_chat.py` uses the artifact Jinja template with `add_generation_prompt=true`, request template kwargs and no tools. This Qwen model is multimodal, but these inputs contain no media. Its text path decodes the rendered token IDs, then `TokenizerManager` tokenizes ordinary text and skips the multimodal processor for this non-MossVL/no-media case. Every one of 35 entries produced identical IDs through native `apply_chat_template(tokenize=true)`, render+encode, default/no-special encoding, decode/re-encode and the ordinary `tokenizer([text])` callable path. The tokenizer’s default encoding of the empty string has no special tokens.
-
-These are exact local templated token counts with source-traced server preprocessing, **not observed endpoint token usage**. No live ServerArgs, TokenizerManager or serving process was constructed. Changed server defaults, template/tokenizer bytes, request system/tools or reasoning settings require a new count. Runtime capacity, completion success, truncation behavior and quality remain unqualified.
+These are exact local templated token counts, **not observed endpoint token usage**. Changed server defaults, template/tokenizer bytes, request system/tools or reasoning settings require a new count. Runtime capacity, completion success, truncation behavior and quality remain unqualified.
 
 ## Proof and next action
 

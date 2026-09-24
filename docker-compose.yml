@@ -1,8 +1,9 @@
-# Canonical deployment. Qualification controls are internal, not supported profiles.
+# Canonical EXL3 deployment. Context/cache settings do not establish qualification.
+# Build with bash docker/build-exl3.sh; it authenticates the existing local base.
 services:
   inference:
-    image: ${QWEN_IMAGE:-qwen-inference:local}
-    build: .
+    image: ${QWEN_IMAGE:-qwen-inference:exl3}
+    pull_policy: never
     # Rootless default maps container root to the operator; rootful must set host UID:GID.
     user: "${QWEN_CONTAINER_USER:-0:0}"
     init: true
@@ -18,18 +19,10 @@ services:
     ports:
       - "127.0.0.1:${QWEN_PORT:-18020}:18020"
     environment:
-      # Historical native-capacity candidate, not a qualified memory setting.
-      QWEN_MEM_FRACTION_STATIC: ${QWEN_MEM_FRACTION_STATIC:-0.98}
-      QWEN_QUALIFICATION: ${QWEN_QUALIFICATION:-speculative}
-      QWEN_QUALIFICATION_EXECUTION: ${QWEN_QUALIFICATION_EXECUTION:-default}
-      QWEN_QUALIFICATION_KV: ${QWEN_QUALIFICATION_KV:-kvarn}
-      QWEN_QUALIFICATION_CONTEXT: ${QWEN_QUALIFICATION_CONTEXT:-262144}
+      # Explicit acknowledgment, not a claim of capacity, quality or performance.
       QWEN_ALLOW_UNQUALIFIED: ${QWEN_ALLOW_UNQUALIFIED:-0}
-      QWEN_COMMIT_GRAPH: ${QWEN_COMMIT_GRAPH:-1}
-      QWEN_MARLIN_ACTIVATION_BITS: ${QWEN_MARLIN_ACTIVATION_BITS-16}
-      QWEN_DRAFT_VOCAB_JSON: /state/draft_vocab_ids.json
     healthcheck:
-      test: [CMD, python3, /opt/qwen/serve/healthcheck.py]
+      test: [CMD, /opt/venv/bin/python, -B, /opt/qwen/serve/healthcheck.py]
       interval: 30s
       timeout: 315s
       start_period: 20m
@@ -43,12 +36,6 @@ services:
       - type: bind
         source: ${QWEN_STATE_ROOT:?Set QWEN_STATE_ROOT to the existing model state directory}/models
         target: /models
-        read_only: true
-        bind:
-          create_host_path: false
-      - type: bind
-        source: ${QWEN_STATE_ROOT:?Set QWEN_STATE_ROOT to the existing model state directory}/overrides/draft_vocab_ids.json
-        target: /state/draft_vocab_ids.json
         read_only: true
         bind:
           create_host_path: false

@@ -1,0 +1,43 @@
+{
+  "schema_version": 1,
+  "status": "Byte identity only; not capacity, performance or quality qualification.",
+  "base_image_tag": "qwen-litos:exl3-native-comparison",
+  "base_image_id": "sha256:b35314f48c7684b4c9cf3d59f4c21395316aa1fc0925db782f460005aa2602ff",
+  "engine_revision": "355c6ee10fbd25b79070316a81ea0708cc18155a",
+  "research_revision": "75d4ec5a4829d39d515fc442ee8ee4664246797c",
+  "source_revisions": {
+    "target": {
+      "repository": "r0b0tlab/Qwen3.8-27B-EXL3-4.00bpw",
+      "revision": "3f1771b8c21f83cbb8e82169559ced9f38ca04e5"
+    },
+    "draft": {
+      "repository": "r0b0tlab/Qwen3.8-27B-DFlash2-EXL3-4.00bpw",
+      "revision": "265b5240592907d2d55ff0dc4d5f66569692604d"
+    }
+  },
+  "provenance_notes": [
+    "Weight and metadata SHA256 pins are retained from exl3-native-provenance-1.json and exl3-model-inventory-1.json; runtime rehashes every listed file before loading.",
+    "merges.txt extends that inventory: local SHA256 a9d356d7bdf1ef4949e3e748e95b8e10ad9d4e2e838eddc38a0a7b6b94d1db8d; Git blob a494e019ca1502219fd0128658b979e5f05ae8e8 matches the target revision's Hugging Face tree.",
+    "Native EXL3 DFlash2 engine is inherited from the immutable image; no dflash2-pathway overlay or source patches apply."
+  ],
+  "target": {
+    "chat_template.jinja": "c3cf9e34abf4f9e36c2d72165aa9c132d3e2a725b6c2586aaa3a8af9d7a81041",
+    "config.json": "48137231d2890db30458c92df9cc6f8bc4fc2f353d4a6c460f38010966b7b9aa",
+    "generation_config.json": "e70c136c1b78ddc1fb0905bac8e733a4dc448d4f852a5dd75143fffc70be550e",
+    "merges.txt": "a9d356d7bdf1ef4949e3e748e95b8e10ad9d4e2e838eddc38a0a7b6b94d1db8d",
+    "model-00001-of-00002.safetensors": "30fa5c8f7ff4c83cb293fe814459e8088838af9b9740ceb0623b6f97112a8475",
+    "model-00002-of-00002.safetensors": "a54f860c6e502a5fbdc6aba66b27a53799b33879f72f8a8285c97d0024e28042",
+    "model.safetensors.index.json": "c22ea0d02667f26c9bc838ce2489343c366cd2d58c7c015a74521c2b6c6846a5",
+    "preprocessor_config.json": "27225450ac9c6529872ee1924fcb0962ff5634834f817040f444118116f4e516",
+    "quantization_config.json": "18896f21bd6e98859bb983082880de734fb68f1aaa6d4c50533772ae0e6bd7ed",
+    "tokenizer.json": "0997f410c57a1f4e53b09e4be8f4a172d90edd9564368fb0847030937229b9f3",
+    "tokenizer_config.json": "b11349aafa7cdc6a320767cf7ceb29ed82f7eda5d65e8e0819e76f0ce947bf27",
+    "video_preprocessor_config.json": "7768af27c1fafa9cc9011c1dc20067e03f8915e03b63504550e11d5066986d13",
+    "vocab.json": "ce99b4cb2983d118806ce0a8b777a35b093e2000a503ebde25853284c9dfa003"
+  },
+  "draft": {
+    "config.json": "98f252301f486dc4dc7630fb00a7fa871dae9b91e7455f5e14300428d0656caa",
+    "model.safetensors": "e278f218318565562af07fc333045e411ffa0d83523f8224fc8c2d24d5a68223",
+    "quantization_config.json": "7d0221dac106605b761e34e70ee8992d4f30dfafb81bc6d40e7e4e81fa098090"
+  }
+}

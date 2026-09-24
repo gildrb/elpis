@@ -29,3 +29,27 @@ def table(+depth: Nat, +a: Bool, +b: Bool, +c: Bool) -> List<&2, Nat>:
     case 1n+p:
       left right = table(p, False{}, a, b) table(p, True{}, a, b)
       List.append(&2, Nat, left, right)
+
+# Shared-to-register refresh, NOT the global-to-shared copy policy. The selected
+# K64/group128 specialization has two tiles per scale group and an even ring.
+# This finite startup table is serialized once; no model enters the GPU hot path.
+def scale_refresh(phase: Nat) -> Nat:
+  Nat.sub(1n, Nat.mod(phase, 2n))
+
+def scale_refresh_table(count: Nat, +phase: Nat) -> List<&2, Nat>:
+  match count:
+    case 0n:
+      Nil{}
+    case 1n+p:
+      scale_refresh(phase) <> scale_refresh_table(p, 1n+phase)
+
+# Selected M8/N128/K64, 128-thread, eight-stage BF16/U4B8 class only.
+# The actual intra-CTA reduction reaches448 int4s, not nominal sh_red_size272;
+# B dominates that temporal overlay. Keep the original >=51200 selector guard.
+# This startup scalar changes reservation only, never geometry or copy traffic.
+def selected_shared_bytes() -> Nat:
+  b = Nat.mul(Nat.mul(8n, 256n), 16n)
+  reduction = Nat.mul(448n, 16n)
+  scales = Nat.mul(Nat.mul(8n, 16n), 16n)
+  a = Nat.mul(Nat.mul(8n, 64n), 16n)
+  Nat.add(Nat.max(b, reduction), Nat.add(scales, a))

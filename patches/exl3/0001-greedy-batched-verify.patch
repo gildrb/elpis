@@ -1,0 +1,255 @@
+--- a/generator/generator.py
++++ b/generator/generator.py
+@@ -17,6 +17,8 @@
+ from .filter import Filter
+ from concurrent.futures import ThreadPoolExecutor
+ from .sampler import Sampler
++from .sampler.custom import CustomSampler, SS_Fused
++from .greedy_accept import GreedyAccept
+ from .visualizer import CacheVisualizer
+ import time
+ import threading
+@@ -262,6 +264,12 @@
+         if self.dynamic_draft and self.draft_model is not None:
+             self.draft_calibrator = DraftConfidenceCalibrator(draft_confidence)
+ 
++        # Greedy speculative verification commits through the admitted, proven acceptance decision; loading it
++        # here fails construction rather than ever deciding greedy acceptance another way
++        self.greedy_accept = GreedyAccept(self.num_draft_tokens) if self.num_draft_tokens else None
++        self.verify_ids_pinned = None
++        self.greedy_verify_rounds = 0
++
+ 
+     def num_remaining_jobs(self):
+         return len(self.pending_jobs) + len(self.active_jobs)
+@@ -940,6 +948,54 @@
+         return buf[:rows]
+ 
+ 
++    def _greedy_verify_eligible(self, job: Job) -> bool:
++        """
++        Whether a verify round of this job can commit through the batched greedy path: a single-sequence job whose
++        sampler collapsed to exactly the fused greedy reducer, with no logit mask, filter, forced or healing token,
++        stop string, banned string, loop detector or per-token output, and no requeue before its token budget ends.
++        Each excluded feature can change a later position's sampling or stop outcome through state the verifier
++        rows cannot see; stop tokens and the token budget are inputs of the acceptance decision itself.
++        """
++        sampler = job.sampler
++        return (
++            isinstance(sampler, CustomSampler)
++            and sampler.fused_only
++            and len(sampler.steps) == 1
++            and type(sampler.steps[0]) is SS_Fused
++            and sampler.steps[0].mode == SS_Fused.MODE_GREEDY
++            and len(job.sequences) == 1
++            and job.new_tokens >= 0
++            and job.new_tokens >= job.min_new_tokens
++            and job.forced_ids is None
++            and not job.filters
++            and not job.return_probs
++            and job.return_top_tokens == 0
++            and not job.return_logits
++            and not job.stop_strings
++            and job.banned_strings_utf32_offsets is None
++            and job.loop_detector is None
++            and job.checkpoint is None
++            and job.device_logit_mask is None
++            and job.max_new_tokens <= job.max_rq_tokens - self.num_draft_tokens
++        )
++
++
++    def _greedy_checkpoint(self, job: Job, window: int) -> int:
++        """
++        Committed-token count in 1..window after which job.is_checkpoint_boundary() first holds in this round, or 0
++        if no draft position reaches a boundary. Each commit advances the K/V position and the sequence length
++        together, so is_checkpoint_boundary() keeps one interval branch for the whole round.
++        """
++        seq = job.sequences[0]
++        seq_pos = seq.kv_position
++        if seq_pos >= len(seq.sequence_ids) - 1 - self.max_chunk_size * 2:
++            interval = self.recurrent_checkpoint_interval
++        else:
++            interval = self.recurrent_checkpoint_interval_pp
++        n = interval - (seq_pos - job.cached_pages * PAGE_SIZE) % interval
++        return n if n <= window else 0
++
++
+     def iterate_gen(self, results: list, draft_tokens: torch.Tensor | None = None):
+ 
+         # Get shape of active batch
+@@ -1150,6 +1206,96 @@
+                     completed_jobs.append(job)
+                 accepted_lengths.append(1)
+ 
++        # Greedy speculative verification. Every job in the round is an unconstrained greedy job, so no
++        # position's sampling depends on an earlier position's acceptance: each job's verifier rows go through
++        # one launch of its fused greedy reducer, all rows come back in one host readback, and the proven
++        # acceptance decision fixes how many of them the unchanged per-token commit consumes.
++        elif draft_tokens is not None and all(
++            self._greedy_verify_eligible(job)
++            for job, a, b in zip(self.active_jobs, logit_mapping[:-1], logit_mapping[1:]) if a != b
++        ):
++            window = draft_tokens.shape[-1]
++            width = batch_logits.shape[1]
++            if width != window + 1 or draft_tokens.device.type != "cpu" or draft_tokens.dtype != torch.long:
++                raise RuntimeError("Greedy verification requires host int64 drafts for all but the bonus position")
++            pinned = self.verify_ids_pinned
++            if pinned is None or pinned.shape[0] < len(batch_jobs) or pinned.shape[1] != width:
++                self.verify_ids_pinned = pinned = torch.empty(
++                    (max(len(batch_jobs), 32), width), dtype = torch.long, pin_memory = True
++                )
++
++            # The fused greedy reducer handles each row of its (rows, vocab) input in an independent grid row whose
++            # block split depends only on the vocabulary bound, and ignores the random seed, so one launch over a
++            # job's rows returns exactly what separate single-row launches would
++            verified = []
++            for job, a, b in zip(self.active_jobs, logit_mapping[:-1], logit_mapping[1:]):
++                if a == b: continue
++                row = len(verified)
++                ids = job.sampler.forward(batch_logits[a:b, :, :], None, 0, self.tokenizer)
++                pinned[row].copy_(ids.view(width), non_blocking = True)
++                verified.append(job)
++            torch.cuda.current_stream(batch_logits.device).synchronize()
++
++            for row, job in enumerate(verified):
++                verify_ids = pinned[row]
++                checkpoint = self._greedy_checkpoint(job, window) if batch_states is not None else 0
++                count, eos = self.greedy_accept(
++                    verify_ids,
++                    draft_tokens[row],
++                    job.stop_tokens,
++                    job.max_new_tokens - job.new_tokens,
++                    checkpoint,
++                )
++                self.greedy_verify_rounds += 1
++
++                # Commit exactly the decided prefix through the job's own serial bookkeeping. Its independent stop,
++                # requeue, rewind and checkpoint-boundary outcomes must agree with the decision at every position
++                for i in range(count):
++                    # One draw per consumed verifier row keeps the job RNG on the serial path's sequence
++                    job.rng.randint(0, (1 << 32) - 1)
++                    token_eos, _, rq = job.receive_sample(
++                        None,
++                        verify_ids[i:i + 1].view(1, 1),
++                        None,
++                        None,
++                        None,
++                        results,
++                    )
++                    last = i == count - 1
++                    if rq or job.checkpoint_rewound or token_eos != (eos and last):
++                        raise RuntimeError("Greedy acceptance decision disagrees with the job's commit")
++                    if not token_eos and i < window:
++                        boundary = batch_states is not None and job.is_checkpoint_boundary()
++                        if boundary != (i + 1 == checkpoint):
++                            raise RuntimeError("Greedy acceptance checkpoint disagrees with the job's boundary")
++                    if not last:
++                        job.accepted_draft_tokens += 1
++
++                # Stop at EOS: the remaining draft positions were verified but never resolved, count them as
++                # rejected and patch the already-built EOS event. Otherwise reject the unaccepted draft suffix, if
++                # any, rolling back recurrent state and page positions
++                rejected = 0
++                if eos:
++                    num_unresolved = window - (count - 1)
++                    if num_unresolved:
++                        job.rejected_draft_tokens += num_unresolved
++                        for r_ in reversed(results):
++                            if r_.get("eos") and r_["job"] is job:
++                                if "rejected_draft_tokens" in r_:
++                                    r_["rejected_draft_tokens"] = job.rejected_draft_tokens
++                                break
++                    completed_jobs.append(job)
++                elif count <= window:
++                    rejected = reject_remainder(job, row, count - 1, batch_states)
++
++                # Make sure outgoing state is valid if entire draft was accepted
++                if batch_states and rejected == 0:
++                    batch_states[row].rewind(0)
++
++                if self.record_draft_stats:
++                    job.draft_stats.append((job.new_tokens, window, count - 1))
++                accepted_lengths.append(count)
++
+         # With a draft, positions within a job are consumed strictly serially: acceptance of
+         # position n gates position n+1, and constrained-decoding masks and sampling past IDs
+         # must advance between positions.
+--- /dev/null
++++ b/generator/greedy_accept.py
+@@ -0,0 +1,76 @@
++"""
++Admitted acceptance decision for greedy speculative verification.
++
++The decision is the Bend-proven acceptance leaf, compiled into a CPU library and admitted by its own loader
++(artifact identity plus an exhaustive differential against the Bend specification table) when the generator is
++constructed. This module only binds that loader; it never computes or approximates the decision.
++"""
++
++from __future__ import annotations
++import importlib.util
++from pathlib import Path
++import torch
++
++ACCEPTOR_DIR = Path("/opt/qwen/bend-exl3")
++ACCEPTOR_LOADER = ACCEPTOR_DIR / "exl3_bend_accept.py"
++
++
++class GreedyAccept:
++    """
++    Decide how many verifier tokens a greedy speculative round commits.
++
++    For a window of k drafted tokens, verify_ids holds the target's greedy token for each of the k + 1 verified
++    positions and proposals the k drafted tokens. Returns (count, eos): verify_ids[:count] is committed, eos tells
++    whether the last committed token ends the job (stop token, or token budget reached). Otherwise, count == k + 1
++    means every proposal was accepted and the bonus token committed, and count <= k means the proposal at
++    count - 1 was rejected or a recurrent checkpoint boundary was reached there.
++    """
++
++    def __init__(self, window: int):
++        spec = importlib.util.spec_from_file_location("exl3_bend_accept", ACCEPTOR_LOADER)
++        if spec is None or spec.loader is None:
++            raise RuntimeError(f"Greedy acceptance loader is missing: {ACCEPTOR_LOADER}")
++        module = importlib.util.module_from_spec(spec)
++        spec.loader.exec_module(module)
++        self.acceptor = module.admit(str(ACCEPTOR_DIR))
++
++        # Reject an unsupported window now rather than at the first verify round: a one-token budget ends the
++        # job at the first committed token whatever the tokens are
++        if self.acceptor.accept([0] * (window + 1), [0] * window, (), 1, 0) != (1, True):
++            raise RuntimeError(f"Greedy acceptance does not admit a {window}-token draft window")
++
++
++    def __call__(
++        self,
++        verify_ids: torch.Tensor,
++        proposals: torch.Tensor,
++        stop_tokens: set[int],
++        budget: int,
++        checkpoint: int,
++    ) -> tuple[int, bool]:
++        """
++        :param verify_ids:
++            Host int64 tensor (k + 1,), target greedy token per verified position
++
++        :param proposals:
++            Host int64 tensor (k,), drafted tokens
++
++        :param stop_tokens:
++            Token IDs that end the job
++
++        :param budget:
++            Tokens the job may still generate, >= 1
++
++        :param checkpoint:
++            Committed count in 1..k at which a recurrent checkpoint boundary stops acceptance, or 0 for none
++        """
++        count, eos = self.acceptor.accept(
++            verify_ids.tolist(),
++            proposals.tolist(),
++            tuple(sorted(stop_tokens)),
++            budget,
++            checkpoint,
++        )
++        if type(count) is not int or type(eos) is not bool or not 1 <= count <= verify_ids.shape[0]:
++            raise RuntimeError("Greedy acceptance returned a malformed decision")
++        return count, eos

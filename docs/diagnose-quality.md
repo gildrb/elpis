@@ -11,8 +11,8 @@ publish API keys, private conversations, tool results or evaluation answers.
    Missing facts can come from trimming or compaction; coherent unsupported
    claims alone do not establish either compaction or KV-cache corruption.
 3. **Separate measurements.** Use upstream Prime Envs evaluation for model quality
-   and the salted cache probe for its narrow numerical consistency check.
-   A pass in one is not proof of the other or of client compaction correctness.
+   and the EXL3 benchmark lane for throughput. A pass in one is not proof of the
+   other or of client compaction correctness.
 4. **Keep comparisons controlled.** Record model/runtime identities, source and
    lock hashes, request settings, cache state and shared load. Follow the upstream environment protocol
    for controlled comparisons. Record model or budget changes explicitly; do not
@@ -21,6 +21,6 @@ publish API keys, private conversations, tool results or evaluation answers.
    Do not raise context beyond measured allocation, silently change precision,
    or globally flush another client's cache to obtain a passing result.
 
-See [benchmark instructions](benchmarks.md) and [measured results and limits](qualification.md).
+See [benchmark instructions](benchmarks.md) and [capability evaluation](../eval/README.md).
 No finite benchmark establishes that a model will never produce an incorrect
 answer. Runtime recovery and answer correctness require separate evidence.

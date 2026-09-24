@@ -6,7 +6,7 @@ let
   command = "${pkgs.docker-compose}/bin/docker-compose --project-name qwen-inference --file ${compose}";
 in {
   options.workstation.qwenInference = {
-    enable = lib.mkEnableOption "the canonical Qwen Docker deployment";
+    enable = lib.mkEnableOption "the canonical Qwen EXL3 Docker deployment";
     stateRoot = lib.mkOption {
       type = lib.types.externalPath;
       default = "/srv/ai/models/qwen3.8-27b";
@@ -26,22 +26,17 @@ in {
     allowUnqualified = lib.mkOption {
       type = lib.types.bool;
       default = false;
-      description = "Explicitly permit the unqualified 262144-token candidate.";
-    };
-    memFractionStatic = lib.mkOption {
-      type = lib.types.nullOr (lib.types.enum [ "0.94" "0.95" "0.96" "0.97" "0.98" ]);
-      default = null;
-      description = "Optional unqualified static-memory control; null uses the canonical Docker default.";
+      description = "Explicitly permit the unqualified EXL3 native-context candidate.";
     };
     image = lib.mkOption {
       type = lib.types.str;
-      default = "qwen-inference:local";
+      default = "qwen-inference:exl3";
       description = "Prebuilt reviewed Docker image; use its immutable digest for deployment.";
     };
   };
   config = lib.mkIf cfg.enable {
     systemd.user.services.qwen-inference = {
-      description = "Qwen canonical Docker deployment";
+      description = "Qwen EXL3 canonical Docker deployment";
       wantedBy = [ "default.target" ];
       requires = [ "docker.service" ];
       after = [ "docker.service" ];
@@ -54,8 +49,7 @@ in {
           "QWEN_PORT=${toString cfg.port}"
           "QWEN_IMAGE=${cfg.image}"
           "QWEN_ALLOW_UNQUALIFIED=${if cfg.allowUnqualified then "1" else "0"}"
-        ] ++ lib.optional (cfg.memFractionStatic != null)
-          "QWEN_MEM_FRACTION_STATIC=${cfg.memFractionStatic}";
+        ];
         ExecStartPre = lib.optional (cfg.requiredMountPoint != null)
           "${pkgs.util-linux}/bin/mountpoint --quiet -- ${lib.escapeShellArg cfg.requiredMountPoint}";
         ExecStart = "${command} up --detach --no-build --pull never --wait --wait-timeout 1200";

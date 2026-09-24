@@ -1,9 +1,10 @@
 # Copyright (c) 2026 inference contributors.
-"""Finite native math/logic/direct-context/C1 measurements; see autoresearch.sh.
+"""Finite EXL3 + Bend native math and C1 whole-request measurement; see autoresearch.sh.
 
 This supervisor never operates Docker lifecycle, promotion, power policy or the
 maintenance guardian. The latter must independently recover the owned candidate.
-Only the existing native producers and raw-evidence validators admit results.
+Only the unchanged native math producer, frozen C1 requests and raw-evidence
+replays in ``bench.exl3`` admit results.
 """
 
 from __future__ import annotations
@@ -24,17 +25,15 @@ from dataclasses import dataclass
 from pathlib import Path
 from types import FrameType
 
-from bench import decode, direct_context
-from eval.measure import mapping, number, sequence
-from serve import qualification
+from bench import exl3
+from bench.exl3 import mapping, number, sequence
 
 ROOT = Path(__file__).resolve().parents[1]
-ENDPOINT = "http://127.0.0.1:18020"
+ENDPOINT = exl3.ENDPOINT
 OPERATOR = Path("/run/user/1000/litos-autoresearch-operator.json")
 LIMIT_SECONDS = 2400
 RECOVERY_HEADROOM_SECONDS = 120
 TERMINATION_SECONDS = 20
-REPETITIONS = 5
 LEASE = Path("/run/user/1000/qwen-packed64-docker-gpu0-maintenance.lock")
 LAUNCH_LOCK = Path("/mnt/ssd/storage/ai/qwen3.8-27b/qwen-inference-launch.lock")
 LAUNCH_IDENTITY = {
@@ -46,38 +45,36 @@ LAUNCH_IDENTITY = {
 }
 METRIC_NAMES = (
     "model_call_output_tok_s",
-    "committed_tps_32768",
-    "committed_tps_1024",
-    "committed_tps_8192",
-    "ttft_seconds_1024",
-    "ttft_seconds_8192",
-    "ttft_seconds_32768",
+    "c1_request_tok_s_1024",
+    "c1_request_tok_s_8192",
+    "c1_request_tok_s_32768",
     "tiny_math_reward",
-    "short_i3_model_call_output_tok_s",
-    "short_i3_reward",
-    "long_graphwalks_model_call_output_tok_s",
-    "long_graphwalks_reward",
 )
-SUITE_PROTOCOL = "native-math3-logic1-graphwalks179k1-c1-v1"
-SUITE_ORDER = ("tiny-math", "short-i3", "long-graphwalks", "decode")
-SUITE_SCOPE = "sampled_math_logic_direct_graphwalks_and_C1_not_full_qualification"
+OPTIONAL_METRIC = "spec_accept_length"
+SUITE_PROTOCOL = "exl3-native-math3-c1-request-v1"
+SUITE_ORDER = ("tiny-math", "c1")
+SUITE_SCOPE = "exl3_bend_sampled_math_and_c1_whole_request_not_full_qualification"
 SUITE_SOURCES = (
     "autoresearch.sh",
     "bench/autoresearch.py",
-    "bench/direct_context.py",
-    "bench/decode.py",
-    "bench/cache.py",
-    "bench/power.py",
+    "bench/exl3.py",
     "bench/throughput-prompts.jsonl",
-    "serve/qualification.py",
-    "bend/adapter.py",
-    "bend/build_toolchain.py",
+    "prepare/exl3-manifest.json",
+)
+# Every rejected observation is recorded privately; nothing is retried.
+FAILURES = (
+    OSError,
+    ValueError,
+    KeyError,
+    TypeError,
+    RuntimeError,
+    subprocess.SubprocessError,
 )
 
 
 def require(condition: bool, message: str) -> None:
     """Reject invalid boundary inputs and incomplete observations."""
-    qualification.require(condition, message)
+    exl3.require(condition, message)
 
 
 def file_identity(info: os.stat_result) -> dict[str, int]:
@@ -136,6 +133,17 @@ def process_start(pid: int) -> str:
     return fields[19]
 
 
+def api_key(path: Path) -> str:
+    """Load the validated private bearer key; it is never written to evidence."""
+    raw, _ = private_read(path, key=True)
+    key = raw.removesuffix(b"\n")
+    require(
+        bool(key) and all(33 <= char <= 126 for char in key),
+        "Invalid private API key",
+    )
+    return key.decode("ascii")
+
+
 @dataclass(frozen=True)
 class Settings:
     """Explicit operator-owned inputs; workload/endpoint are not tunable knobs."""
@@ -155,7 +163,7 @@ class Settings:
             OPERATOR.resolve(strict=True) == OPERATOR, "Operator path is not canonical"
         )
         raw, identity = private_read(OPERATOR)
-        value = mapping(json.loads(raw, object_pairs_hook=qualification.pairs))
+        value = mapping(exl3.loads(raw))
         require(
             set(value)
             == {
@@ -168,16 +176,16 @@ class Settings:
             "Unexpected operator descriptor keys",
         )
         require(
-            qualification.integer(value.get("schema_version")) == 1,
+            exl3.integer(value.get("schema_version")) == 1,
             "Unsupported operator descriptor schema",
         )
-        container = qualification.text(value.get("container_id"))
+        container = exl3.text(value.get("container_id"))
         require(
             re.fullmatch(r"[0-9a-f]{64}", container) is not None,
             "Owned container must be its full immutable ID",
         )
         values = [
-            qualification.text(value.get(name))
+            exl3.text(value.get(name))
             for name in ("api_key_file", "maintenance_directory", "output_directory")
         ]
         require(
@@ -204,12 +212,7 @@ class Settings:
             paths[2].resolve(strict=False) == paths[2],
             "Output path must be canonical",
         )
-        key, _ = private_read(paths[0], key=True)
-        key = key.removesuffix(b"\n")
-        require(
-            bool(key) and all(33 <= char <= 126 for char in key),
-            "Invalid private API key",
-        )
+        _ = api_key(paths[0])
         return cls(
             container,
             paths[0],
@@ -235,8 +238,8 @@ def guard(settings: Settings) -> dict[str, object]:
     )
     directory = private_directory(settings.maintenance)
     raw, _ = private_read(settings.maintenance / "status.json")
-    state = mapping(json.loads(raw, object_pairs_hook=qualification.pairs))
-    _ = qualification.canonical(state)
+    state = mapping(exl3.loads(raw))
+    _ = exl3.canonical(state)
     require(
         state.get("schema") == 1
         and state.get("state") == "armed"
@@ -271,7 +274,7 @@ def guard(settings: Settings) -> dict[str, object]:
         and mutex_identity == state.get("operation_mutex_identity"),
         "Maintenance lock identity changed",
     )
-    pid = qualification.integer(state.get("guardian_pid"))
+    pid = exl3.integer(state.get("guardian_pid"))
     require(
         pid > 1 and process_start(pid) == state.get("guardian_start"),
         "Guardian process changed",
@@ -319,7 +322,7 @@ def verify_container(settings: Settings, state: dict[str, object]) -> None:
     )
     value = mapping(
         json.loads(
-            qualification.docker(
+            exl3.docker(
                 "container",
                 "inspect",
                 "--format",
@@ -344,7 +347,13 @@ def verify_container(settings: Settings, state: dict[str, object]) -> None:
     )
 
 
-def run_producer(settings: Settings, name: str, command: list[str]) -> None:
+def run_producer(
+    settings: Settings,
+    name: str,
+    command: list[str],
+    cwd: Path,
+    env: dict[str, str],
+) -> None:
     """Run once, preserving private native output; no retries or score selection."""
     guard(settings)
     with (
@@ -352,8 +361,18 @@ def run_producer(settings: Settings, name: str, command: list[str]) -> None:
         (settings.output / "logs" / f"{name}.stderr").open("xb") as stderr,
     ):
         result = subprocess.run(
-            command, cwd=ROOT, stdout=stdout, stderr=stderr, check=False
+            command,
+            cwd=cwd,
+            env=env,
+            stdin=subprocess.DEVNULL,
+            stdout=stdout,
+            stderr=stderr,
+            check=False,
         )
+    exl3.save(
+        settings.output / name / "provenance/producer-exit.json",
+        {"returncode": result.returncode},
+    )
     require(
         result.returncode == 0,
         f"Native {name} command failed; retained artifacts are incomplete",
@@ -362,7 +381,7 @@ def run_producer(settings: Settings, name: str, command: list[str]) -> None:
 
 
 def model_call_observations(
-    evidence: qualification.Evidence,
+    evidence: exl3.Evidence,
     directory: Path,
     expected_episode_count: int = 3,
 ) -> dict[str, object]:
@@ -386,9 +405,7 @@ def model_call_observations(
     episodes = 0
     with path.open("rb") as stream:
         for ordinal, raw in enumerate(stream):
-            episode_value: object = json.loads(
-                raw, object_pairs_hook=qualification.pairs
-            )
+            episode_value: object = json.loads(raw, object_pairs_hook=exl3.pairs)
             episode = mapping(episode_value)
             task = mapping(episode.get("task"))
             require(
@@ -416,12 +433,12 @@ def model_call_observations(
                     "Incomplete native model-call finish",
                 )
                 usage = mapping(call.get("usage"))
-                tokens = qualification.integer(usage.get("completion_tokens"))
+                tokens = exl3.integer(usage.get("completion_tokens"))
                 require(tokens >= 0, "Negative model-call completion usage")
-                prompt_tokens = qualification.integer(usage.get("prompt_tokens"))
+                prompt_tokens = exl3.integer(usage.get("prompt_tokens"))
                 cached_value = usage.get("cached_input_tokens")
                 cached_tokens = (
-                    0 if cached_value is None else qualification.integer(cached_value)
+                    0 if cached_value is None else exl3.integer(cached_value)
                 )
                 require(
                     prompt_tokens >= 0 and cached_tokens >= 0,
@@ -431,7 +448,7 @@ def model_call_observations(
                 reasoning = usage.get("reasoning_tokens")
                 if reasoning is not None:
                     require(
-                        0 <= qualification.integer(reasoning) <= tokens,
+                        0 <= exl3.integer(reasoning) <= tokens,
                         "Reasoning usage must be a subset, never additional tokens",
                     )
                 span = mapping(call.get("time"))
@@ -446,8 +463,8 @@ def model_call_observations(
                 durations.append(duration)
                 observations.append({
                     "episode": ordinal,
-                    "task_key": qualification.text(task.get("key")),
-                    "task_sha256": qualification.text(task.get("hash")),
+                    "task_key": exl3.text(task.get("key")),
+                    "task_sha256": exl3.text(task.get("hash")),
                     "trace_id": trace.get("id"),
                     "call": index,
                     "completion_tokens": tokens,
@@ -482,85 +499,22 @@ def model_call_observations(
     }
 
 
-def _native_workload(
-    frozen: dict[str, object], provenance: Path, environment: str
+def _freeze(
+    settings: Settings,
+    identity_sha256: str,
+    client: exl3.Client,
+    tokenizer: exl3.RawTokenizer,
 ) -> dict[str, object]:
-    """Remove only the fresh launch path, not any frozen content identity."""
-    files = mapping(frozen.get("files_sha256"))
-    launch_hash = files.pop(str((provenance / f"{environment}.toml").resolve()))
-    return {
-        "profile": frozen["profile"],
-        "environment": frozen["environment"],
-        "selection": frozen["selection"],
-        "files_sha256": files,
-        "launch_config_sha256": launch_hash,
-    }
-
-
-def _freeze_suite(settings: Settings) -> dict[str, object]:
-    """Bind all lanes before inference, inside the existing supervised deadline."""
-    supervisor = qualification.document(settings.output / "supervisor.json")
-    provenance_root = settings.output / "suite-provenance"
-    provenance_root.mkdir(mode=0o700)
-    native: dict[str, object] = {}
-    files: dict[str, object] = {}
-    image = (ROOT / "eval/.cache/sandbox-image").read_text(encoding="utf-8").strip()
-    require(
-        re.fullmatch(r"sha256:[a-f0-9]{64}", image) is not None,
-        "Missing pinned native sandbox image",
-    )
-    for lane, profile, environment in (
-        ("tiny-math", "tiny", "aime25"),
-        ("short-i3", "diverse", "i3-logic"),
-    ):
-        provenance = provenance_root / lane
-        provenance.mkdir(mode=0o700)
-        config = ROOT / "eval/configs" / profile / f"{environment}.toml"
-        launch, replacements = re.subn(
-            r"^image = .*$",
-            f'image = "{image}"',
-            config.read_text(encoding="utf-8"),
-            flags=re.MULTILINE,
-        )
-        require(replacements == 1, "Native profile must bind one sandbox image")
-        with (provenance / f"{environment}.toml").open("xb") as stream:
-            _ = stream.write(launch.encode())
-        frozen = qualification.frozen_inputs(profile, environment, provenance)
-        qualification.save(provenance / "evaluation-inputs.json", frozen)
-        plan = _native_workload(frozen, provenance, environment)
-        native[lane] = plan
-        files.update(mapping(plan["files_sha256"]))
-    direct_sources = {
-        str(path.resolve()): qualification.digest(path)
-        for path in direct_context.source_paths()
-    }
-    files.update(direct_sources)
-    files.update({
-        str((ROOT / name).resolve()): qualification.digest(ROOT / name)
-        for name in SUITE_SOURCES
-    })
-    # Source/data hashes stay complete; copy repository producer/config bytes,
-    # not large offline datasets or the prepared third-party source trees.
-    names: set[str] = set()
-    for value in files:
-        path = Path(value)
-        if path.is_relative_to(ROOT):
-            relative = path.relative_to(ROOT)
-            if not any(part.startswith(".") for part in relative.parts):
-                names.add(relative.as_posix())
+    """Bind math inputs, C1 prompts/IDs and producer bytes before any generation."""
+    supervisor = exl3.document(settings.output / "supervisor.json")
+    math_inputs = exl3.freeze_math(settings.output / "tiny-math")
+    plan = exl3.plan_c1(settings.output / "c1", client, tokenizer)
     sources = sequence(supervisor["sources"])
-    already = {
-        qualification.text(mapping(item)["path"]).removeprefix("sources/")
-        for item in sources
-    }
-    sources.extend(
-        decode.snapshot_sources(settings.output, tuple(sorted(names - already)))
-    )
     for value in sources:
         item = mapping(value)
-        name = qualification.text(item["path"]).removeprefix("sources/")
+        name = exl3.text(item["path"]).removeprefix("sources/")
         require(
-            item.get("sha256") == files.get(str((ROOT / name).resolve())),
+            item.get("sha256") == exl3.digest(ROOT / name),
             f"Benchmark source changed after its initial snapshot: {name}",
         )
     workload: dict[str, object] = {
@@ -568,334 +522,141 @@ def _freeze_suite(settings: Settings) -> dict[str, object]:
         "order": list(SUITE_ORDER),
         "primary_metric": "model_call_output_tok_s",
         "primary_scope": "tiny-math native model calls only; unchanged numerator and wall-clock denominator",
-        "native": native,
-        "long-graphwalks": {
-            "frozen_identity": direct_context.frozen_identity(),
-            "source_closure": direct_sources,
+        "identity_before_sha256": identity_sha256,
+        "math": {
+            "files_sha256": math_inputs["files_sha256"],
+            "selection": math_inputs["selection"],
+            "call_sampling": exl3.expected_call_sampling(),
         },
-        "decode": supervisor["decode"],
-        "files_sha256": files,
+        "c1": {
+            "plan_sha256": exl3.digest(settings.output / "c1/plan.json"),
+            "rows": plan["rows"],
+        },
         "sources": sources,
     }
     benchmark = {
         **supervisor,
         "workload": workload,
-        "workload_sha256": hashlib.sha256(
-            qualification.canonical(workload)
-        ).hexdigest(),
-        "sources": sources,
+        "workload_sha256": hashlib.sha256(exl3.canonical(workload)).hexdigest(),
     }
-    qualification.save(settings.output / "benchmark.json", benchmark)
+    exl3.save(settings.output / "benchmark.json", benchmark)
     return benchmark
 
 
-def _admit_native_plan(
-    evidence: qualification.Evidence,
-    directory: Path,
-    environment: str,
-    expected: object,
-) -> None:
-    provenance = directory.parent / "provenance"
-    path = evidence.retain(provenance / f"{environment}.evaluation-inputs-before.json")
-    require(
-        _native_workload(qualification.document(path), provenance, environment)
-        == expected,
-        f"{environment}: native run differs from the pre-suite frozen workload",
-    )
-
-
 def worker(settings: Settings) -> int:
-    """Collect real producers, then replay existing independent admission gates."""
+    """Collect the frozen workloads once, then replay raw-evidence admission."""
     state = guard(settings)
     verify_container(settings, state)
-    before = settings.output / "identity-before.json"
-    after = settings.output / "identity-after.json"
-    qualification.capture_identity(
-        settings.container, ENDPOINT, settings.key_file, before, None, None
-    )
-    identity = qualification.native_identity(
-        qualification.document(before).get("identity")
-    )
+    candidate = mapping(state.get("candidate"))
+    client = exl3.Client(api_key(settings.key_file))
+    before_path = settings.output / "identity-before.json"
+    after_path = settings.output / "identity-after.json"
+    before = exl3.capture_file(settings.container, client, before_path, None)
+    identity = mapping(before["identity"])
+    instance = mapping(identity["container"])
     require(
-        identity.get("container_id") == settings.container,
-        "Native identity selected another container",
+        instance.get("id") == settings.container
+        and instance.get("image") == candidate.get("image"),
+        "Captured identity selected another container or image",
     )
-    os.environ.update(
-        QWEN_SERVING_CONTAINER=settings.container,
-        QWEN_API_KEY_FILE=str(settings.key_file),
-        HF_HUB_OFFLINE="1",
-        HF_DATASETS_OFFLINE="1",
-        HF_HUB_DISABLE_TELEMETRY="1",
-        UV_OFFLINE="1",
-        UV_PYTHON_DOWNLOADS="never",
-        QWEN_EVAL_ALLOW_REQUESTS="1",
-        QWEN_EVAL_BASE_URL=f"{ENDPOINT}/v1",
+    tokenizer_record = mapping(identity["tokenizer"])
+    tokenizer = exl3.RawTokenizer(
+        Path(exl3.text(tokenizer_record["host_path"])),
+        exl3.text(tokenizer_record["sha256"]),
     )
-    benchmark = _freeze_suite(settings)
+    benchmark = _freeze(settings, exl3.digest(before_path), client, tokenizer)
     frozen_workload = mapping(benchmark["workload"])
+    group = settings.output / "tiny-math"
+    command, cwd = exl3.math_command(group)
     run_producer(
         settings,
         "tiny-math",
-        [
-            "bash",
-            str(ROOT / "eval/scripts/run"),
-            "tiny",
-            "aime25",
-            "--measure-power",
-            "--output",
-            str(settings.output / "tiny-math"),
-        ],
+        command,
+        cwd,
+        exl3.math_environment(group, client.key),
     )
-    run_producer(
-        settings,
-        "short-i3",
-        [
-            "bash",
-            str(ROOT / "eval/scripts/run"),
-            "diverse",
-            "i3-logic",
-            "--measure-power",
-            "--output",
-            str(settings.output / "short-i3"),
-        ],
+    after_inputs = exl3.math_inputs(group / "provenance")
+    exl3.save(group / "provenance/aime25.evaluation-inputs-after.json", after_inputs)
+    exl3.run_c1(
+        settings.output / "c1",
+        client,
+        exl3.document(settings.output / "c1/plan.json"),
+        lambda: guard(settings),
     )
-    run_producer(
-        settings,
-        "long-graphwalks",
-        [
-            sys.executable,
-            "-m",
-            "bench.direct_context",
-            "collect",
-            "--output",
-            str(settings.output / "long-graphwalks"),
-            "--key-file",
-            str(settings.key_file),
-            "--container",
-            settings.container,
-        ],
-    )
-    run_producer(
-        settings,
-        "decode",
-        [
-            sys.executable,
-            "-m",
-            "bench.decode",
-            "--endpoint",
-            ENDPOINT,
-            "--key-file",
-            str(settings.key_file),
-            "--container",
-            settings.container,
-            "--repetitions",
-            str(REPETITIONS),
-            "--output",
-            str(settings.output / "decode"),
-        ],
-    )
-    qualification.capture_identity(
-        settings.container, ENDPOINT, settings.key_file, after, before, 0
-    )
-    evidence = qualification.Evidence(settings.output / "admitted.json")
-    require(
-        qualification.captures(evidence, str(before), str(after)) == identity,
-        "Canonical measurement changed serving instance",
-    )
-    math_directory = settings.output / "tiny-math/aime25"
-    provenance = math_directory.parent / "provenance"
-    require(
-        qualification.captures(
-            evidence,
-            str(provenance / "aime25.serving-before.json"),
-            str(provenance / "aime25.serving-after.json"),
-        )
-        == identity,
-        "Math measurement changed serving instance",
-    )
-    quality = qualification.evaluation_gate(
-        evidence, math_directory, identity, "tiny", "aime25"
-    )
-    model_calls = model_call_observations(evidence, math_directory)
-    energy = qualification.energy_gate(evidence, math_directory, "aime25", identity)
-    _admit_native_plan(
-        evidence,
-        math_directory,
-        "aime25",
-        mapping(frozen_workload["native"])["tiny-math"],
-    )
-    short_directory = settings.output / "short-i3/i3-logic"
-    short_provenance = short_directory.parent / "provenance"
-    require(
-        qualification.captures(
-            evidence,
-            str(short_provenance / "i3-logic.serving-before.json"),
-            str(short_provenance / "i3-logic.serving-after.json"),
-        )
-        == identity,
-        "Short logic measurement changed serving instance",
-    )
-    short_quality = qualification.evaluation_gate(
-        evidence, short_directory, identity, "diverse", "i3-logic"
-    )
-    short_calls = model_call_observations(
-        evidence, short_directory, expected_episode_count=1
-    )
-    short_energy = qualification.energy_gate(
-        evidence, short_directory, "i3-logic", identity
-    )
-    _admit_native_plan(
-        evidence,
-        short_directory,
-        "i3-logic",
-        mapping(frozen_workload["native"])["short-i3"],
-    )
-    require(short_quality.get("rollouts") == 1, "Missing graded logic sentinel")
-    long_directory = settings.output / "long-graphwalks"
-    long_result = direct_context.admit(long_directory, expected_identity=identity)
-    long_plan = mapping(frozen_workload["long-graphwalks"])
-    long_identity = mapping(long_plan["frozen_identity"])
-    long_sources = mapping(long_plan["source_closure"])
-    require(
-        long_result.get("source_closure") == long_sources
-        and direct_context.frozen_identity() == long_identity
-        and long_result.get("frozen_identity") == long_identity
-        and long_result.get("messages_sha256") == long_identity["messages_sha256"],
-        "Direct context source or frozen identity differs from the pre-suite plan",
-    )
-    require(
-        long_result.get("schema_version") == 1
-        and long_result.get("producer") == "bench.direct_context.admit"
-        and long_result.get("error") is None
-        and type(long_result.get("is_truncated")) is bool
-        and long_result.get("finish_reason") in ("stop", "length")
-        and long_result["is_truncated"] == (long_result["finish_reason"] == "length"),
-        "Incomplete direct-context native finish/error evidence",
-    )
-    long_tokens = qualification.integer(long_result.get("completion_tokens"))
-    long_input = qualification.integer(long_result.get("input_tokens"))
-    long_seconds = number(long_result.get("elapsed_seconds"))
-    long_reward = number(long_result.get("reward"))
-    long_scope = qualification.text(long_result.get("metric_scope"))
-    require(
-        long_input == 178769
-        and 0 <= long_tokens <= 8192
-        and long_seconds > 0
-        and 0 <= long_reward <= 1,
-        "Incomplete native direct-context usage, timing or reward",
-    )
-    long_rate = number(long_tokens / long_seconds)
-    require(
-        number(long_result.get("model_call_output_tok_s")) == long_rate,
-        "Direct-context rate differs from its native model-call clock",
-    )
-    require(
-        qualification.document(evidence.retain(long_directory / "report.json"))
-        == long_result,
-        "Direct-context producer report differs from independent raw admission",
-    )
-    paths = sequence(long_result.get("evidence_paths"))
-    require(bool(paths), "Missing direct-context raw evidence paths")
-    for value in paths:
-        path = Path(qualification.text(value)).resolve(strict=True)
-        require(
-            path.is_relative_to(long_directory.resolve()) or str(path) in long_sources,
-            "Direct-context evidence is outside its fresh root and frozen sources",
-        )
+    after = exl3.capture_file(settings.container, client, after_path, before_path)
+    evidence = exl3.Evidence(settings.output / "admitted.json")
+    for path in (before_path, after_path):
         evidence.retain(path)
-    report_path = settings.output / "decode/decode-depth-matrix.json"
-    report = qualification.document(report_path)
+    require(after["identity"] == identity, "Measurement changed serving instance")
+    window = (
+        exl3.integer(before["finished_unix_ns"]),
+        exl3.integer(after["started_unix_ns"]),
+    )
+    quality = exl3.admit_math(evidence, group, window)
+    model_calls = model_call_observations(evidence, group / "aime25")
     require(
-        report.get("identity") == report.get("identity_after") == identity,
-        "Decode measurement changed serving instance",
-    )
-    workload = qualification.document(report_path.parent / "workload.json")
-    require(workload.get("repetitions") == REPETITIONS, "Canonical repetitions changed")
-    timing = qualification.timing_gate(
-        evidence, {"decode_report": str(report_path)}, identity
+        model_calls["call_count"] == 3 and quality["rollouts"] == 3,
+        "Tiny math must retain all three graded one-call rollouts",
     )
     require(
-        quality.get("rollouts") == 3, "Tiny math must retain all three graded rollouts"
+        mapping(frozen_workload["math"])["files_sha256"]
+        == exl3.document(group / "provenance/aime25.evaluation-inputs-before.json")[
+            "files_sha256"
+        ],
+        "Math inputs differ from the pre-suite frozen workload",
     )
-    rows = [mapping(row) for row in sequence(timing.get("rows"))]
-    metrics: dict[str, float] = {
-        "model_call_output_tok_s": number(model_calls.get("model_call_output_tok_s")),
-        "tiny_math_reward": number(quality.get("weighted_reward_mean")),
-        "short_i3_model_call_output_tok_s": number(
-            short_calls.get("model_call_output_tok_s")
-        ),
-        "short_i3_reward": number(short_quality.get("weighted_reward_mean")),
-        "long_graphwalks_model_call_output_tok_s": long_rate,
-        "long_graphwalks_reward": long_reward,
-    }
-    pooled: dict[str, object] = {}
-    for depth in decode.DEPTHS:
-        selected = [row for row in rows if row.get("depth_target") == depth]
-        require(len(selected) == REPETITIONS, "Incomplete canonical C1 matrix")
-        tokens = sum(
-            qualification.integer(row.get("counter_window_tokens")) for row in selected
-        )
-        nanoseconds = sum(
-            qualification.integer(row.get("counter_window_ns")) for row in selected
-        )
-        ttft = sum(qualification.integer(row.get("ttft_ns")) for row in selected)
-        require(
-            tokens > 0 and nanoseconds > 0,
-            "Missing positive committed counter interval",
-        )
-        metrics[f"committed_tps_{depth}"] = tokens * 1_000_000_000 / nanoseconds
-        metrics[f"ttft_seconds_{depth}"] = ttft / (1_000_000_000 * REPETITIONS)
-        pooled[str(depth)] = {
-            "counter_window_tokens": tokens,
-            "counter_window_ns": nanoseconds,
-            "ttft_ns_sum": ttft,
-            "repetitions": REPETITIONS,
-        }
+    c1 = exl3.admit_c1(evidence, settings.output / "c1")
+    require(
+        mapping(frozen_workload["c1"])["plan_sha256"]
+        == exl3.digest(settings.output / "c1/plan.json"),
+        "C1 plan differs from the pre-suite frozen workload",
+    )
     guard(settings)
-    for path_value, expected in mapping(frozen_workload["files_sha256"]).items():
-        path = Path(path_value).resolve(strict=True)
-        if str(path) not in evidence.hashes:
-            evidence.retain(path)
+    metrics: dict[str, float] = {
+        "model_call_output_tok_s": number(model_calls["model_call_output_tok_s"]),
+        "tiny_math_reward": number(quality["weighted_reward_mean"]),
+        **{name: number(value) for name, value in mapping(c1["metrics"]).items()},
+    }
+    for value in sequence(frozen_workload["sources"]):
+        item = mapping(value)
+        path = settings.output / exl3.text(item["path"])
         require(
-            evidence.hashes[str(path)] == expected,
-            f"Pre-suite source closure changed: {path}",
+            exl3.digest(evidence.retain(path)) == item["sha256"],
+            f"Snapshotted source changed: {path}",
         )
     for path in (
         settings.output / "benchmark.json",
         settings.output / "supervisor.json",
     ):
         evidence.retain(path)
-    evidence.tree(settings.output / "suite-provenance")
     evidence.tree(settings.output / "sources")
     evidence.tree(settings.output / "logs")
-    evidence.tree(math_directory)
-    evidence.tree(short_directory)
-    qualification.save(
+    evidence.tree(group / "provenance")
+    evidence.tree(group / "aime25")
+    evidence.tree(settings.output / "c1")
+    exl3.save(
         settings.output / "admitted.json",
         {
-            "schema_version": 2,
+            "schema_version": 1,
             "status": "complete_admitted_measurement",
             "protocol": SUITE_PROTOCOL,
             "scope": SUITE_SCOPE,
-            "quality_scope": "three original AIME25 tasks, one original I3 logic task and one original direct BFS task; separate native rewards, no combined quality score",
+            "quality_scope": "three original AIME25 tasks; native rewards, no combined quality score",
             "order": list(SUITE_ORDER),
             "workload_sha256": benchmark["workload_sha256"],
-            "benchmark_sha256": qualification.digest(
-                settings.output / "benchmark.json"
-            ),
+            "benchmark_sha256": exl3.digest(settings.output / "benchmark.json"),
             "identity": identity,
             "metrics": metrics,
-            "pooled_counter_windows": pooled,
-            "tiny_math": quality,
-            "tiny_math_energy": energy,
-            "short_i3": short_quality,
-            "short_i3_energy": short_energy,
-            "short_i3_model_calls": short_calls,
-            "long_graphwalks": long_result,
-            "long_graphwalks_metric_scope": long_scope,
-            "timing": timing,
             "primary_metric": "model_call_output_tok_s",
+            "tiny_math": quality,
             "native_model_calls": model_calls,
+            "c1": c1,
+            "not_measured": {
+                "ttft": c1["ttft"],
+                "committed_decode_tps": c1["committed_decode_tps"],
+                "power_energy": "not sampled by this lane",
+                "context_capacity": "/v1/models max_model_len is the reported limit, not a 262144-token capacity test",
+            },
             "evidence_sha256": evidence.hashes,
         },
     )
@@ -1087,7 +848,7 @@ def terminate(child: subprocess.Popen[bytes], deadline: float) -> bool:
 
 
 def supervise(settings: Settings, started: float) -> int:
-    """Enforce one deadline across capture, all native workloads and admission."""
+    """Enforce one deadline across capture, both native workloads and admission."""
     require(not os.path.lexists(settings.output), "Output directory must be fresh")
     state = guard(settings)
     deadline = min(
@@ -1101,8 +862,8 @@ def supervise(settings: Settings, started: float) -> int:
     settings.output.mkdir(mode=0o700)
     try:
         return supervise_created(settings, started, state, deadline)
-    except (OSError, ValueError, RuntimeError, subprocess.SubprocessError) as error:
-        qualification.save(
+    except FAILURES as error:
+        exl3.save(
             settings.output / "failure.json",
             {
                 "status": "rejected",
@@ -1123,13 +884,11 @@ def supervise_created(
     """Use only the fresh output directory exclusively created by this invocation."""
     _enable_subreaper()
     (settings.output / "logs").mkdir(mode=0o700)
-    sources = decode.snapshot_sources(
-        settings.output, ("autoresearch.sh", "bench/autoresearch.py")
-    )
-    qualification.save(
+    sources = exl3.snapshot_sources(settings.output, SUITE_SOURCES)
+    exl3.save(
         settings.output / "supervisor.json",
         {
-            "schema_version": 2,
+            "schema_version": 1,
             "protocol": SUITE_PROTOCOL,
             "scope": SUITE_SCOPE,
             "started_monotonic": started,
@@ -1156,37 +915,14 @@ def supervise_created(
                 "output_budget": 32768,
                 "sampling": "unchanged eval/configs/local.toml; greedy, thinking enabled",
             },
-            "short": {
-                "profile": "diverse",
-                "environment": "i3-logic",
-                "tasks": 1,
-                "rollouts": 1,
-                "shuffle": False,
-                "output_budget": 8192,
-                "selection": "first_native_eligible_source_order",
-            },
-            "long": {
-                "profile": "diverse",
-                "environment": "direct-graphwalks-bfs",
-                "tasks": 1,
-                "rollouts": 1,
-                "input_tokens": 178769,
-                "output_budget": 8192,
-                "selection": "first_native_filtered_source_order",
-            },
-            "decode": {
-                "depths": list(decode.DEPTHS),
-                "repetitions": REPETITIONS,
-                "output_budget": 1024,
-                "protocol": decode.MEASUREMENT_PROTOCOL,
+            "c1": {
+                "protocol": exl3.C1_PROTOCOL,
+                "depths": list(exl3.DEPTHS),
+                "repetitions": exl3.REPETITIONS,
+                "output_budget": exl3.OUTPUT_TOKENS,
                 "concurrency": 1,
                 "order": "depth_then_repetition",
-                "sampling": {
-                    "temperature": 0,
-                    "top_p": 1,
-                    "n": 1,
-                    "ignore_eos": False,
-                },
+                "sampling": {"temperature": 0, "top_p": 1, "n": 1, "stream": False},
                 "cache_policy": "deterministic_per_row_nonce_no_flush_no_warmup",
             },
             "order": list(SUITE_ORDER),
@@ -1226,7 +962,7 @@ def supervise_created(
                     raise RuntimeError("Missing supervisor binding pipe")
                 with child.stdin:
                     child.stdin.write(
-                        qualification.canonical({
+                        exl3.canonical({
                             "identity": settings.operator_identity,
                             "sha256": settings.operator_sha256,
                         })
@@ -1276,43 +1012,45 @@ def supervise_created(
             "Canonical benchmark finished outside its guarded deadline",
         )
         guard(settings)
-        admitted = qualification.document(settings.output / "admitted.json")
+        admitted = exl3.document(settings.output / "admitted.json")
         require(
             admitted.get("status") == "complete_admitted_measurement"
-            and admitted.get("schema_version") == 2
+            and admitted.get("schema_version") == 1
             and admitted.get("protocol") == SUITE_PROTOCOL
             and admitted.get("scope") == SUITE_SCOPE
             and admitted.get("order") == list(SUITE_ORDER),
-            "Missing complete frozen diverse-suite admission",
+            "Missing complete frozen EXL3 admission",
         )
-        benchmark = qualification.document(settings.output / "benchmark.json")
+        benchmark = exl3.document(settings.output / "benchmark.json")
         require(
             admitted.get("benchmark_sha256")
-            == qualification.digest(settings.output / "benchmark.json")
+            == exl3.digest(settings.output / "benchmark.json")
             and admitted.get("workload_sha256")
             == benchmark.get("workload_sha256")
-            == hashlib.sha256(
-                qualification.canonical(benchmark.get("workload"))
-            ).hexdigest(),
+            == hashlib.sha256(exl3.canonical(benchmark.get("workload"))).hexdigest(),
             "Admitted measurement is not bound to this complete frozen workload",
         )
         values = mapping(admitted.get("metrics"))
+        names = set(METRIC_NAMES)
         require(
-            set(values) == set(METRIC_NAMES), "Missing or unexpected primary metrics"
+            set(values) in (names, names | {OPTIONAL_METRIC}),
+            "Missing or unexpected admitted metrics",
         )
-        metrics = {name: number(values[name]) for name in METRIC_NAMES}
+        ordered = [
+            *METRIC_NAMES,
+            *([OPTIONAL_METRIC] if OPTIONAL_METRIC in values else []),
+        ]
+        metrics = {name: number(values[name]) for name in ordered}
         metrics["elapsed_seconds"] = time.monotonic() - started
-        qualification.save(
+        exl3.save(
             settings.output / "measurement.json",
             {
-                "schema_version": 2,
+                "schema_version": 1,
                 "status": "complete_admitted_measurement",
                 "protocol": SUITE_PROTOCOL,
                 "workload_sha256": admitted["workload_sha256"],
                 "metrics": metrics,
-                "admitted_sha256": qualification.digest(
-                    settings.output / "admitted.json"
-                ),
+                "admitted_sha256": exl3.digest(settings.output / "admitted.json"),
                 "elapsed_scope": "entire canonical command through raw-evidence admission; not decode-only time",
                 "finished_monotonic": time.monotonic(),
             },
@@ -1338,11 +1076,7 @@ def main() -> int:
     try:
         settings = Settings.descriptor()
         if sys.argv[1:] == ["--worker"]:
-            binding = mapping(
-                json.loads(
-                    sys.stdin.buffer.read(4097), object_pairs_hook=qualification.pairs
-                )
-            )
+            binding = mapping(exl3.loads(sys.stdin.buffer.read(4097)))
             require(
                 binding
                 == {
@@ -1353,13 +1087,8 @@ def main() -> int:
             )
             try:
                 return worker(settings)
-            except (
-                OSError,
-                ValueError,
-                RuntimeError,
-                subprocess.SubprocessError,
-            ) as error:
-                qualification.save(
+            except FAILURES as error:
+                exl3.save(
                     settings.output / "worker-failure.json",
                     {
                         "status": "rejected",
@@ -1370,9 +1099,9 @@ def main() -> int:
                 raise
         require(len(sys.argv) == 1, "Use bash autoresearch.sh --help")
         return supervise(settings, started)
-    except (OSError, ValueError, RuntimeError, subprocess.SubprocessError):
+    except FAILURES:
         sys.stderr.write(
-            "Canonical benchmark rejected; no admitted metrics. Inspect private artifacts.\n"
+            "EXL3 autoresearch rejected; no admitted metrics. Inspect private artifacts.\n"
         )
         return 1
 

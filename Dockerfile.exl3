@@ -1,0 +1,65 @@
+# Local EXL3 engine (community exllamav3 355c6ee) and its native DFlash2 extension.
+# Build only via docker/build-exl3.sh: the base tag must resolve to the ID below.
+# Its recorded RepoDigest is not a downloadable registry manifest.
+#
+# Targets:
+#   baseline  - the installed engine unchanged.
+#   candidate - baseline plus the sha-pinned patches/exl3 series, which commits greedy
+#               speculative verification through the proven Bend acceptance artifact.
+FROM qwen-litos:exl3-native-comparison AS baseline
+LABEL io.litos.exl3.base-image-id="sha256:b35314f48c7684b4c9cf3d59f4c21395316aa1fc0925db782f460005aa2602ff"
+LABEL io.litos.exl3.variant="baseline"
+
+USER root
+COPY serve/exl3-requirements.txt /opt/qwen/serve/exl3-requirements.txt
+RUN /opt/venv/bin/python -B -m ensurepip --upgrade && \
+    /opt/venv/bin/python -B -m pip --isolated install --no-cache-dir \
+      --require-hashes --only-binary=:all: \
+      --requirement /opt/qwen/serve/exl3-requirements.txt
+COPY docker/entrypoint.sh /opt/qwen/docker/entrypoint.sh
+COPY serve/exl3-entrypoint.sh /opt/qwen/serve/entrypoint.sh
+COPY serve/exl3_server.py serve/healthcheck.py /opt/qwen/serve/
+COPY prepare/verify-models.py prepare/exl3-manifest.json /model-preparation/
+
+ENV HOME=/cache \
+    XDG_CACHE_HOME=/cache/.cache \
+    HF_HOME=/cache/huggingface \
+    TRITON_CACHE_DIR=/cache/triton \
+    CUDA_CACHE_PATH=/cache/cuda \
+    TORCH_EXTENSIONS_DIR=/cache/torch_extensions \
+    TRITON_LIBCUDA_PATH=/usr/local/nvidia/lib64 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    HF_HUB_OFFLINE=1 \
+    TRANSFORMERS_OFFLINE=1 \
+    HF_HUB_DISABLE_TELEMETRY=1 \
+    HF_HUB_ENABLE_HF_TRANSFER=0 \
+    DO_NOT_TRACK=1 \
+    QWEN_EXL3_VARIANT=baseline
+USER runner
+WORKDIR /opt/qwen
+EXPOSE 18020
+ENTRYPOINT ["bash", "/opt/qwen/docker/entrypoint.sh"]
+
+FROM baseline AS candidate
+# Must equal sha256(patches/exl3/exl3-patches.json); build-exl3.sh re-checks the label.
+ARG EXL3_PATCHES_SHA256=
+LABEL io.litos.exl3.variant="candidate"
+LABEL io.litos.exl3.patches-sha256="${EXL3_PATCHES_SHA256}"
+USER root
+# Proven acceptance artifact, built on the host by docker/build-exl3.sh from the
+# repository's Bend sources with the pinned toolchain; read-only in the image.
+COPY build/bend-exl3/ /opt/qwen/bend-exl3/
+# apply.py verifies every pinned input, applies the series exactly, verifies every
+# post-image and acceptance-artifact pin, and records the manifest in the image.
+# Admission (artifact identity plus exhaustive differential against the Bend
+# specification table) must then pass here, and again at every server start.
+RUN --mount=type=bind,source=patches/exl3,target=/tmp/exl3-patches \
+    chown -R root:root /opt/qwen/bend-exl3 && chmod -R a=rX /opt/qwen/bend-exl3 && \
+    echo "${EXL3_PATCHES_SHA256}  /tmp/exl3-patches/exl3-patches.json" | sha256sum --check --strict && \
+    /opt/venv/bin/python -I -B /tmp/exl3-patches/apply.py /tmp/exl3-patches /opt/qwen/exl3-patches.json && \
+    /opt/venv/bin/python -I -B /opt/qwen/bend-exl3/exl3_bend_accept.py /opt/qwen/bend-exl3 && \
+    /opt/venv/bin/python -I -B -c \
+      "from exllamav3.generator.greedy_accept import GreedyAccept; GreedyAccept(7)"
+ENV QWEN_EXL3_VARIANT=candidate
+USER runner

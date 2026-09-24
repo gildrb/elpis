@@ -1,7 +1,0 @@
-build/
-dist/
-*.egg-info/
-__pycache__/
-*.so
-csrc/quantization/gptq_marlin/*kernel_*.cu
-csrc/quantization/gptq_marlin/kernel_selector.h

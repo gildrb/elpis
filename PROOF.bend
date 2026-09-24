@@ -14,6 +14,10 @@ import ./bend/abi_proof.bend as AbiProof
 import ./bend/numerical_proof.bend as NumericalProof
 import ./bend/selector_proof.bend as SelectorProof
 import ./bend/marlin_pipeline_proof.bend as MarlinPipelineProof
+import ./bend/attention_schedule_proof.bend as AttentionScheduleProof
+import ./bend/inverse_partner_proof.bend as InversePartnerProof
+import ./bend/forward_partner_proof.bend as ForwardPartnerProof
+import ./bend/exl3_accept_proof.bend as Exl3AcceptProof
 
 def add_succ(n: Nat, -i: Nat) -> {Nat.add(n, 1n+i) == 1n+Nat.add(n, i) : Nat}:
   match n:

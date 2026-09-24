@@ -377,10 +377,23 @@ def marlin_rows(count: Nat, +index: Nat) -> String:
     case 1n+p:
       Nat.show(MarlinPipeline.row(index)) ++ "\n" ++ marlin_rows(p, 1n+index)
 
+def marlin_scale_refresh_rows(count: Nat, +index: Nat) -> String:
+  match count:
+    case 0n:
+      ""
+    case 1n+p:
+      Nat.show(MarlinPipeline.scale_refresh_row(index)) ++ "\n" ++
+        marlin_scale_refresh_rows(p, 1n+index)
+
 def protocol() -> String:
-  "QWEN_RUNTIME_CONTROL_V2\nFREE_MIRROR\n8\n" ++ free_rows(8n, 0n) ++
+  "QWEN_RUNTIME_CONTROL_V7\nFREE_MIRROR\n8\n" ++ free_rows(8n, 0n) ++
     "STATUS\n8\n" ++ status_rows(8n, 0n) ++
     "MARLIN_EIGHT_STAGE\n8\n" ++ marlin_rows(8n, 0n) ++
+    "MARLIN_SCALE_REFRESH\n8\n" ++ marlin_scale_refresh_rows(8n, 0n) ++
+    "PACKED_LATE_VALUE\n4\n0\n0\n0\n1\n" ++
+    "PACKED_INVERSE_PARTNER\n4\n0\n0\n0\n1\n" ++
+    "PACKED_FORWARD_PARTNER_STAGES\n4\n0\n0\n0\n3\n" ++
+    "MARLIN_SELECTED_SHARED_BYTES\n1\n43008\n" ++
     "END_QWEN_RUNTIME_CONTROL"
 
 def published(state: State) -> Bool:

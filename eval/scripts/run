@@ -17,7 +17,7 @@ usage() {
         '  --power-interval-seconds=0.5  Monotonic sample period; allowed 0.1..60 s.' \
         '  --power-max-seconds=86400     Stop collection, not evaluation, after 1..604800 s.' \
         '  --power-max-samples=200000    Bound retained observations to 2..1000000.' \
-        'QWEN_SERVING_CONTAINER selects the running native262144 container (default qwen-inference-inference-1).' \
+        'QWEN_SERVING_CONTAINER selects the running EXL3 serving container (default qwen-inference-inference-1).' \
         'Measurement is opt-in, cannot accompany --dry-run, and never changes upstream scores.'
 }
 if [[ ${1:-} == --help || ${1:-} == -h ]]; then usage; exit 0; fi
@@ -118,15 +118,19 @@ fi
 git -C "$repo" rev-parse HEAD >"$group/provenance/recipe-checkout.txt"
 git -C "$repo" status --porcelain=v1 >"$group/provenance/worktree-status.txt"
 git -C "$repo" diff --binary HEAD | sha256sum >"$group/provenance/worktree-diff.sha256"
-cp -- "$repo/prepare/manifest.json" "$group/provenance/model-artifact-manifest.json"
-cp -- "$repo/patches/source.env" "$group/provenance/sglang-source.env"
+cp -- "$repo/prepare/exl3-manifest.json" "$group/provenance/model-artifact-manifest.json"
 uv --version >"$group/provenance/uv-version.txt"
 "$root/.venv/bin/python" --version >"$group/provenance/python-version.txt"
-qualification() {
-    (
-        cd -- "$repo"
-        exec "$root/.venv/bin/python" -m serve.qualification "$@"
-    )
+# Actual serving container/image identity; a restart or replacement mid-run fails.
+serving_identity() {
+    docker container inspect --format \
+        '{{.Id}} {{.Image}} {{.State.Running}} {{.State.StartedAt}} {{.RestartCount}}' \
+        -- "${QWEN_SERVING_CONTAINER:-qwen-inference-inference-1}"
+}
+# Frozen evaluator inputs, rehashed after the run.
+input_hashes() {
+    sha256sum -- "$1" "$root/configs/local.toml" "$root/datasets.lock" \
+        "$root/prime-envs.lock" "$root/uv.lock" "$root/pyproject.toml"
 }
 cd -- "$root/.sources/prime-envs"
 for config in "${configs[@]}"; do
@@ -171,16 +175,14 @@ for config in "${configs[@]}"; do
     if [[ "$profile" == smoke ]]; then flags+=(-v); fi
     if [[ "$dry" == true ]]; then flags+=(--dry-run); fi
     native=(uv run --project "$root" --no-sync eval @ "$root/configs/local.toml" @ "$launch" -o "$group/$taskset" "${flags[@]}")
-    before="$group/provenance/$taskset.serving-before.json"
-    after="$group/provenance/$taskset.serving-after.json"
-    frozen="$group/provenance/$taskset.evaluation-inputs-before.json"
-    capture=(capture --container "${QWEN_SERVING_CONTAINER:-qwen-inference-inference-1}"
-        --base-url http://127.0.0.1:18020/v1 --key-file "${QWEN_API_KEY_FILE:-}")
+    before="$group/provenance/$taskset.serving-before.txt"
+    frozen="$group/provenance/$taskset.evaluation-inputs.sha256"
     if [[ "$dry" == false ]]; then
-        qualification freeze-eval --profile "$profile" --environment "$taskset" --output "$frozen"
-        # Fail before any native evaluator request on fallback context, missing
-        # prepared/proof evidence, wrong endpoint or unavailable actual identity.
-        qualification "${capture[@]}" --output "$before"
+        input_hashes "$config" >"$frozen"
+        # Fail before any native evaluator request on a missing or stopped container.
+        serving_identity >"$before"
+        read -r _ _ running _ <"$before"
+        [[ "$running" == true ]] || { printf 'Serving container is not running\n' >&2; exit 1; }
     fi
     status=0
     if [[ "$measure" == true ]]; then
@@ -208,9 +210,11 @@ for config in "${configs[@]}"; do
     fi
     if [[ "$dry" == false ]]; then
         # Preserve post-run evidence even when the native evaluator exits nonzero.
-        qualification "${capture[@]}" --output "$after" --match "$before" --native-exit-code "$status"
-        qualification freeze-eval --profile "$profile" --environment "$taskset" \
-            --output "$group/provenance/$taskset.evaluation-inputs-after.json" --match "$frozen"
+        serving_identity >"$group/provenance/$taskset.serving-after.txt"
+        cmp -s -- "$before" "$group/provenance/$taskset.serving-after.txt" ||
+            { printf 'Serving container changed during evaluation\n' >&2; exit 1; }
+        input_hashes "$config" | cmp -s -- "$frozen" - ||
+            { printf 'Evaluator inputs changed during evaluation\n' >&2; exit 1; }
         if [[ "$status" -ne 0 ]]; then exit "$status"; fi
         traces=("$group/$taskset/"*/traces.jsonl)
         [[ ${#traces[@]} -eq 1 && -s "${traces[0]}" ]] || { printf 'No unique upstream traces file\n' >&2; exit 1; }
@@ -222,16 +226,6 @@ for config in "${configs[@]}"; do
             printf 'Upstream episode failures; inspect %s\n' "${traces[0]}" >&2
             jq -r 'select(.ok == false) | .errors[]? | .message' "${traces[0]}" >&2
             exit 1
-        fi
-        if [[ "$profile" == tiny ]]; then
-            qualification check-eval --profile tiny --environment aime25 \
-                --directory "$group/aime25" --identity "$before" \
-                --output "$group/provenance/aime25.sampled-math.json"
-        fi
-        if [[ "$profile" == diverse ]]; then
-            qualification check-eval --profile diverse --environment i3-logic \
-                --directory "$group/i3-logic" --identity "$before" \
-                --output "$group/provenance/i3-logic.logic-sentinel.json"
         fi
     fi
     if [[ "$status" -ne 0 ]]; then exit "$status"; fi

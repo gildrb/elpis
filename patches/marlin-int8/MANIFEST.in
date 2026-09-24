@@ -1,3 +1,0 @@
-include LICENSE NOTICE source-manifest.json
-recursive-include csrc *.cpp *.cu *.cuh *.h *.hpp *.py
-recursive-include litos_marlin_int8 *.py py.typed

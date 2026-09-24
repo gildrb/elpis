@@ -64,8 +64,6 @@ quality results. A missing key file fails before any model request.
 ## Repository checks
 
 ShellCheck with `-x` and shell syntax checks pass for the evaluation scripts.
-The retained `bench/cache.py --help` and the serving image's official SGLang
-throughput CLI `--help` pass independently of evaluation dependencies.
 No throughput or capacity figures were remeasured during this refactor.
 
 Nix flake validation passed on a source-only snapshot that excluded ignored
@@ -75,9 +73,9 @@ checkout containing private ignored runs.
 
 Full repository checks were run read-only. The inspected tree reported **164
 Ruff diagnostics**, **9 ty diagnostics**, and one formatting failure in
-`prepare/convert-embedding.py`. These concern retained/concurrent runtime and
-preparation code, not newly added evaluation Python (there is none). Strict rules
-were not disabled and authenticated/vendor inputs were not rewritten for lint.
+since-removed model-preparation code. These concern retained/concurrent runtime
+and preparation code, not newly added evaluation Python (there is none). Strict
+rules were not disabled and authenticated/vendor inputs were not rewritten for lint.
 No repository test suite is configured; no tests were added or represented as
 passing. Runtime files were changing concurrently, so these counts identify the
 inspected state rather than a promise about later edits.

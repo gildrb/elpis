@@ -38,7 +38,7 @@
   },
   "tokenizer_identity": {
     "artifact_directory": "/tmp/inference-full-reproduction-vz5z4cf0/attempt/conversion/artifact",
-    "inventory": "prepare/artifact.sha256",
+    "inventory": "retired W4A16 artifact inventory (removed from the repository)",
     "inventory_sha256": "788713472cfe98d98fc200964df7b933b57acdbf2ca82bbda0f10f480dbb3fa0",
     "files": {
       "chat_template.jinja": "c3cf9e34abf4f9e36c2d72165aa9c132d3e2a725b6c2586aaa3a8af9d7a81041",
@@ -90,10 +90,7 @@
     ],
     "tokenizer_empty_default_encode_ids": [],
     "native_apply_chat_template_tokenize_ids_equal_render_then_encode": true,
-    "default_and_no_special_encoding_ids_equal": true,
-    "sglang_multimodal_text_decode_then_encode_ids_equal": true,
-    "sglang_ordinary_text_batch_callable_ids_equal": true,
-    "server_source_trace": "Qwen3_5 is multimodal, but plain-text inputs have no media and are not MossVL. ServingChat renders the native Jinja template then decodes prompt_ids; TokenizerManager tokenizes text through its ordinary tokenizer and skips multimodal processing when no media is present. Both local paths yielded identical IDs for every entry. No live ServerArgs/TokenizerManager/client/server was constructed."
+    "default_and_no_special_encoding_ids_equal": true
   },
   "budget_convention": {
     "formula": "templated_input_tokens + configured_output_tokens + engine_reserve_tokens",
@@ -1852,18 +1849,14 @@
     "eval/direct/.sources/verifiers/verifiers/clients/openai_chat_completions_client.py": "69103c64169672ca5c0755d251e0b3ae8498fd26b8a81ce5c6a70c5e47c925b3",
     "eval/direct/.sources/verifiers/verifiers/envs/multiturn_env.py": "6e3ae0e6ead2073ac153b638cce0a39c849d6df99ed60d53d63b640497c3b67a",
     "eval/direct/.sources/prime-envs/environments/mrcr_v2/mrcr_v2.py": "ccc69ea93e23f7198b28d2370c67ffdcc5215c96031610d3e468d684d3dbf6c2",
-    "eval/direct/.sources/prime-envs/environments/graphwalks/graphwalks.py": "e17208d40adbc29ced989891c27ceebcbfbfdf7be57704b0556d2220d1b616eb",
-    "serve/entrypoint.sh": "509494d96b1ee39d5b4b8dcc2dfd02b17ec37a025383a18089d09e7686340bec"
-  },
-  "native_image_inspected_source_sha256": {
-    "serving_chat.py.txt": "7b05e6ab1d09a71ce253040c9cd62ea7c55a52020b44cf9b76d91c8df9e23240",
-    "tokenizer_manager.py.txt": "bdfaa4f4f214515f2138a3a82e8215882735490dfa85c271d2c41830b682ad33"
+    "eval/direct/.sources/prime-envs/environments/graphwalks/graphwalks.py": "e17208d40adbc29ced989891c27ceebcbfbfdf7be57704b0556d2220d1b616eb"
   },
   "limits": [
     "No endpoint call, full-profile sweep, model execution, scoring or native-depth quality qualification.",
     "Counts describe exact verified local tokenizer/template inputs and source-traced serving preprocessing, not observed endpoint usage.",
     "A different chat template, tokenizer implementation, request metadata/system/tools, reasoning setting or serving preprocessing requires recounting.",
     "GraphWalks selected_index is native post-filter index, not the removed original raw source row identifier.",
-    "Profiles are unchanged: no automatic exclusions, truncation, prompt rewriting or replacement sampling."
+    "Profiles are unchanged: no automatic exclusions, truncation, prompt rewriting or replacement sampling.",
+    "Counts used the retired W4A16 artifact's tokenizer files (tokenizer.json and tokenizer_config.json differ in bytes from the EXL3 target; chat_template.jinja is identical); recount with the EXL3 tokenizer before relying on exact depths. Its former serving-preprocessing trace belonged to the retired engine and was removed."
   ]
 }

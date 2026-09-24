@@ -193,8 +193,8 @@ MRCR v2, GraphWalks, and LongBench-Pro upload context to files and ask an agent 
 search them. A `128k-256k` file bucket neither sends that many tokens to Qwen nor
 proves it fits the configured model window. LongBench-Pro adds document-understanding
 metrics, but also file/REPL harness behavior, excluded task families and extra
-dependencies; GraphWalks is the simpler complementary choice here. Direct
-64K/240K memory and cache qualification remains in `bench/`.
+dependencies; GraphWalks is the simpler complementary choice here. Direct-context
+rows live in `eval/direct/` and the EXL3 benchmark lane (`bash autoresearch.sh`).
 
 The sandbox build uses upstream program bytes and native uv locks only. It does
 not alter an environment or scorer. Its build context excludes datasets, model
@@ -217,13 +217,16 @@ TASKSET/RUN/
   logs/attempt_1/eval.log
 ```
 
-The repository records its checkout commit, dirty status and diff hash, model
-artifact manifest, source lock, dataset lock, dependency locks and launch configs.
-That checkout is **not automatically the running deployment**. Set
-`QWEN_RECIPE_ID` to the verified serving commit/image/recipe identity before a
-comparison; absent identity is explicitly marked unverified. Preserve deployment
-image and model-inventory evidence with any published comparison. A dirty
-checkout is diagnostic evidence, not a reproducible release claim.
+The repository records its checkout commit, dirty status and diff hash, the EXL3
+model manifest (`prepare/exl3-manifest.json`), source lock, dataset lock,
+dependency locks and launch configs. Before each taskset it records the serving
+container's ID, image ID, running state, start time and restart count
+(`QWEN_SERVING_CONTAINER`) plus SHA256 of the frozen evaluator inputs; a changed
+container or input after the run fails the invocation. That identifies the
+running container, not the checkout that built it. Set `QWEN_RECIPE_ID` for
+direct-lane runs and preserve deployment image and model-inventory evidence with
+any published comparison. A dirty checkout is diagnostic evidence, not a
+reproducible release claim.
 
 Inspect the resolved JSON before trusting a run: model, client URL/key-variable,
 sampling, taskset filters, harness, runtime image/workdir/resources and rollout

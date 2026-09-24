@@ -12,6 +12,8 @@ __pycache__/
 
 .venv/
 benchmark-runs/
+# Host-built acceptance artifact staged for the candidate image build.
+/build/
 
 # Upstream evaluation source, environments, data and native traces stay local.
 /eval/.sources/

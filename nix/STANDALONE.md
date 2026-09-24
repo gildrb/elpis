@@ -5,11 +5,11 @@ includes tracked files only. New flake inputs must be tracked, but do not stage
 unrelated user changes. Avoid `path:.`: it copies ignored evaluation caches and
 private traces into the Nix source store.
 
-Docker is the canonical deployment. Nix pins developer tools and publishes the
-same root Compose file; it does not patch runtime sources, generate a second
-launch configuration, monitor health, provision keys or manage GPU memory.
-The candidate objective is **262,144 total tokens with DFlash2**, not a qualified
-capacity claim. Historical 64K evidence belongs to the old external deployment.
+Docker EXL3 is the canonical deployment. Nix pins developer tools and publishes
+the same prebuilt-image Compose file; it does not patch runtime sources, generate
+a second launch configuration, monitor health, provision keys or manage GPU
+memory. The fixed recipe uses native DFlash2, CQ3, context262144 and cache270336.
+These are configuration settings, not full-context capacity or quality evidence.
 
 ## Development and reproduction
 
@@ -27,12 +27,14 @@ See [development](../docs/development.md) and [Docker setup](../docs/docker.md).
 
 ## Foreground adapter
 
-Provision the existing private state, models, key and persistent lock as in the
-Docker guide. Build and review the Docker image first in the intended daemon.
-Nix never implicitly builds or pulls it.
+Provision the existing private state, EXL3 target/draft, key and persistent lock
+as in the Docker guide. Build and review the image first in the intended daemon
+using `bash docker/build-exl3.sh baseline qwen-inference:exl3` (or `candidate`). That script authenticates
+the required local native base image ID; Compose has no build stanza. Nix never
+implicitly builds or pulls the image.
 
 ```sh
-export QWEN_IMAGE=qwen-inference:local
+export QWEN_IMAGE=qwen-inference:exl3
 export QWEN_ALLOW_UNQUALIFIED=1
 # GPU launch: execute only after exclusive-access approval.
 nix run .#serve -- --state-root /absolute/private/qwen-state
@@ -61,7 +63,7 @@ a bootable host and does not configure storage or GPU drivers.
     enable = true;
     stateRoot = "/mnt/models/qwen-state";
     requiredMountPoint = "/mnt/models";
-    image = "qwen-inference:local"; # Prefer a reviewed immutable digest.
+    image = "qwen-inference:exl3"; # Prefer a reviewed immutable image ID/digest.
     allowUnqualified = true; # Explicit acknowledgment, not qualification.
   };
 }
@@ -80,12 +82,17 @@ Old automatic directory/key creation, source-overlay preparation, GPU polling,
 custom Python health supervision and cleanup/retry loops are removed. Provision
 state explicitly; missing bind sources fail closed. The container's persistent
 state lock remains. Its protection does not extend to another state or daemon.
-Do not activate this adapter over the occupied baseline. Stop the old service
-through its original configuration only after approval and preserve its rollback
-generation, image and artifacts. Static Nix validation is not activation or a
-cold-boot, hang-recovery, suspend/resume, capacity or model-quality result.
+Do not activate this adapter over an occupied endpoint. The current live
+`qwen-exl3-serving-2` deployment uses its persistent guardian configuration at
+`/mnt/ssd/storage/ai/qwen3.8-27b/exl3-serving-2/compose.json`, not this ordinary
+Nix launcher. Its guardian gate owns the same launch-lock inode and passes the
+lock to the baked EXL3 model launcher. Preserve its promoted window and controls;
+do not bypass the gate or launch this adapter beside it. See
+[current deployment and evidence](../docs/docker.md#current-persistent-live-deployment).
 
-The optional `workstation.qwenInference.memFractionStatic` accepts only strings
-`"0.94"` through `"0.98"` in 0.01 steps; its default `null` uses Docker's canonical
-0.94 setting. The foreground Nix adapter also inherits `QWEN_MEM_FRACTION_STATIC`.
-These are explicit unqualified memory trials, not a default promotion.
+Static Nix validation is not activation, cold-boot, hang-recovery,
+suspend/resume, full-context capacity or model-quality proof. The actual EXL3
+authenticated tool roundtrip and health smoke have passed. EXL3 has no runtime
+memory-fraction, graph or KV selectors and no automatic fallback.
+`allowUnqualified` remains the explicit acknowledgment; it does not bypass
+model, credential or ownership guards.

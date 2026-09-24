@@ -1,0 +1,35 @@
+{
+  "schema": 1,
+  "engine": {
+    "package": "exllamav3",
+    "version": "1.5.0",
+    "revision": "355c6ee10fbd25b79070316a81ea0708cc18155a",
+    "root": "/opt/venv/lib/python3.13/site-packages/exllamav3"
+  },
+  "series_sha256": "b7f4f8ffb42f9b73dc701b7a646ab43d61a802e55ea0ccd3cb3871c4be3f61ba",
+  "patches": [
+    {
+      "name": "0001-greedy-batched-verify.patch",
+      "sha256": "dfbf8e338da3e0750c56d7360eb93011b66b1c311dfef8381e4a6022980b61fd"
+    }
+  ],
+  "files": {
+    "generator/generator.py": {
+      "pre": "5d9e5741fb297513118fe03830a715713eb334d728c7cdcc8c0839b29dc91de7",
+      "post": "168b78ad8c974307e0816871692db90f3fcebcdcd45ea879cae3badad66e03ca"
+    },
+    "generator/greedy_accept.py": {
+      "pre": null,
+      "post": "55f0737093f3ced7d6fe6e8eba9d71caabf59e84bb3890d6a32b15630ed28b36"
+    }
+  },
+  "acceptor": {
+    "root": "/opt/qwen/bend-exl3",
+    "files": {
+      "libexl3_accept.so": "38dcdbccf24da7ca058e7b09613b8a3e333cada486aaa8711f2d2f0f2fc43cc7",
+      "exl3_accept_table.txt": "7c84bd88fbd6ad01b0872e2516e24f44029bfc3f48c50978d6ca86ad93085d63",
+      "exl3_bend_accept.py": "a4f873d0a2eb3f617af93bd63e1b1f6601d8c5eff33a9e26841cb15381a144c4",
+      "identity.json": "916af23041632e238da04d06753f7dc4a3fbe5959fa7f69b2efa6161ebf2469d"
+    }
+  }
+}

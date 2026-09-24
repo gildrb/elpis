@@ -1,19 +1,13 @@
 # Third-party source notices
 
-`patches/` contains explicit diffs against the pinned public SGLang commit,
-not copied upstream source files. Patch context and additions retain applicable
-source notices. The SGLang Apache-2.0 license is included as
-`patches/LICENSE.sglang`. See `patches/README.md` for provenance and ordering.
+Serving uses the ExLlamaV3 engine and its native DFlash2 extension as installed
+in the authenticated base image recorded in `prepare/exl3-manifest.json`.
+`patches/exl3/` holds explicit diffs against that installed engine, not copied
+upstream files; the engine retains its upstream license.
 
-`prepare/upstream-quant-embed.py.txt` preserves the upstream preparation recipe
-from `syv-ai/qwen38-27b-rtx3090` at the revision and hash recorded in
-`prepare/source-provenance.json`. Its Apache-2.0 license is included as
-`prepare/LICENSE.upstream`. The local offline preparation scripts are separate
-implementations; the archived recipe is not executed.
-
-The serving/package layout is informed by
+The measurement methodology is informed by
 https://github.com/syv-ai/qwen38-27b-rtx3090. Its vLLM performance measurements
-are not measurements of this SGLang implementation.
+are not measurements of this EXL3 deployment.
 
 Model-quality evaluation uses external upstream Prime Envs environments.
 Their pinned source references and setup are documented in `eval/README.md`.

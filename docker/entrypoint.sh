@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
-# Guard once, then exec SGLang. Docker owns stop, reaping and process restart.
+# Guard once, then exec the baked engine launcher. Docker owns process restart.
 set -euo pipefail
 if (( $# > 0 )); then
-  echo "Command overrides are not supported; use documented qualification controls." >&2
+  echo "Command overrides are not supported; the launch recipe is fixed." >&2
   exit 1
 fi
 # Preserve the shared inode. A losing container cannot stop a winning container.

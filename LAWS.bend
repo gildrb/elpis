@@ -20,6 +20,10 @@ import ./bend/abi_laws.bend as AbiLaws
 import ./bend/numerical_laws.bend as NumericalLaws
 import ./bend/selector_laws.bend as SelectorLaws
 import ./bend/marlin_pipeline_laws.bend as MarlinPipelineLaws
+import ./bend/attention_schedule_laws.bend as AttentionScheduleLaws
+import ./bend/inverse_partner_laws.bend as InversePartnerLaws
+import ./bend/forward_partner_laws.bend as ForwardPartnerLaws
+import ./bend/exl3_accept_laws.bend as Exl3AcceptLaws
 
 # Balanced parallel decomposition preserves the independent ascending loop.
 law tree_is_seq:

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Check Bend 2.0.26 proofs and retain four CPU serving-policy programs.
+"""Check Bend 2.0.27 proofs and retain four CPU serving-policy programs.
 
   python3 bend/adapter.py generate --output /tmp/qwen-bend --bend /path/to/bend
   python3 bend/adapter.py compile --directory /tmp/qwen-bend --cc clang-19
@@ -10,11 +10,13 @@
 Generation checks the actual root PROOF.bend, then emits C from bend/PLAN.bend,
 bend/SELECT.bend, bend/SPECULATE.bend and bend/RUNTIME.bend. Compilation happens
 in the target runtime. Serving loads the planner, greedy speculation table and
-mirror action tables once per startup; Marlin loads the stage policy at JIT
-construction, and qualification loads the objective table once.
+mirror action tables once per startup; Marlin loads stage/scale-refresh policies
+and its selected launch reservation at JIT construction. Packed attention passes
+the cached startup schedule tuple into its native constexpr kernel; qualification
+loads the objective table once.
 Retained hashes bind artifacts, not their trustworthiness: Bend's checker/compiler,
 Base intrinsics, foreign IO, clang and the host runtime remain trusted. The checker
-runs the unmodified pinned upstream 2.0.26 release executable with explicit OS
+runs the unmodified pinned upstream 2.0.27 release executable with explicit OS
 and JavaScriptCore stack limits, not compiler/checker semantic overrides. This
 is not a CUDA/F32, capacity, quality, or compiler-correctness proof. Engine
 allocation validators remain mandatory.
@@ -74,15 +76,32 @@ SOURCE_NAMES = (
     "bend/marlin_pipeline_spec.bend",
     "bend/marlin_pipeline_laws.bend",
     "bend/marlin_pipeline_proof.bend",
+    "bend/attention_schedule.bend",
+    "bend/attention_schedule_spec.bend",
+    "bend/attention_schedule_laws.bend",
+    "bend/attention_schedule_proof.bend",
+    "bend/inverse_partner.bend",
+    "bend/inverse_partner_spec.bend",
+    "bend/inverse_partner_laws.bend",
+    "bend/inverse_partner_proof.bend",
+    "bend/forward_partner.bend",
+    "bend/forward_partner_spec.bend",
+    "bend/forward_partner_laws.bend",
+    "bend/forward_partner_proof.bend",
     "bend/selector.bend",
     "bend/selector_spec.bend",
     "bend/selector_laws.bend",
     "bend/selector_proof.bend",
+    "bend/exl3_accept.bend",
+    "bend/exl3_accept_spec.bend",
+    "bend/exl3_accept_laws.bend",
+    "bend/exl3_accept_proof.bend",
     "bend/adapter.py",
     "bend/native_build.py",
     "bend/native.py",
     "bend/native.cu",
     "patches/marlin-bend-eight-stage.patch",
+    "patches/kvarn-bend-late-value.patch",
 )
 OFFSET_NAMES = (
     "k_packed",
@@ -147,23 +166,23 @@ POLICY_HEADER = "QWEN_OBJECTIVE_POLICY_V1\nROLES\n"
 POLICY_END = "END_QWEN_OBJECTIVE_POLICY\n"
 SPECULATION_HEADER = "QWEN_DFLASH_GREEDY_V1\n8\n128\n4\n"
 SPECULATION_END = "END_QWEN_DFLASH_GREEDY\n"
-RUNTIME_HEADER = "QWEN_RUNTIME_CONTROL_V2\nFREE_MIRROR\n8\n"
+RUNTIME_HEADER = "QWEN_RUNTIME_CONTROL_V7\nFREE_MIRROR\n8\n"
 RUNTIME_END = "END_QWEN_RUNTIME_CONTROL\n"
 U32_MAX = (1 << 32) - 1
 HEADER = "QWEN_KVARN_PLAN_V2\n"
 FREE = "FREE_PAGES\n"
 END = "END_QWEN_KVARN_PLAN\n"
-BEND_VERSION = "bend 2.0.26\n"
+BEND_VERSION = "bend 2.0.27\n"
 PROOF_DIAGNOSTIC = "All terms check.\n"
 BEND_COMMAND = "./compiler/bin/bend"
 COMPILER_FILES = {"bin/bend", "bin/bend-runtime"}
-BASE_SHA256 = "319f1457429f12c17ed9ac283514800ad5add8129b1c13e2c9ee67c26e982f5b"
+BASE_SHA256 = "90a4a9a4ec3997d7d4927d7dac04f9ddd3b884e6521ac9d691bfe6765ba0d4d7"
 RELEASE_RUNTIME_SHA256 = (
-    "c73f589be2560330a2698aa2c8fed54921abd9d1010c447265119bd1e1bdb1e9"
+    "38330ad07e228ba7a317836f484648cba93a1a3927357edccc65e3f2a0de253a"
 )
 NATIVE_RUNTIME_SHA256 = (
     RELEASE_RUNTIME_SHA256,
-    "0b7bcf9c0c057ce764286fdcecb2dedb711a26f1059fa32505a2fef735df2e27",
+    "be6b0663900a1ffac219a715c8fa865d011f0c40d31004bb3b41facc6e452a1e",
 )
 WRAPPER_SHA256 = "437f2f10c027d4b1a68d86b08d372a0bc32786b2304b658b5d07eefb79de437d"
 # Resource limits for the full proof, not compiler/checker semantic overrides.
@@ -212,17 +231,41 @@ SCOPE = (
     "bend/SPECULATE.bend and bend/RUNTIME.bend. Speculation acceptance and wire "
     "equivalence are proved against an independent Bend specification. Runtime "
     "tables select native host free-mirror/status-mirror actions and one guarded "
-    "Marlin eight-stage copy-pipeline specialization through a compiled action mask. "
-    "The consumer patch is source-bound; native class/safety/determinism "
-    "observations, compilation and same-order CUDA arithmetic remain trusted. "
+    "Marlin eight-stage copy-pipeline specialization through compiled action masks. "
+    "Its compiled scale-refresh schedule retains both register banks and refreshes "
+    "registers from shared memory only at group boundaries. "
+    "A compiled selected-class shared-byte scalar changes only that action's launch "
+    "reservation; native static assertions bind it to the selected shared layout. "
+    "Temporal overlay reuse and ldmatrix address-supplying lanes remain "
+    "native obligations. "
+    "A compiled four-row attention table selects late packed-V loads/dequantization "
+    "only for native constexpr D256/ROWS32; every other geometry retains early V. "
+    "The attention laws model exact ordered operands and accumulator expressions, "
+    "conditional on stable packed memory and unchanged address/mask observations. "
+    "An independent compiled four-row permission selects inverse-Hadamard partner "
+    "reshape/trans/split/join transport only for D256/ROWS32; action zero and all "
+    "other geometries retain the original gather. It is not derived from late V. "
+    "The inverse-partner model covers all 256 channels and eight ordered stages "
+    "for arbitrary incoming expressions with the 32-row identity preserved; "
+    "original butterfly operand order and surrounding output context are fixed. "
+    "A separate compiled four-row forward stage-count table selects only the first "
+    "three query-Hadamard partner transports for D256/ROWS32; remaining stages "
+    "and other geometries retain gather, independent of inverse permission. "
+    "The forward model preserves the full ordered eight/seven-stage transform, "
+    "query sanitization, raw-query use, normalization and float16 cast context; "
+    "its register-locality bound is conditional on the stated native layout. "
+    "Both consumer patches are source-bound; their ordered application to the "
+    "pinned native base, shape classification, native class/safety/determinism "
+    "observations, pointer correspondence, Triton/CUDA lowering and same-order "
+    "machine arithmetic remain trusted, not proved by the model. "
     "Transaction, ownership, numerical and ABI laws are abstract contracts, not "
     "proofs of native events, epochs, ownership, machine arithmetic "
     "or device addressing. "
-    "The checker is the unmodified pinned upstream 2.0.26 release executable; "
+    "The checker is the unmodified pinned upstream 2.0.27 release executable; "
     "explicit OS and JavaScriptCore stack limits are resource settings only. "
     "Base intrinsics, foreign IO, both compilers and the host runtime are trusted, "
     "not proved. GPU completion, consumption and execution remain trusted native "
-    "facts. No CUDA/F32, compiler-correctness, capacity, performance or quality claim."
+    "facts. No IEEE/CUDA/F32, compiler-correctness, capacity, performance or quality claim."
 )
 # String/comment masking preserves token separation, including @ #comment\n unsafe.
 LEXEMES = re.compile(r'"(?:\\.|[^"\\])*"|#[^\n]*|[A-Za-z_][A-Za-z0-9_.]*|[^\s]')
@@ -307,23 +350,37 @@ class RuntimePolicy:
     free_mirror: tuple[int, ...]
     status: tuple[int, ...]
     marlin_eight_stage: tuple[int, ...]
+    marlin_scale_refresh: tuple[int, ...]
+    packed_late_value: tuple[int, ...]
+    packed_inverse_partner: tuple[int, ...]
+    packed_forward_partner_stages: tuple[int, ...]
+    marlin_selected_shared_bytes: int
 
     def __post_init__(self) -> None:
-        """Require immutable complete tables and their bounded action alphabets."""
-        for values, maximum in (
-            (self.free_mirror, 1),
-            (self.status, 2),
-            (self.marlin_eight_stage, 1),
+        """Bound immutable tables and the unsigned native launch-byte scalar."""
+        for values, length, maximum in (
+            (self.free_mirror, 8, 1),
+            (self.status, 8, 2),
+            (self.marlin_eight_stage, 8, 1),
+            (self.marlin_scale_refresh, 8, 1),
+            (self.packed_late_value, 4, 1),
+            (self.packed_inverse_partner, 4, 1),
+            (self.packed_forward_partner_stages, 4, 3),
         ):
             if (
                 type(values) is not tuple
-                or len(values) != 8
+                or len(values) != length
                 or any(
                     type(value) is not int or not 0 <= value <= maximum
                     for value in values
                 )
             ):
                 fail("Malformed compiled runtime action table")
+        if (
+            type(self.marlin_selected_shared_bytes) is not int
+            or not 0 < self.marlin_selected_shared_bytes <= U32_MAX
+        ):
+            fail("Malformed compiled Marlin selected shared-byte scalar")
 
     def free_action(self, pending: bool, event_ready: bool, epoch_current: bool) -> int:
         """Index pending bit0, readiness bit1, current epoch bit2; no host policy algebra."""
@@ -350,6 +407,13 @@ class RuntimePolicy:
         """Serialize compiled LSB-first rows as one byte, without redeciding policy."""
         return sum(
             action << index for index, action in enumerate(self.marlin_eight_stage)
+        )
+
+    @property
+    def marlin_scale_refresh_mask(self) -> int:
+        """Serialize compiled phase rows LSB-first; do not derive a host schedule."""
+        return sum(
+            action << index for index, action in enumerate(self.marlin_scale_refresh)
         )
 
 
@@ -641,13 +705,13 @@ def tree_files(root: Path) -> set[str]:
 
 
 def check_release_compiler(hashes: object) -> None:
-    """Admit only the pinned upstream 2.0.26 release launcher and native runtime."""
+    """Admit only the pinned upstream 2.0.27 release launcher and native runtime."""
     if not is_object(hashes) or not COMPILER_FILES <= set(hashes):
-        fail("Compiler layout is not the pinned Bend 2.0.26 release closure")
+        fail("Compiler layout is not the pinned Bend 2.0.27 release closure")
     if hashes.get("bin/bend") != WRAPPER_SHA256:
         fail("Retained Bend launcher differs from the pinned release wrapper")
     if hashes.get("bin/bend-runtime") not in NATIVE_RUNTIME_SHA256:
-        fail("Bend runtime is not a pinned native 2.0.26 release executable")
+        fail("Bend runtime is not a pinned native 2.0.27 release executable")
 
 
 def generate(output: Path, bend: str) -> None:
@@ -669,7 +733,7 @@ def generate(output: Path, bend: str) -> None:
         compiler = local_file(compiler_root, nix_root / "bin/bend")
         compiler_root = nix_root
     if digest(compiler_root / "bend2/base.bend") != BASE_SHA256:
-        fail("Bend Base differs from the selected 2.0.26 release")
+        fail("Bend Base differs from the selected 2.0.27 release")
     base_root = compiler_root / "bend2"
     source_root = Path(__file__).resolve().parent.parent
     local, trusted = source_closure(source_root, base_root)
@@ -686,7 +750,7 @@ def generate(output: Path, bend: str) -> None:
     version_command = [BEND_COMMAND, "version"]
     version = run(version_command, cwd=output, record=output / "logs/version.json")
     if successful_output(version, version_command) != BEND_VERSION:
-        fail("Generation requires exactly bend 2.0.26")
+        fail("Generation requires exactly bend 2.0.27")
     base_command = [BEND_COMMAND, "base"]
     base = run(base_command, cwd=output, record=output / "logs/base.json")
     if (
@@ -714,7 +778,7 @@ def generate(output: Path, bend: str) -> None:
     write_json(
         output / "source.json",
         {
-            "schema": 9,
+            "schema": 14,
             "bend_version": BEND_VERSION.rstrip("\n"),
             "bend_origin": str(compiler),
             "sources": sources,
@@ -742,7 +806,7 @@ def source_identity(directory: Path) -> dict[str, object]:
             "scope",
         }
         or type(identity.get("schema")) is not int
-        or identity.get("schema") != 9
+        or identity.get("schema") != 14
         or identity.get("bend_version") != BEND_VERSION.rstrip("\n")
         or identity.get("scope") != SCOPE
     ):
@@ -767,7 +831,7 @@ def source_identity(directory: Path) -> dict[str, object]:
     }:
         fail("Retained dependency closure differs from generation")
     if digest(directory / "compiler/bend2/base.bend") != BASE_SHA256:
-        fail("Retained Base differs from the selected 2.0.26 release")
+        fail("Retained Base differs from the selected 2.0.27 release")
     if check_hashes(directory, identity.get("c")) != {
         f"{name}.c" for name in PROGRAM_NAMES
     }:
@@ -958,28 +1022,50 @@ def speculation_record(policy: SpeculationPolicy) -> dict[str, object]:
 
 
 def parse_runtime(text: str) -> RuntimePolicy:
-    """Decode the entire count-delimited action wire and its sole final newline."""
+    """Decode the entire count-delimited runtime wire and its sole final newline."""
     if not text.startswith(RUNTIME_HEADER) or not text.endswith(RUNTIME_END):
         fail("Missing or malformed Bend2 runtime control protocol")
     rows = text[len(RUNTIME_HEADER) : -len(RUNTIME_END)].split("\n")
     if (
-        len(rows) != 29
+        len(rows) != 60
         or rows[8:10] != ["STATUS", "8"]
         or rows[18:20] != ["MARLIN_EIGHT_STAGE", "8"]
+        or rows[28:30] != ["MARLIN_SCALE_REFRESH", "8"]
+        or rows[38:40] != ["PACKED_LATE_VALUE", "4"]
+        or rows[44:46] != ["PACKED_INVERSE_PARTNER", "4"]
+        or rows[50:52] != ["PACKED_FORWARD_PARTNER_STAGES", "4"]
+        or rows[56:58] != ["MARLIN_SELECTED_SHARED_BYTES", "1"]
         or rows[-1] != ""
     ):
         fail("Bend2 runtime action count or marker mismatch")
-    free_mirror, status, marlin_eight_stage = rows[:8], rows[10:18], rows[20:-1]
+    free_mirror, status = rows[:8], rows[10:18]
+    marlin_eight_stage, marlin_scale_refresh = rows[20:28], rows[30:38]
+    packed_late_value = rows[40:44]
+    packed_inverse_partner = rows[46:50]
+    packed_forward_partner_stages = rows[52:56]
     if (
         any(re.fullmatch(r"[01]", row) is None for row in free_mirror)
         or any(re.fullmatch(r"[0-2]", row) is None for row in status)
         or any(re.fullmatch(r"[01]", row) is None for row in marlin_eight_stage)
+        or any(re.fullmatch(r"[01]", row) is None for row in marlin_scale_refresh)
+        or any(re.fullmatch(r"[01]", row) is None for row in packed_late_value)
+        or any(re.fullmatch(r"[01]", row) is None for row in packed_inverse_partner)
+        or any(
+            re.fullmatch(r"[0-3]", row) is None for row in packed_forward_partner_stages
+        )
     ):
         fail("Bend2 runtime control contains invalid action codes")
+    if re.fullmatch(r"[1-9][0-9]{0,9}", rows[58]) is None:
+        fail("Bend2 runtime control contains an invalid shared-byte scalar")
     return RuntimePolicy(
         tuple(int(row) for row in free_mirror),
         tuple(int(row) for row in status),
         tuple(int(row) for row in marlin_eight_stage),
+        tuple(int(row) for row in marlin_scale_refresh),
+        tuple(int(row) for row in packed_late_value),
+        tuple(int(row) for row in packed_inverse_partner),
+        tuple(int(row) for row in packed_forward_partner_stages),
+        int(rows[58]),
     )
 
 
@@ -992,10 +1078,15 @@ def read_runtime(directory: Path, *, record: Path | None = None) -> RuntimePolic
 def runtime_record(policy: RuntimePolicy) -> dict[str, object]:
     """Retain compiled actions without recreating the decision algebra in Python."""
     return {
-        "schema": 2,
+        "schema": 7,
         "free_mirror": list(policy.free_mirror),
         "status": list(policy.status),
         "marlin_eight_stage": list(policy.marlin_eight_stage),
+        "marlin_scale_refresh": list(policy.marlin_scale_refresh),
+        "packed_late_value": list(policy.packed_late_value),
+        "packed_inverse_partner": list(policy.packed_inverse_partner),
+        "packed_forward_partner_stages": list(policy.packed_forward_partner_stages),
+        "marlin_selected_shared_bytes": policy.marlin_selected_shared_bytes,
     }
 
 
@@ -1175,7 +1266,7 @@ def verify(directory: Path) -> None:
 def verification_identity(directory: Path) -> dict[str, object]:
     """Bind all four retained executions to the complete source, proof and build chain."""
     return {
-        "schema": 6,
+        "schema": 11,
         "build_sha256": digest(directory / "build.json"),
         "source_sha256": digest(directory / "source.json"),
         "proof_sha256": digest(directory / "logs/proof.json"),
