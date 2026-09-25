@@ -44,7 +44,7 @@ def chain_go(fuel: Nat, +j: Nat, +s: Nat, +row: Nat, +k2: Nat, acc: Impl.Ex) -> 
       chain_go(more, Nat.add(j, 512n), s, row, k2, chain_el(Nat.is_lt(j, k2), j, s, row, k2, acc))
 
 def chain(+t: Nat, +s: Nat, +ab: Nat, +k2: Nat, +h: Nat, +H: Nat) -> Impl.Ex:
-  chain_go(5n, t, s, wrow(ab, h, H), k2, Impl.Zero{})
+  chain_go(5n, t, s, wrow(ab, h, H), k2, Impl.ZeroF{})
 
 # The 32 chains of warp w, lanes l.. (the values the warp reduces).
 def clanes(fuel: Nat, +l: Nat, +w: Nat, +s: Nat, +ab: Nat, +k2: Nat, +h: Nat, +H: Nat) -> List<&2, Impl.Ex>:
@@ -121,7 +121,7 @@ def wfold(fuel: Nat, +w: Nat, +s: Nat, +ab: Nat, +k2: Nat, +h: Nat, +H: Nat, v: 
       wfold(more, 1n+w, s, ab, k2, h, H, Impl.Add{v, wtree(5n, 0n, w, s, ab, k2, h, H)})
 
 def value(+s: Nat, +ab: Nat, +k2: Nat, +h: Nat, +H: Nat, hb: Bool) -> Impl.Ex:
-  Impl.with_bias(hb, wrow(ab, h, H), wfold(16n, 0n, s, ab, k2, h, H, Impl.Zero{}))
+  Impl.with_bias(hb, wrow(ab, h, H), wfold(16n, 0n, s, ab, k2, h, H, Impl.ZeroF{}))
 
 # ---- partial slots: warp w's partial of (row s, b|a) lives at 16 w + 8 ab + s
 def slot(+w: Nat, +s: Nat, +ab: Nat) -> Nat:

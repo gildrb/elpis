@@ -15,7 +15,7 @@ def nshow(+n: Nat) -> String:
 
 def ex(e: Impl.Ex) -> String:
   match e:
-    case Impl.Zero{}:
+    case Impl.ZeroF{}:
       "0"
     case Impl.Fma{x2, w2, c, acc}:
       "F(" ++ Nat.show(x2) ++ "," ++ Nat.show(w2) ++ "," ++ Nat.show(c) ++ "," ++ ex(acc) ++ ")"

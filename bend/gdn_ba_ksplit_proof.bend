@@ -338,7 +338,7 @@ def kb_c(fuel: Nat, +i: Nat, +t: Nat, +S: Nat, +k2: Nat, +h: Nat, +H: Nat, +xs: 
         Equal.cong(Impl.Ex, Impl.Ex, v => Spec.chain_go(more, Nat.add(j, 512n), n, Spec.wrow(ab, h, H), k2, v),
           Impl.get_p(xs2, n, ab), Spec.chain_el(Nat.is_lt(j, k2), j, n, Spec.wrow(ab, h, H), k2, Impl.get_p(xs, n, ab)), bj))
 
-def kb_zeros(n: Nat, +s: Nat, +ab: Nat) -> {Impl.get_p(Impl.zeros(n), s, ab) == Impl.Zero{} : Impl.Ex}:
+def kb_zeros(n: Nat, +s: Nat, +ab: Nat) -> {Impl.get_p(Impl.zeros(n), s, ab) == Impl.ZeroF{} : Impl.Ex}:
   match n s:
     case 0n _:
       {==}
@@ -462,8 +462,8 @@ def Laws.task_value(S, s, ab, k2, h, H, hb, sr, s8, a2):
   +a21 = a2
   +o0 = Impl.pick(Nat.is_eq(ab, 0n), h, Nat.add(H, h))
   +o1 = Spec.wrow(ab, h, H)
-  +r0 = Impl.rsum(16n, 0n, s, ab, S, k2, h, H, Impl.Zero{})
-  +r1 = Spec.wfold(16n, 0n, s, ab, k2, h, H, Impl.Zero{})
+  +r0 = Impl.rsum(16n, 0n, s, ab, S, k2, h, H, Impl.ZeroF{})
+  +r1 = Spec.wfold(16n, 0n, s, ab, k2, h, H, Impl.ZeroF{})
   Equal.trans(Impl.Ex, Impl.with_bias(hb, o0, r0), Impl.with_bias(hb, o1, r0), Impl.with_bias(hb, o1, r1),
     Equal.cong(Nat, Impl.Ex, o => Impl.with_bias(hb, o, r0), o0, o1, kb_pick_row(ab, h, H)),
-    Equal.cong(Impl.Ex, Impl.Ex, v => Impl.with_bias(hb, o1, v), r0, r1, kb_r(16n, 0n, s, ab, S, k2, h, H, Impl.Zero{}, sr1, s81, a21)))
+    Equal.cong(Impl.Ex, Impl.Ex, v => Impl.with_bias(hb, o1, v), r0, r1, kb_r(16n, 0n, s, ab, S, k2, h, H, Impl.ZeroF{}, sr1, s81, a21)))

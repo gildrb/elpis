@@ -24,7 +24,7 @@ import Base
 
 # An fp32 value as the operations that produced it.
 type Ex is Data:
-  Zero{}                                 # 0.0f
+  ZeroF{}                                # 0.0f
   Fma{x2: Nat, w2: Nat, c: Nat, acc: Ex}   # fmaf(x half2 x2 component c, w half2 w2 component c, acc)
   Add{a: Ex, b: Ex}                      # a + b (fp32)
   Bias{e: Ex, o: Nat}                    # e + __half2float(ba_bias[o])
@@ -93,7 +93,7 @@ def zeros(n: Nat) -> List<&2, P>:
     case 0n:
       Nil{}
     case 1n+m:
-      P{Zero{}, Zero{}} <> zeros(m)
+      P{ZeroF{}, ZeroF{}} <> zeros(m)
 
 # pb[0..7], pa[0..7] of thread t after the FMA loop (GR_KS_ITERS = 5, GR_KS_ROWS = 8)
 def accs(+t: Nat, +S: Nat, +k2: Nat, +h: Nat, +H: Nat) -> List<&2, P>:
@@ -112,7 +112,7 @@ def get_ab(p: P, ab: Nat) -> Ex:
 def get_p(xs: List<&2, P>, n: Nat, ab: Nat) -> Ex:
   match xs:
     case Nil{}:
-      Zero{}
+      ZeroF{}
     case p <> rest:
       match n:
         case 0n:
@@ -127,7 +127,7 @@ def acc(+t: Nat, +S: Nat, +s: Nat, +ab: Nat, +k2: Nat, +h: Nat, +H: Nat) -> Ex:
 def at(xs: List<&2, Ex>, n: Nat) -> Ex:
   match xs:
     case Nil{}:
-      Zero{}
+      ZeroF{}
     case x <> rest:
       match n:
         case 0n:
@@ -204,7 +204,7 @@ def with_bias(hb: Bool, +o: Nat, v: Ex) -> Ex:
 
 # b (ab = 0) or a (ab = 1) of row t < S, as stored to ba_out
 def task(+S: Nat, +t: Nat, +ab: Nat, +k2: Nat, +h: Nat, +H: Nat, hb: Bool) -> Ex:
-  with_bias(hb, pick(Nat.is_eq(ab, 0n), h, Nat.add(H, h)), rsum(16n, 0n, t, ab, S, k2, h, H, Zero{}))
+  with_bias(hb, pick(Nat.is_eq(ab, 0n), h, Nat.add(H, h)), rsum(16n, 0n, t, ab, S, k2, h, H, ZeroF{}))
 
 # ==== launcher: the variant that runs (0 = the per-warp GEMV) ====
 def variant(+ks: Nat, +S: Nat, +k: Nat) -> Nat:
