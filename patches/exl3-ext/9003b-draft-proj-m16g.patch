@@ -1,0 +1,237 @@
+--- a/architecture/dflash.py
++++ b/architecture/dflash.py
+@@ -114,6 +114,74 @@
+         self.vision = None
+ 
+ 
++# Grouped m16 routing of the K/V refresh projections (ext 9003): the encoder fc and the k_proj /
++# v_proj of every layer, which all read the same rows, run as exl3_gemm_m16g launches of up to
++# M16G_MAX_MATS matrices where the extension's routing table has a row for the (site, rows, k,
++# widths) (exl3_gemm_m16g.cu; EXL3_DRAFT_M16G=0 or the EXL3_GEMM_M16G mask keep the GEMVs)
++M16G_DRAFT_KV = 2
++M16G_DRAFT_FC = 3
++M16G_GROUPED = 1
++M16G_MAX_MATS = 4
++
++
++def _m16g_inner(linear, k: int, device: torch.device):
++    """
++    The LinearEXL3 of a projection whose forward is exactly the grouped m16 kernel's (4 bpw, mul1
++    codebook, no mcg or bias, unpadded, no LoRA / softcap / scales) over k features on device, else
++    None
++    """
++    inner = getattr(linear, "inner", None)
++    if (
++        getattr(linear, "quant_type", None) != "exl3" or
++        linear.in_features != linear.in_features_unpadded or
++        linear.out_features != linear.out_features_unpadded or
++        linear.lora_a_tensors or
++        linear.softcap != 0.0 or linear.pre_scale != 1.0 or linear.post_scale != 1.0 or
++        inner.K != 4 or not inner.mul1 or inner.mcg or inner.bias is not None or
++        inner.trellis.shape[0] * 16 != k or inner.trellis.device != device
++    ):
++        return None
++    return inner
++
++
++def _m16g_launches(site: int, linears: list, x: torch.Tensor) -> list | None:
++    """
++    The linears as grouped m16 launches over x's rows: chunks of up to M16G_MAX_MATS in order,
++    each an (inners, widths) pair the routing table sends to the grouped kernel. None when any
++    projection or chunk stays on its old path
++    """
++    if x.dtype != torch.half or not x.is_contiguous():
++        return None
++    rows = x.numel() // x.shape[-1]
++    k = x.shape[-1]
++    inners = [_m16g_inner(linear, k, x.device) for linear in linears]
++    if any(inner is None for inner in inners):
++        return None
++    launches = []
++    for i in range(0, len(inners), M16G_MAX_MATS):
++        chunk = inners[i : i + M16G_MAX_MATS]
++        ns = [inner.trellis.shape[1] * 16 for inner in chunk]
++        if torch.ops.exl3_m16.gemm_grouped_route(site, rows, k, ns) != M16G_GROUPED:
++            return None
++        launches.append((chunk, ns))
++    return launches
++
++
++def _m16g_run(launches: list, x: torch.Tensor) -> list[torch.Tensor]:
++    """
++    Run the launches of _m16g_launches on x: one fp16 (rows, n) output per projection, in order
++    """
++    rows = x.numel() // x.shape[-1]
++    x2 = x.view(rows, x.shape[-1])
++    outs = []
++    for chunk, ns in launches:
++        c = [torch.empty((rows, n), dtype = torch.half, device = x.device) for n in ns]
++        torch.ops.exl3_m16.gemm_grouped(
++            x2, [inner.trellis for inner in chunk], c, [inner.suh for inner in chunk], [inner.svh for inner in chunk])
++        outs += c
++    return outs
++
++
+ def dflash_update_kv_from_target(
+     model: Model,
+     target_hidden: list,
+@@ -151,21 +219,36 @@
+ 
+     # Projection concatenated states to hidden size, once
+     target_hidden = torch.cat(target_hidden, dim = -1)
+-    target_hidden = model.input_layer.proj.forward(target_hidden, {}, out_dtype = torch.half)
++    fc = _m16g_launches(M16G_DRAFT_FC, [model.input_layer.proj], target_hidden)
++    if fc is not None:
++        target_hidden = _m16g_run(fc, target_hidden)[0].view(*target_hidden.shape[:-1], -1)
++    else:
++        target_hidden = model.input_layer.proj.forward(target_hidden, {}, out_dtype = torch.half)
+     target_hidden = model.input_layer.norm.forward(target_hidden, {}, out_dtype = torch.half)
+ 
+     bsz, target_seqlen, dim = target_hidden.shape
+     params["target_hidden_cc"] = target_hidden
+ 
++    # k/v projections of every layer from the same rows, grouped when the kernel takes them all
++    kv_launches = _m16g_launches(
++        M16G_DRAFT_KV,
++        [proj for layer in model.attn_modules for proj in (layer.k_proj, layer.v_proj)],
++        target_hidden,
++    )
++    kv_outs = _m16g_run(kv_launches, target_hidden) if kv_launches is not None else None
++
+     # Update KV layers
+-    for layer in model.attn_modules:
++    for i, layer in enumerate(model.attn_modules):
+         block_table = get_for_device(params, "block_table", layer.device)
+         cache_seqlens = get_for_device(params, "cache_seqlens", layer.device)
+         target_hidden = get_for_device(params, "target_hidden_cc", layer.device)
+ 
+         # k/v project
+-        k = layer.k_proj.forward(target_hidden, params)
+-        v = layer.v_proj.forward(target_hidden, params)
++        if kv_outs is not None:
++            k, v = kv_outs[2 * i], kv_outs[2 * i + 1]
++        else:
++            k = layer.k_proj.forward(target_hidden, params)
++            v = layer.v_proj.forward(target_hidden, params)
+         k = k.view(bsz, target_seqlen, layer.num_kv_heads, layer.head_dim)
+         v = v.view(bsz, target_seqlen, layer.num_kv_heads, layer.head_dim)
+ 
+--- a/exllamav3_ext/quant/exl3_gemm_m16g.cu
++++ b/exllamav3_ext/quant/exl3_gemm_m16g.cu
+@@ -115,7 +115,10 @@
+ // Routing table: (site, k, widths, m range) -> the path bench_proj.py measured ahead of the site's
+ // sliced exl3_mgemm (g7r, RTX 3090, graph-timed). Qwen3.8-27B EXL3 4 bpw shapes. m 2..8 covers
+ // the M = 8 verify forward; m 1 and m 9..16 stay on the mgemm (m 16: mgemm 94-95 us vs 2101
+-// grouped 97-111, 2001 singles 108-115)
++// grouped 97-111, 2001 singles 108-115). draft rows are the DFlash2 draft's shapes (ext 9003,
++// bench_draft_proj.py, c9003 RTX 3090 graph-timed), which ran on the exl3 GEMV / sliced mgemm
++// before: its q/k/v bundle (m 8 draft forward), the K/V refresh projections and the encoder fc
++// (m = accepted rows). The draft's o_proj has no row: m16g measured 2-5.5 us slower than its GEMV
+ struct RouteRow
+ {
+     int site;
+@@ -124,14 +127,23 @@
+     int m_lo;
+     int m_hi;
+     Exl3M16GPath path;
++    bool draft;
+ };
+ 
+ const RouteRow g_routes[] =
+ {
+     // m 8: mgemm 87.6 us, 2001 singles 84.9, 2101 (counter finish) 88.8; 2102 pending bench
+-    { M16G_GDN_QKVZ, 5120, { 10240, 6144 },        2, 8, M16G_GROUPED },
++    { M16G_GDN_QKVZ, 5120, { 10240, 6144 },             2, 8, M16G_GROUPED, false },
+     // m 8: mgemm 89.5 us, 2101 75.5 (2001 singles 93.5, 2001 q + kv pair 79.4); 2102 pending bench
+-    { M16G_ATTN_QKV, 5120, { 12288, 1024, 1024 },  2, 8, M16G_GROUPED },
++    { M16G_ATTN_QKV, 5120, { 12288, 1024, 1024 },       2, 8, M16G_GROUPED, false },
++    // DFlash2 draft q/k/v: sliced mgemm 36.0-42.9 us, m16g 29.1-32.2 (m 1..8)
++    { M16G_ATTN_QKV, 5120, { 4096, 1024, 1024 },        1, 8, M16G_GROUPED, true },
++    // DFlash2 draft K/V refresh, 10 k/v GEMVs as launches of <= 4: 107.6-150.5 us -> 62.0-69.1 (m 1..8)
++    { M16G_DRAFT_KV, 5120, { 1024, 1024, 1024, 1024 },  1, 8, M16G_GROUPED, true },
++    { M16G_DRAFT_KV, 5120, { 1024, 1024 },              1, 8, M16G_GROUPED, true },
++    // DFlash2 draft encoder fc (5 taps x 5120 -> 5120, 65.5 MB): GEMV 112-125 us -> m16g 95-103 at
++    // m 3..8; m 1..2 stay on the GEMV (85.4 / 96.9 us vs 92.0 / 103.8)
++    { M16G_DRAFT_FC, 25600, { 5120 },                   3, 8, M16G_GROUPED, true },
+ };
+ 
+ unsigned site_mask()
+@@ -145,6 +157,17 @@
+     return mask;
+ }
+ 
++// Kill switch of the draft rows (ext 9003): EXL3_DRAFT_M16G=0 restores the draft's old routing
++bool draft_enabled()
++{
++    static const bool enabled = []
++    {
++        const char* env = std::getenv("EXL3_DRAFT_M16G");
++        return !(env && env[0] == '0');
++    }();
++    return enabled;
++}
++
+ }  // namespace
+ 
+ Exl3M16GPath exl3_gemm_m16g_route(int site, int size_m, int size_k, const std::vector<int>& ns, int K, bool mcg, bool mul1)
+@@ -159,7 +182,7 @@
+         while (i < (int) ns.size() && i < EXL3_M16G_MAX_MATS && r.ns[i] == ns[i]) ++i;
+         if (i == (int) ns.size() && (i == EXL3_M16G_MAX_MATS || r.ns[i] == 0)) { hit = &r; break; }
+     }
+-    if (!hit) return M16G_OLD;
++    if (!hit || (hit->draft && !draft_enabled())) return M16G_OLD;
+ 
+     // 2001 singles: same shape class as shape_ok, plus 2001's own kill switch
+     if (hit->path == M16G_SINGLES) return exl3_gemm_m16_enabled() ? M16G_SINGLES : M16G_OLD;
+--- a/exllamav3_ext/quant/exl3_gemm_m16g.cuh
++++ b/exllamav3_ext/quant/exl3_gemm_m16g.cuh
+@@ -11,12 +11,16 @@
+ // (not bitwise equal to 2001 or to per-matrix launches; run-to-run deterministic).
+ 
+ // Projection bundles with a measured routing table (exl3_gemm_m16g.cu, filled from bench_proj.py
+-// on the target model): a call site leaves its old path only when its (k, widths, m) matches a
+-// row. out_proj / o_proj have no site: a single matrix is 2001's own launch
++// on the target model and bench_draft_proj.py on the DFlash2 draft): a call site leaves its old
++// path only when its (k, widths, m) matches a row. out_proj / o_proj have no site: a single matrix
++// is 2001's own launch (or 8202's layer tail); the draft's o_proj measured slower on m16g than on
++// the GEMV. Rows for the draft's shapes (ext 9003) are also turned off by EXL3_DRAFT_M16G=0
+ enum Exl3M16GSite
+ {
+     M16G_GDN_QKVZ = 0,   // GatedDeltaNet in_proj_qkv + in_proj_z
+     M16G_ATTN_QKV = 1,   // attention q_proj + k_proj + v_proj
++    M16G_DRAFT_KV = 2,   // DFlash draft K/V refresh: k_proj / v_proj of several layers on one input
++    M16G_DRAFT_FC = 3,   // DFlash draft encoder fc over the concatenated target taps
+     M16G_NUM_SITES
+ };
+ 
+@@ -28,8 +32,8 @@
+ };
+ 
+ // Table lookup plus eligibility (shape; the grouped workspace; EXL3_GEMM_M16 for 2001 singles)
+-// and EXL3_GEMM_M16G, a hex site mask: unset = all sites, 0 = none. ns lists the widths in
+-// launch order
++// and EXL3_GEMM_M16G, a hex site mask: unset = all sites, 0 = none; draft rows also need
++// EXL3_DRAFT_M16G != 0. ns lists the widths in launch order
+ Exl3M16GPath exl3_gemm_m16g_route(int site, int size_m, int size_k, const std::vector<int>& ns, int K, bool mcg, bool mul1);
+ 
+ // C_i = had_out(had_in(A * suh_i) @ W_i) * svh_i. The input transform goes to a launcher-owned
+--- a/exllamav3_ext/quant/exl3_gemm_m16g_op.cpp
++++ b/exllamav3_ext/quant/exl3_gemm_m16g_op.cpp
+@@ -2,11 +2,14 @@
+ #include <ATen/Tensor.h>
+ #include "exl3_gemm_m16g.cuh"
+ 
+-// Eager entry points for isolated A/B and benchmarking (bench_proj.py), added to 2001's exl3_m16
+-// op namespace so bindings.cpp stays untouched. Same launcher as the routed call sites, no graph.
++// Eager entry points, added to 2001's exl3_m16 op namespace so bindings.cpp stays untouched. Same
++// launcher as the routed call sites, no graph. Used for isolated A/B and benchmarking
++// (bench_proj.py, bench_draft_proj.py) and by the DFlash draft K/V refresh (architecture/dflash.py,
++// ext 9003), which runs eagerly
+ //   torch.ops.exl3_m16.gemm_grouped(A, B[], C[], suh[], svh[])
+ //   torch.ops.exl3_m16.gemm_grouped_route(site, m, k, ns[]) -> int (the call sites' Exl3M16GPath:
+-//   0 old, 1 grouped, 2 2001 singles; site 0 GDN qkv+z, 1 attention q+k+v)
++//   0 old, 1 grouped, 2 2001 singles; sites as Exl3M16GSite: 0 GDN qkv+z, 1 attention q+k+v,
++//   2 draft K/V refresh, 3 draft fc). Assumes K 4, mul1, no mcg: callers check
+ 
+ static void exl3_gemm_m16g_op
+ (

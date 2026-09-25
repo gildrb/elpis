@@ -23,3 +23,5 @@ import ./bend/spec_inv_proof.bend as SpecInvProof
 import ./bend/attn_stride_proof.bend as AttnStrideProof
 import ./bend/attn_stride_bounds_proof.bend as AttnStrideBoundsProof
 import ./bend/tail_m16_sched_proof.bend as TailM16SchedProof
+import ./bend/mlp_m16_defer_proof.bend as MlpM16DeferProof
+import ./bend/attn_pre_proof.bend as AttnPreProof

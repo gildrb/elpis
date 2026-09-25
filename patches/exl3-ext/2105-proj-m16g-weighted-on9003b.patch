@@ -1,0 +1,414 @@
+--- a/exllamav3_ext/quant/exl3_gemm_m16g.cu
++++ b/exllamav3_ext/quant/exl3_gemm_m16g.cu
+@@ -10,6 +10,7 @@
+ #include "exl3_devctx.cuh"
+ #include <cstdlib>
+ #include <mutex>
++#include <algorithm>
+ 
+ // Fixed-size per-device scratch, allocated on the first (eager) call and never resized: captured
+ // graphs keep the pointer. EXL3_M16G_SLOT_BYTES of split-K partial slots (32 KB each; the routed
+@@ -70,20 +71,51 @@
+     return l;
+ }
+ 
+-// Block owning iteration x for the partition start(b) = floor(b * total / G) (2001's)
+-int owner(int x, int total, int G)
+-{
+-    return (int) ((((int64_t) x + 1) * G + total - 1) / total) - 1;
++// ext 2105 slot-weighted partition (wpart.py; the kernel's exl3_m16g_start / exl3_m16g_owner):
++// block b's weight is w0 if b < nsm, else w1; (1, 1) is 2001's floor(b * total / G)
++struct Weights
++{
++    int w0;
++    int w1;
++    int nsm;
++};
++
++int64_t wpre(int b, const Weights& w)
++{
++    return (int64_t) w.w0 * std::min(b, w.nsm) + (int64_t) w.w1 * std::max(b - w.nsm, 0);
++}
++
++int wstart(int b, int total, int G, const Weights& w)
++{
++    return (int) (((int64_t) total * wpre(b, w)) / wpre(G, w));
++}
++
++// Block owning iteration x: max{b : start(b) <= x}
++int owner(int x, int total, int G, const Weights& w)
++{
++    const int64_t WG = wpre(G, w);
++    const int64_t P = (((int64_t) x + 1) * WG + total - 1) / total - 1;
++    if (P < (int64_t) w.w0 * w.nsm) return (int) (P / w.w0);
++    return w.nsm + (int) ((P - (int64_t) w.w0 * w.nsm) / w.w1);
++}
++
++// Domain of the weighted partition: w0, w1 >= 1, nsm <= G <= 2 nsm, every slice nonempty
++bool weights_valid(int total, int G, const Weights& w)
++{
++    if (w.w0 < 1 || w.w1 < 1 || w.nsm < 1 || G < w.nsm || G > 2 * w.nsm) return false;
++    for (int b = 0; b < G; ++b)
++        if (wstart(b + 1, total, G, w) <= wstart(b, total, G, w)) return false;
++    return true;
+ }
+ 
+ // Largest number of blocks contributing to one group (partial slots per group)
+-int max_contrib(int groups, int KT, int G)
++int max_contrib(int groups, int KT, int G, const Weights& w)
+ {
+     const int total = groups * KT;
+     int mc = 1;
+     for (int g = 0; g < groups; ++g)
+     {
+-        int nc = owner((g + 1) * KT - 1, total, G) - owner(g * KT, total, G) + 1;
++        int nc = owner((g + 1) * KT - 1, total, G, w) - owner(g * KT, total, G, w) + 1;
+         if (nc > mc) mc = nc;
+     }
+     return mc;
+@@ -106,10 +138,10 @@
+ 
+ // Workspace and grid fit of a launch: slots for every (group, contributor) and at least one
+ // iteration per block (the cooperative grid never idles a block past its grid.syncs)
+-bool launch_fits(int groups, int KT, int G)
++bool launch_fits(int groups, int KT, int G, const Weights& w)
+ {
+     return groups * KT >= G &&
+-           (uint64_t) groups * max_contrib(groups, KT, G) * EXL3_M16_SLOT_FLOATS * sizeof(float) <= EXL3_M16G_SLOT_BYTES;
++           (uint64_t) groups * max_contrib(groups, KT, G, w) * EXL3_M16_SLOT_FLOATS * sizeof(float) <= EXL3_M16G_SLOT_BYTES;
+ }
+ 
+ // Routing table: (site, k, widths, m range) -> the path bench_proj.py measured ahead of the site's
+@@ -146,6 +178,55 @@
+     { M16G_DRAFT_FC, 25600, { 5120 },                   3, 8, M16G_GROUPED, true },
+ };
+ 
++// ext 2105 default partition weights (w0, w1) per bundle, matched on (k, widths); every other
++// bundle (the draft rows included: their shapes were not measured) runs at (1, 1) = 2102's
++// partition. From the 2102 per-block dump (blocks2102.json: loop(b + 82) / loop(b) = 1.098 GDN,
++// 1.095 attention at equal work); the bench sweep picks the final values
++struct WeightRow
++{
++    int k;
++    int ns[EXL3_M16G_MAX_MATS];   // 0-terminated
++    int w0;
++    int w1;
++};
++
++const WeightRow g_weights[] =
++{
++    { 5120, { 10240, 6144 },       100, 91 },   // GDN in_proj_qkv + in_proj_z
++    { 5120, { 12288, 1024, 1024 }, 100, 91 },   // attention q + k + v
++};
++
++// ext 2105 kill switch: EXL3_M16G_2105=0 runs every grouped launch at (1, 1) = 2102's partition
++bool weights_enabled()
++{
++    static const bool on = []
++    {
++        const char* env = std::getenv("EXL3_M16G_2105");
++        return !(env && env[0] == '0' && !env[1]);
++    }();
++    return on;
++}
++
++// Weights of a grouped launch: ow0 / ow1 > 0 (bench override), else the g_weights row matching
++// (k, widths), else (1, 1); (1, 1) when disabled or when the weights fall outside the domain
++Weights launch_weights(int size_k, const std::vector<int>& ns, int total, int G, int nsm, int ow0, int ow1)
++{
++    Weights w = { 1, 1, nsm };
++    if (ow0 > 0 && ow1 > 0) { w.w0 = ow0; w.w1 = ow1; }
++    else if (weights_enabled())
++    {
++        for (const WeightRow& r : g_weights)
++        {
++            if (r.k != size_k) continue;
++            int i = 0;
++            while (i < (int) ns.size() && i < EXL3_M16G_MAX_MATS && r.ns[i] == ns[i]) ++i;
++            if (i == (int) ns.size() && (i == EXL3_M16G_MAX_MATS || r.ns[i] == 0)) { w.w0 = r.w0; w.w1 = r.w1; break; }
++        }
++    }
++    if (!weights_valid(total, G, w)) w = { 1, 1, nsm };
++    return w;
++}
++
+ unsigned site_mask()
+ {
+     static const unsigned mask = []
+@@ -192,10 +273,14 @@
+     cuda_check(cudaGetDevice(&device));
+     int groups = 0;
+     for (int n : ns) groups += n / EXL3_M16_GW;
+-    return launch_fits(groups, size_k / 16, grid_size(size_m, false, device)) ? M16G_GROUPED : M16G_OLD;
+-}
+-
+-void exl3_gemm_m16g_gr
++    const int G = grid_size(size_m, false, device);
++    const int nsm = DevCtx::instance().get_num_sms(device);
++    const Weights w = launch_weights(size_k, ns, groups * (size_k / 16), G, nsm, 0, 0);
++    return launch_fits(groups, size_k / 16, G, w) ? M16G_GROUPED : M16G_OLD;
++}
++
++// ow0 / ow1 > 0 override the launch weights (bench), else the g_weights row's (or (1, 1))
++static void launch_grouped
+ (
+     const at::Tensor& A,
+     const std::vector<at::Tensor>& B,
+@@ -203,7 +288,10 @@
+     const std::vector<at::Tensor>& suh,
+     const std::vector<at::Tensor>& svh,
+     Graph* graph,
+-    int a_site
++    int a_site,
++    int ow0,
++    int ow1,
++    unsigned long long* prof
+ )
+ {
+     const at::cuda::OptionalCUDAGuard device_guard(A.device());
+@@ -260,7 +348,9 @@
+     const int G = DevCtx::instance().get_num_sms(device) * l.blocks_per_sm;
+ 
+     const int KT = size_k / 16;
+-    TORCH_CHECK(launch_fits(groups, KT, G), "exl3_gemm_m16g: workspace too small or matrices too small for the grid");
++    const int nsm = DevCtx::instance().get_num_sms(device);
++    const Weights w = launch_weights(size_k, ns, groups * KT, G, nsm, ow0, ow1);
++    TORCH_CHECK(launch_fits(groups, KT, G, w), "exl3_gemm_m16g: workspace too small or matrices too small for the grid");
+ 
+     half* xh = (half*) (((char*) ws) + EXL3_M16G_SLOT_BYTES);
+     for (int i = 0; i < num_mats; ++i) args.xh[i] = xh + (size_t) i * size_m * size_k;
+@@ -268,7 +358,11 @@
+     args.size_m = size_m;
+     args.size_k = size_k;
+     args.num_mats = num_mats;
+-    args.max_contrib = max_contrib(groups, KT, G);
++    args.max_contrib = max_contrib(groups, KT, G, w);
++    args.w0 = w.w0;
++    args.w1 = w.w1;
++    args.nsm = w.nsm;
++    args.prof = prof;
+ 
+     const half* A_ptr = (const half*) A.data_ptr();
+     void* C0_ptr = C[0].data_ptr();
+@@ -284,3 +378,39 @@
+     }
+     cuda_check(cudaPeekAtLastError());
+ }
++
++void exl3_gemm_m16g_gr
++(
++    const at::Tensor& A,
++    const std::vector<at::Tensor>& B,
++    const std::vector<at::Tensor>& C,
++    const std::vector<at::Tensor>& suh,
++    const std::vector<at::Tensor>& svh,
++    Graph* graph,
++    int a_site
++)
++{
++    launch_grouped(A, B, C, suh, svh, graph, a_site, 0, 0, nullptr);
++}
++
++void exl3_gemm_m16g_weighted
++(
++    const at::Tensor& A,
++    const std::vector<at::Tensor>& B,
++    const std::vector<at::Tensor>& C,
++    const std::vector<at::Tensor>& suh,
++    const std::vector<at::Tensor>& svh,
++    int w0,
++    int w1,
++    const c10::optional<at::Tensor>& prof
++)
++{
++    unsigned long long* pp = nullptr;
++    if (prof.has_value())
++    {
++        TORCH_CHECK(prof->dtype() == at::kLong && prof->is_contiguous() && prof->device() == A.device(),
++            "exl3_gemm_m16g_weighted: prof must be a contiguous int64 tensor on A's device");
++        pp = (unsigned long long*) prof->data_ptr();
++    }
++    launch_grouped(A, B, C, suh, svh, nullptr, GP_gemm_A, w0, w1, pp);
++}
+--- a/exllamav3_ext/quant/exl3_gemm_m16g.cuh
++++ b/exllamav3_ext/quant/exl3_gemm_m16g.cuh
+@@ -50,3 +50,20 @@
+     Graph* graph,
+     int a_site
+ );
++
++// ext 2105: grouped launch with explicit partition weights (bench sweeps). w0, w1 >= 1: block b's
++// share of the k-tiles is w0 (b < SMs) or w1 (second CTA per SM); (1, 1) = 2102's partition. Weights
++// outside the domain (an empty slice) fall back to (1, 1); w0 or w1 <= 0 = the routed default
++// (the g_weights row's weights, or (1, 1) with EXL3_M16G_2105=0). prof: int64 tensor of 8 words per
++// block (start, xs ready, loop end, finish done in globaltimer ns; smid; n_iter)
++void exl3_gemm_m16g_weighted
++(
++    const at::Tensor& A,
++    const std::vector<at::Tensor>& B,
++    const std::vector<at::Tensor>& C,
++    const std::vector<at::Tensor>& suh,
++    const std::vector<at::Tensor>& svh,
++    int w0,
++    int w1,
++    const c10::optional<at::Tensor>& prof
++);
+--- a/exllamav3_ext/quant/exl3_gemm_m16g_kernel.cuh
++++ b/exllamav3_ext/quant/exl3_gemm_m16g_kernel.cuh
+@@ -18,6 +18,10 @@
+ //   and the grid size (deterministic).
+ // bend/gemm_m16_group.bend models this map (iteration ownership, slot injectivity across
+ // matrices, finish order).
++// ext 2105: slot-weighted partition (shared with 8205; reference and generator wpart.py). Block b has
++// weight w0 if b < nsm (the first CTA on each SM) and w1 otherwise; block b owns
++// [start(b), start(b + 1)) with start(b) = total * W(b) / W(G), W(b) = w0 * min(b, nsm) +
++// w1 * max(b - nsm, 0). (w0, w1) = (1, 1) is 2102's b * total / G bit for bit (kill switch).
+ 
+ #include <cooperative_groups.h>
+ #include "exl3_gemm_m16_kernel.cuh"
+@@ -37,7 +41,35 @@
+     int size_k;
+     int num_mats;
+     int max_contrib;
++    int w0;                               // ext 2105 partition weights (>= 1) and SM count
++    int w1;
++    int nsm;
++    unsigned long long* prof;             // optional per-block stamps (bench op only), else null:
++                                          // start, xs ready, loop end, finish done (ns); smid, n_iter
+ };
++
++#define EXL3_M16G_PROF_WORDS 8
++
++// ext 2105: weight prefix W(b) and slice start of block b
++__device__ __forceinline__ int64_t exl3_m16g_wpre(int b, int nsm, int w0, int w1)
++{
++    return (int64_t) w0 * min(b, nsm) + (int64_t) w1 * max(b - nsm, 0);
++}
++
++__device__ __forceinline__ int exl3_m16g_start(int b, int total, int G, int nsm, int w0, int w1)
++{
++    return (int) (((int64_t) total * exl3_m16g_wpre(b, nsm, w0, w1)) / exl3_m16g_wpre(G, nsm, w0, w1));
++}
++
++// Block owning iteration x: max{b : start(b) <= x} in closed form (wpart.owner_closed); at w0 = w1
++// it is exl3_m16_owner(x, total, G)
++__device__ __forceinline__ int exl3_m16g_owner(int x, int total, int G, int nsm, int w0, int w1)
++{
++    const int64_t WG = exl3_m16g_wpre(G, nsm, w0, w1);
++    const int64_t P = (((int64_t) x + 1) * WG + total - 1) / total - 1;
++    if (P < (int64_t) w0 * nsm) return (int) (P / w0);
++    return nsm + (int) ((P - (int64_t) w0 * nsm) / w1);
++}
+ 
+ // Kernel-parameter arrays indexed through unrolled selects (constant-bank loads, no local copy)
+ template <typename T>
+@@ -97,8 +129,8 @@
+     const int total = groups * KT;
+     const int G = gridDim.x;
+     const int b = blockIdx.x;
+-    const int s_b = (int) (((int64_t) b * total) / G);
+-    const int e_b = (int) (((int64_t) (b + 1) * total) / G);
++    const int s_b = exl3_m16g_start(b, total, G, p.nsm, p.w0, p.w1);
++    const int e_b = exl3_m16g_start(b + 1, total, G, p.nsm, p.w0, p.w1);
+     const int n_iter = e_b - s_b;
+ 
+     uint8_t* ring = sm + warp * PF * W_STAGE;
+@@ -158,6 +190,13 @@
+         }
+     };
+ 
++    auto stamp = [&] (int i)
++    {
++        if (p.prof && threadIdx.x == 0)
++            p.prof[(size_t) blockIdx.x * EXL3_M16G_PROF_WORDS + i] = exl3_m16_gtime();
++    };
++    stamp(0);
++
+     // Prologue: first PF - 1 weight stages (independent of the input transform)
+     #pragma unroll
+     for (int d = 0; d < PF - 1; ++d)
+@@ -192,6 +231,7 @@
+     cp_async_fence();
+     cp_async_wait<0>();
+     __syncthreads();
++    stamp(1);
+ 
+     // ldmatrix row address: matrix i = (token tile, k-half), row lane % 8
+     int ldsm_off;
+@@ -236,7 +276,7 @@
+     // warp's 64, tokens mt * 8 + 2 * (lane & 3) (+ 1 for odd c)
+     auto flush = [&] (int g)
+     {
+-        int cidx = b - exl3_m16_owner(g * KT, total, G);
++        int cidx = b - exl3_m16g_owner(g * KT, total, G, p.nsm, p.w0, p.w1);
+         float* slot = p.ws + ((size_t) g * p.max_contrib + cidx) * EXL3_M16_SLOT_FLOATS + warp * 64 + (lane >> 2);
+         #pragma unroll
+         for (int t = 0; t < EXL3_M16_TILES_W; ++t)
+@@ -317,6 +357,7 @@
+         flush(g_cur);
+     }
+     cp_async_wait<0>();
++    stamp(2);
+ 
+     grid.sync();
+ 
+@@ -331,7 +372,8 @@
+             int rem = w - g * size_m * CH;
+             int r = rem / CH;
+             int ch = rem - r * CH;
+-            int nc = exl3_m16_owner((g + 1) * KT - 1, total, G) - exl3_m16_owner(g * KT, total, G) + 1;
++            int nc = exl3_m16g_owner((g + 1) * KT - 1, total, G, p.nsm, p.w0, p.w1) -
++                     exl3_m16g_owner(g * KT, total, G, p.nsm, p.w0, p.w1) + 1;
+             float* s0 = p.ws + (size_t) g * p.max_contrib * EXL3_M16_SLOT_FLOATS + r * GW + ch * 128;
+             float4 v = __ldcg(((const float4*) s0) + lane);
+             for (int c = 1; c < nc; ++c)
+@@ -366,4 +408,12 @@
+                 );
+         }
+     }
+-}
++    stamp(3);
++    if (p.prof && threadIdx.x == 0)
++    {
++        unsigned int smid;
++        asm volatile ("mov.u32 %0, %%smid;" : "=r"(smid));
++        p.prof[(size_t) blockIdx.x * EXL3_M16G_PROF_WORDS + 4] = smid;
++        p.prof[(size_t) blockIdx.x * EXL3_M16G_PROF_WORDS + 5] = n_iter;
++    }
++}
+--- a/exllamav3_ext/quant/exl3_gemm_m16g_op.cpp
++++ b/exllamav3_ext/quant/exl3_gemm_m16g_op.cpp
+@@ -10,6 +10,8 @@
+ //   torch.ops.exl3_m16.gemm_grouped_route(site, m, k, ns[]) -> int (the call sites' Exl3M16GPath:
+ //   0 old, 1 grouped, 2 2001 singles; sites as Exl3M16GSite: 0 GDN qkv+z, 1 attention q+k+v,
+ //   2 draft K/V refresh, 3 draft fc). Assumes K 4, mul1, no mcg: callers check
++//   torch.ops.exl3_m16.gemm_grouped_weighted(A, B[], C[], suh[], svh[], w0, w1, prof?) (ext 2105: explicit
++//   partition weights, (1, 1) = 2102; w <= 0 = default)
+ 
+ static void exl3_gemm_m16g_op
+ (
+@@ -29,8 +31,24 @@
+     return exl3_gemm_m16g_route((int) site, (int) m, (int) k, n, 4, false, true);
+ }
+ 
++static void exl3_gemm_m16g_weighted_op
++(
++    const at::Tensor& A,
++    at::TensorList B,
++    at::TensorList C,
++    at::TensorList suh,
++    at::TensorList svh,
++    int64_t w0,
++    int64_t w1,
++    const c10::optional<at::Tensor>& prof
++)
++{
++    exl3_gemm_m16g_weighted(A, B.vec(), C.vec(), suh.vec(), svh.vec(), (int) w0, (int) w1, prof);
++}
++
+ TORCH_LIBRARY_FRAGMENT(exl3_m16, m)
+ {
++    m.def("gemm_grouped_weighted", &exl3_gemm_m16g_weighted_op);
+     m.def("gemm_grouped", &exl3_gemm_m16g_op);
+     m.def("gemm_grouped_route", &exl3_gemm_m16g_route_op);
+ }

@@ -1,0 +1,602 @@
+--- a/exllamav3_ext/gdn.cu
++++ b/exllamav3_ext/gdn.cu
+@@ -9,6 +9,7 @@
+ #include "graph.cuh"
+ #include "gdn.cuh"
+ #include <cmath>
++#include <cstdlib>
+ #include <set>
+ #include <utility>
+ 
+@@ -2896,6 +2897,52 @@
+     gdn_norm_write_half4(x4, ((half4*) yrow) + lane);
+ }
+ 
++// ext 5106: b/a GEMV split over k. Warp w, lane l of the 512-thread block holds the half2 elements
++// j = w * 32 + l + 512 i (i < GR_KS_ITERS, j < k / 2) of both ba_w rows of head h and of every x row
++// (S <= GR_KS_ROWS). Per (row, b|a) task: a lane partial over its elements in ascending j with the
++// same two fmaf per half2 as the per-warp GEMV, the same __shfl_down_sync tree, then the 16 warp
++// partials summed in warp order (+ bias) by the thread that computes beta/g. Every task sees the
++// same index pattern whatever S and its row position: row invariant and deterministic. Not the
++// summation order of the per-warp GEMV (KS = 0): numerics change.
++#define GR_KS_ITERS 5
++#define GR_KS_ROWS 8
++#define GR_WARPS 16
++#define GR_KS_DEFAULT 2                         // production b/a GEMV variant (EXL3_GDN_BA_KSPLIT unset)
++
++// Per-block phase stamps (harness only, STAMP instantiations): thread 0 writes %globaltimer to
++// stamps[block * GDN_STAMP_WORDS + slot], taken after `dep` is computed (asm input operand)
++#define GDN_STAMP_WORDS 8
++enum { GDN_ST_START = 0, GDN_ST_CONV, GDN_ST_BA, GDN_ST_STATE, GDN_ST_SYNC, GDN_ST_LOOP, GDN_ST_NORM, GDN_ST_END };
++
++__device__ __forceinline__ unsigned long long gdn_gtime_after(float dep)
++{
++    unsigned long long t;
++    asm volatile ("mov.u64 %0, %%globaltimer;" : "=l"(t) : "f"(dep) : "memory");
++    return t;
++}
++
++template <bool STAMP>
++__device__ __forceinline__ void gdn_stamp(unsigned long long* stamps, int slot, float dep = 0.0f)
++{
++    if constexpr (STAMP)
++    {
++        if (threadIdx.x == 0)
++            stamps[(size_t) (blockIdx.y * gridDim.x + blockIdx.x) * GDN_STAMP_WORDS + slot] = gdn_gtime_after(dep);
++    }
++}
++
++// Per-warp b/a GEMV stamps (lane 0): wstamps[(block * 16 + warp) * 8 + slot]
++template <bool STAMP>
++__device__ __forceinline__ void gdn_wstamp(unsigned long long* wstamps, int slot, float dep)
++{
++    if constexpr (STAMP)
++    {
++        if (threadIdx.x % 32 == 0 && slot < 8)
++            wstamps[((size_t) (blockIdx.y * gridDim.x + blockIdx.x) * GR_WARPS + threadIdx.x / 32) * 8 + slot] =
++                gdn_gtime_after(dep);
++    }
++}
++
+ // gdn_conv_ba_kernel<HISTORY = true, a_log_T, K> + the verify recurrence + gated norm, ONE launch.
+ // Block (h, b) = v head h of batch row b, 512 threads. Front end, same per-value arithmetic, order
+ // and rounding points as gdn_conv_ba_kernel:
+@@ -2914,7 +2961,13 @@
+ //              launch), so the wait always ends.
+ // Kernel params 0 (ba x), 1 (conv_state), 2 (slots) and 3 (recurrent_state) are patched when
+ // replaying a graph; slots is recorded twice (conv, rule) to keep run_bszN's patch list.
+-template <typename a_log_T, typename norm_w_T, int K>
++// KS (ext 5106) selects the b/a GEMV: 0 = one (row, b|a) task per warp (5101), 1 = the k split with
++// its loads issued after the conv, 2 = the k split with its loads issued at entry, before the conv,
++// and the state loads moved after the conv. STAMP (harness): per-block phase stamps START, CONV (conv done), BA (GEMV
++// barrier), SYNC (non-owner arrival / owner wait passed), STATE (thread 0's state landed), LOOP, NORM,
++// END, and per-warp GEMV stamps (KS 0: slot 0 start, slot 1 + r after round r of the warp's first
++// task; KS > 0: 0 start, 1 after the partial FMAs, 2 after the trees).
++template <typename a_log_T, typename norm_w_T, int K, int KS, bool STAMP>
+ __global__ __launch_bounds__(512)
+ void gdn_conv_rule_norm_kernel
+ (
+@@ -2949,12 +3002,15 @@
+     const float epsilon,
+     const float constant_bias,
+     const int gate_act,                         // 0 = silu, 1 = sigmoid
+-    const int dim                               // 128, a runtime value as in the norm kernel
++    const int dim,                              // 128, a runtime value as in the norm kernel
++    unsigned long long* __restrict__ stamps,    // STAMP only: [blocks][GDN_STAMP_WORDS]
++    unsigned long long* __restrict__ wstamps    // STAMP only: [blocks][16 warps][8]
+ )
+ {
+     constexpr int HD = 128;
+     constexpr int THREADS = 512;
+     extern __shared__ __align__(16) float gr_smem[];
++    gdn_stamp<STAMP>(stamps, GDN_ST_START);
+ 
+     const int h = blockIdx.x;
+     const int b = blockIdx.y;
+@@ -2968,11 +3024,38 @@
+     const int SEQ = K + S;
+     GdnRuleSmem m = gdn_rule_smem(gr_smem, S, true);
+ 
+-    // Recurrent state (row 0 of the slot, never written here): issued first, consumed by the rule
++    // Recurrent state (row 0 of the slot, never written here), consumed by the rule: issued first,
++    // except with KS = 2, where the b/a loads go first and the state loads follow the conv (the
++    // three sets do not fit the 128 registers of a 512-thread block at once)
+     const GdnRuleThread th = gdn_rule_thread(0);
+     const float* head_state = recurrent_state + (size_t) slot * history_stride * H * HD * HD + (size_t) h * HD * HD;
+     float state[32];
+-    gdn_rule_load_state(state, head_state, th);
++    if constexpr (KS != 2) gdn_rule_load_state(state, head_state, th);
++
++    // b/a operands of the k split (KS > 0), see GR_KS_ITERS
++    half2 ks_w[2][GR_KS_ITERS];
++    half2 ks_x[GR_KS_ROWS][GR_KS_ITERS];
++    auto ks_load = [&]()
++    {
++        const int k2 = k / 2;
++        const half2* wb = (const half2*) (ba_w + (size_t) h * k);
++        const half2* wa = (const half2*) (ba_w + (size_t) (H + h) * k);
++        const half2* x2 = (const half2*) (ba_x + (size_t) b * S * k);
++        #pragma unroll
++        for (int i = 0; i < GR_KS_ITERS; ++i)
++        {
++            const int j = warp_id * 32 + lane_id + i * THREADS;
++            if (j < k2)
++            {
++                ks_w[0][i] = wb[j];
++                ks_w[1][i] = wa[j];
++                #pragma unroll
++                for (int s = 0; s < GR_KS_ROWS; ++s)
++                    if (s < S) ks_x[s][i] = x2[(size_t) s * k2 + j];
++            }
++        }
++    };
++    if constexpr (KS == 2) ks_load();
+ 
+     // Norm operands of token warp_id
+     const size_t row_off = ((size_t) (b * S + warp_id) * H + h) * dim;
+@@ -3040,13 +3123,20 @@
+             }
+         }
+     }
+-
+-    // b/a GEMV, one (row, output) per warp
+-    {
++    gdn_stamp<STAMP>(stamps, GDN_ST_CONV);
++    if constexpr (KS == 1) ks_load();
++    if constexpr (KS == 2) gdn_rule_load_state(state, head_state, th);
++
++    // b/a GEMV
++    if constexpr (KS == 0)
++    {
++        // One (row, output) per warp
+         const int n = 2 * H;
+         const int k2 = k / 2;
+         for (int task = warp_id; task < 2 * S; task += THREADS / 32)
+         {
++            int round = 0;
++            if (task == warp_id) gdn_wstamp<STAMP>(wstamps, 0, 0.0f);
+             const int ab = task & 1;
+             const int s = task >> 1;
+             const int o = ab * H + h;
+@@ -3081,6 +3171,7 @@
+                         sum = fmaf(xf.y, wf.y, sum);
+                     }
+                 }
++                if (task == warp_id) gdn_wstamp<STAMP>(wstamps, 1 + round++, sum);
+             }
+ 
+             for (int offset = 16; offset > 0; offset >>= 1)
+@@ -3095,7 +3186,71 @@
+             }
+         }
+     }
++    else
++    {
++        // k split: per-task lane partials, warp trees, warp partials to smem (m.dot2 is free
++        // until the rule's token loop, which starts after the barriers below)
++        const int k2 = k / 2;
++        float* ks_part = m.dot2;                    // [16 warps][b rows 0..7, a rows 8..15]
++        gdn_wstamp<STAMP>(wstamps, 0, 0.0f);
++        float pb[GR_KS_ROWS];
++        float pa[GR_KS_ROWS];
++        #pragma unroll
++        for (int s = 0; s < GR_KS_ROWS; ++s)
++        {
++            pb[s] = 0.0f;
++            pa[s] = 0.0f;
++        }
++        #pragma unroll
++        for (int i = 0; i < GR_KS_ITERS; ++i)
++        {
++            const int j = warp_id * 32 + lane_id + i * THREADS;
++            if (j < k2)
++            {
++                float2 wbf = __half22float2(ks_w[0][i]);
++                float2 waf = __half22float2(ks_w[1][i]);
++                #pragma unroll
++                for (int s = 0; s < GR_KS_ROWS; ++s)
++                {
++                    if (s < S)
++                    {
++                        float2 xf = __half22float2(ks_x[s][i]);
++                        pb[s] = fmaf(xf.x, wbf.x, pb[s]);
++                        pb[s] = fmaf(xf.y, wbf.y, pb[s]);
++                        pa[s] = fmaf(xf.x, waf.x, pa[s]);
++                        pa[s] = fmaf(xf.y, waf.y, pa[s]);
++                    }
++                }
++            }
++        }
++        if constexpr (STAMP)
++        {
++            float dep = 0.0f;
++            #pragma unroll
++            for (int s = 0; s < GR_KS_ROWS; ++s) dep += pb[s] + pa[s];
++            gdn_wstamp<STAMP>(wstamps, 1, dep);
++        }
++        #pragma unroll
++        for (int s = 0; s < GR_KS_ROWS; ++s)
++        {
++            if (s < S)
++            {
++                for (int offset = 16; offset > 0; offset >>= 1)
++                {
++                    pb[s] += __shfl_down_sync(0xffffffff, pb[s], offset);
++                    pa[s] += __shfl_down_sync(0xffffffff, pa[s], offset);
++                }
++                if (lane_id == 0)
++                {
++                    ks_part[warp_id * 2 * GR_KS_ROWS + s] = pb[s];
++                    ks_part[warp_id * 2 * GR_KS_ROWS + GR_KS_ROWS + s] = pa[s];
++                }
++            }
++        }
++        gdn_wstamp<STAMP>(wstamps, 2, pb[0] + pa[0]);
++    }
+     __syncthreads();
++    gdn_stamp<STAMP>(stamps, GDN_ST_BA);
+ 
+     // Every q/k window read of this block is done: let the owner of the k head write them
+     if (!owner && t == 0)
+@@ -3103,6 +3258,7 @@
+         __threadfence();
+         atomicAdd(conv_sync + b * Nk + kh, 1);
+     }
++    if (!owner) gdn_stamp<STAMP>(stamps, GDN_ST_SYNC);
+ 
+     // Window write-back (history layout: the rewindable tail of the buffer), v channels now
+     const int write_size = state_size < SEQ ? state_size : SEQ;
+@@ -3121,8 +3277,34 @@
+     // beta/g, stored, and the rule's scalars from the stored values
+     if (t < S)
+     {
+-        float bv = m.ba[t];
+-        float av = m.ba[S + t];
++        float bv;
++        float av;
++        if constexpr (KS == 0)
++        {
++            bv = m.ba[t];
++            av = m.ba[S + t];
++        }
++        else
++        {
++            // The 16 warp partials of rows (b, t) in warp order, then the bias (as the per-warp GEMV)
++            const float* ks_part = m.dot2;
++            bv = 0.0f;
++            av = 0.0f;
++            #pragma unroll
++            for (int w = 0; w < GR_WARPS; ++w)
++            {
++                bv += ks_part[w * 2 * GR_KS_ROWS + t];
++                av += ks_part[w * 2 * GR_KS_ROWS + GR_KS_ROWS + t];
++            }
++            if (ba_bias)
++            {
++                bv += __half2float(ba_bias[h]);
++                av += __half2float(ba_bias[H + h]);
++            }
++            const size_t rr = (size_t) b * S + t;
++            ba_out[rr * 2 * H + h] = bv;
++            ba_out[rr * 2 * H + H + h] = av;
++        }
+         float beta = _sigmoid_fast_exp(bv) * beta_scale;
+         float dtb = as_float(dt_bias[h]);
+         float gv = -softplus(av + dtb) * __expf(as_float(a_log[h]));
+@@ -3134,11 +3316,20 @@
+         gdn_rule_scalars(gv, beta_b, m.gexp[t], m.beta[t]);
+     }
+ 
++    if constexpr (STAMP)
++    {
++        float dep = 0.0f;
++        #pragma unroll
++        for (int j = 0; j < 32; ++j) dep += state[j];
++        gdn_stamp<STAMP>(stamps, GDN_ST_STATE, dep);
++    }
+     gdn_rule_tokens<RULE_VERIFY, 4>(state, m, S, th, scale);
++    gdn_stamp<STAMP>(stamps, GDN_ST_LOOP);
+ 
+     // Gated RMS norm, warp s = token s
+     if (warp_id < S)
+         gdn_rule_norm_row(m.out + warp_id * HD, w4, g4, y + row_off, epsilon, constant_bias, gate_act, dim, lane_id);
++    gdn_stamp<STAMP>(stamps, GDN_ST_NORM);
+ 
+     // q/k windows: the owner writes them once the group's other blocks have read them
+     if (owner)
+@@ -3161,6 +3352,7 @@
+             }
+             __syncthreads();
+         }
++        gdn_stamp<STAMP>(stamps, GDN_ST_SYNC);
+         for (int e = t; e < 2 * HD * write_size; e += THREADS)
+         {
+             int c = e / write_size;
+@@ -3169,6 +3361,7 @@
+             conv_state[((size_t) slot * F + ch) * state_size + dst_start + j] = m.seq[c * SEQ + src_start + j];
+         }
+     }
++    gdn_stamp<STAMP>(stamps, GDN_ST_END);
+ }
+ 
+ // Verify recurrence (+ gated norm when NORM) reading the conv output / g / beta written by the
+@@ -3239,7 +3432,43 @@
+     }
+ }
+ 
+-bool gdn_conv_rule_norm_gr
++int gdn_ba_ksplit(int set)
++{
++    static int value = []
++    {
++        const char* env = std::getenv("EXL3_GDN_BA_KSPLIT");
++        return env && env[0] ? std::atoi(env) : GR_KS_DEFAULT;
++    }();
++    if (set >= 0) value = set;
++    return value;
++}
++
++// One launch of gdn_conv_rule_norm_kernel; declined (false) unless every block of the grid can be
++// resident at once (q/k window owners wait on their group)
++template <typename Kernel, typename... Args>
++static bool gdn_conv_rule_norm_launch(Kernel kernel, dim3 grid, int smem, int smem_max, cudaStream_t stream,
++                                      Graph* graph, Args... args)
++{
++    gdn_max_shared_carveout((const void*) kernel);
++    gdn_rule_smem_optin((const void*) kernel, smem_max);
++    int per_sm = 0;
++    cuda_check(cudaOccupancyMaxActiveBlocksPerMultiprocessor(&per_sm, kernel, 512, smem));
++    int sms = at::cuda::getCurrentDeviceProperties()->multiProcessorCount;
++    if ((int64_t) per_sm * sms < (int64_t) grid.x * grid.y) return false;
++    kernel<<<grid, 512, smem, stream>>>(args...);
++    if (graph)
++    {
++        graph->record_param((void*) kernel, GP_gdn_ba_x, 0);
++        graph->record_param((void*) kernel, GP_conv1d_state, 1);
++        graph->record_param((void*) kernel, GP_conv1d_slots, 2);
++        graph->record_param((void*) kernel, GP_gdn_rule_state, 3);
++        graph->record_param((void*) kernel, GP_gdn_rule_slots, 2);
++        graph->record_param((void*) kernel, GP_end, 0);
++    }
++    return true;
++}
++
++int gdn_conv_rule_norm_gr
+ (
+     const at::Tensor& x,
+     const at::Tensor& ba_w,
+@@ -3268,9 +3497,14 @@
+     float constant_bias,
+     int gate_act,
+     at::Tensor& conv_sync,
+-    Graph* graph
++    Graph* graph,
++    int ksplit,
++    unsigned long long* stamps,
++    unsigned long long* wstamps
+ )
+ {
++    TORCH_CHECK(!((stamps || wstamps) && graph), "gdn_conv_rule_norm: stamps are for eager launches");
++    TORCH_CHECK(!stamps == !wstamps, "gdn_conv_rule_norm: stamps and wstamps go together");
+     int B = qkv.size(0);
+     int S = qkv.size(1);
+     int F = qkv.size(2);
+@@ -3291,7 +3525,7 @@
+         !gate.is_contiguous() || !y.is_contiguous() || gate.size(-1) != 128 ||
+         conv_sync.dtype() != at::kInt || conv_sync.numel() < (int64_t) B * num_k_heads ||
+         !conv_sync.is_contiguous() || conv_sync.device() != qkv.device())
+-        return false;
++        return 0;
+ 
+     const at::cuda::OptionalCUDAGuard device_guard(x.device());
+     cudaStream_t stream = graph ? graph->capture_stream : at::cuda::getCurrentCUDAStream().stream();
+@@ -3346,6 +3580,13 @@
+     int history_stride = recurrent_state.size(1);
+     float scale = 1.0f / sqrtf(k_head_dim);
+ 
++    // b/a GEMV variant (ext 5106): the k split where it covers the shape (S <= 8 rows, k / 2 <= 512 *
++    // GR_KS_ITERS half2) and is selected (ksplit -1: EXL3_GDN_BA_KSPLIT / gdn_ba_ksplit, default
++    // GR_KS_DEFAULT; 0 = the per-warp GEMV), else the per-warp GEMV
++    int ks = ksplit < 0 ? gdn_ba_ksplit(-1) : ksplit;
++    TORCH_CHECK(ks >= 0 && ks <= 2, "gdn_conv_rule_norm: EXL3_GDN_BA_KSPLIT / ksplit must be 0, 1 or 2");
++    if (S > GR_KS_ROWS || k / 2 > 512 * GR_KS_ITERS) ks = 0;
++
+     #define ARGS(a_log_T, norm_w_T)                     \
+         (const half*) x.data_ptr(),                     \
+         (bfloat16*) conv_state.data_ptr(),              \
+@@ -3367,31 +3608,29 @@
+         (half*) y.data_ptr(),                           \
+         (int*) conv_sync.data_ptr(),                    \
+         S, F, state_size, k, num_k_heads, H, history_stride, \
+-        beta_scale, scale, epsilon, constant_bias, gate_act, 128
+-
+-    // Every block must be resident at once (q/k window owners wait on their group), otherwise
+-    // decline before launching anything
++        beta_scale, scale, epsilon, constant_bias, gate_act, 128, stamps, wstamps
++
++    #define LAUNCH_V(a_log_T, norm_w_T, KSV, STAMP)                                                   \
++        launched = gdn_conv_rule_norm_launch(&gdn_conv_rule_norm_kernel<a_log_T, norm_w_T, GR_K, KSV, STAMP>, \
++                                             dim3(H, B), smem, smem_max, stream, graph, ARGS(a_log_T, norm_w_T));
++
+     #define LAUNCH(a_log_T, norm_w_T)                                                     \
+     {                                                                                     \
+-        auto kernel = &gdn_conv_rule_norm_kernel<a_log_T, norm_w_T, GR_K>;                \
+-        gdn_max_shared_carveout((const void*) kernel);                                    \
+-        gdn_rule_smem_optin((const void*) kernel, smem_max);                              \
+-        int per_sm = 0;                                                                   \
+-        cuda_check(cudaOccupancyMaxActiveBlocksPerMultiprocessor(&per_sm, kernel, 512, smem)); \
+-        int sms = at::cuda::getCurrentDeviceProperties()->multiProcessorCount;           \
+-        if ((int64_t) per_sm * sms < (int64_t) B * H) return false;                       \
+-        kernel<<<dim3(H, B), 512, smem, stream>>>(ARGS(a_log_T, norm_w_T));               \
+-        if (graph)                                                                        \
++        if (stamps)                                                                       \
+         {                                                                                 \
+-            graph->record_param((void*) kernel, GP_gdn_ba_x, 0);                          \
+-            graph->record_param((void*) kernel, GP_conv1d_state, 1);                      \
+-            graph->record_param((void*) kernel, GP_conv1d_slots, 2);                      \
+-            graph->record_param((void*) kernel, GP_gdn_rule_state, 3);                    \
+-            graph->record_param((void*) kernel, GP_gdn_rule_slots, 2);                    \
+-            graph->record_param((void*) kernel, GP_end, 0);                               \
++            if (ks == 0)      LAUNCH_V(a_log_T, norm_w_T, 0, true)                        \
++            else if (ks == 1) LAUNCH_V(a_log_T, norm_w_T, 1, true)                        \
++            else              LAUNCH_V(a_log_T, norm_w_T, 2, true)                        \
+         }                                                                                 \
+-    }
+-
++        else                                                                              \
++        {                                                                                 \
++            if (ks == 0)      LAUNCH_V(a_log_T, norm_w_T, 0, false)                       \
++            else if (ks == 1) LAUNCH_V(a_log_T, norm_w_T, 1, false)                       \
++            else              LAUNCH_V(a_log_T, norm_w_T, 2, false)                       \
++        }                                                                                 \
++    }
++
++    bool launched = false;
+     if (a_log_fp32)
+     {
+         if (norm_w_fp32) LAUNCH(float, float)
+@@ -3404,10 +3643,11 @@
+     }
+ 
+     #undef LAUNCH
++    #undef LAUNCH_V
+     #undef ARGS
+ 
+     cuda_check(cudaPeekAtLastError());
+-    return true;
++    return launched ? 1 + ks : 0;
+ }
+ 
+ void gdn_rule_verify_gr
+--- a/exllamav3_ext/gdn.cuh
++++ b/exllamav3_ext/gdn.cuh
+@@ -243,9 +243,14 @@
+ // gdn_conv_ba_gr front end (history conv), the verify recurrence and the gated norm as ONE launch,
+ // same conv_out / ba / beta / g / conv_state as gdn_conv_ba_gr; one block per (batch row, v head)
+ // computes the b/a GEMV rows and the conv of the q/k/v channels it consumes. conv_sync is a zeroed
+-// int32 scratch of at least B * Nk entries (left zeroed). Returns false without launching when the
+-// shapes/dtypes are not covered (then: front end + gdn_rule_verify_gr)
+-bool gdn_conv_rule_norm_gr
++// int32 scratch of at least B * Nk entries (left zeroed). The b/a GEMV is split over k across the
++// block's 16 warps (ext 5106; different summation order than the per-warp GEMV of gdn_conv_ba_gr)
++// unless ksplit (-1: gdn_ba_ksplit()) is 0 or the shape is not covered (S > 8, k > 5120). Returns 0
++// without launching when the shapes/dtypes are not covered (then: front end + gdn_rule_verify_gr),
++// else 1 + the b/a variant launched (0 per-warp, 1 k split loaded after the conv, 2 k split loaded
++// at entry). stamps / wstamps (harness, eager only): per-block phase stamps [B * H][8] and per-warp
++// GEMV stamps [B * H][16][8], uint64 globaltimer
++int gdn_conv_rule_norm_gr
+ (
+     const at::Tensor& x,            // [B, S, k] half
+     const at::Tensor& ba_w,         // [2H, k] half
+@@ -274,8 +279,16 @@
+     float constant_bias,
+     int gate_act,
+     at::Tensor& conv_sync,          // [>= B * Nk] int32, zero
+-    Graph* graph
+-);
++    Graph* graph,
++    int ksplit = -1,
++    unsigned long long* stamps = nullptr,
++    unsigned long long* wstamps = nullptr
++);
++
++// b/a GEMV variant of gdn_conv_rule_norm_gr, read at launch/capture time: EXL3_GDN_BA_KSPLIT (0 = the
++// per-warp GEMV of 5101, 1 = k split loaded after the conv, 2 = k split loaded at entry; default the
++// production value) or the last set >= 0 (harness knob). Returns the value used by later launches
++int gdn_ba_ksplit(int set);
+ 
+ // Verify recurrence of a history-free verify from the front end's conv_out / g / beta, followed by
+ // the gated norm into y when `norm` (128-wide fp32/bf16 weight, fp32 gate, fp16 y), otherwise the
+--- /dev/null
++++ b/exllamav3_ext/gdn_ba_ksplit_op.cpp
+@@ -0,0 +1,76 @@
++#include <torch/library.h>
++#include <ATen/Tensor.h>
++#include "gdn.cuh"
++
++// Eager entry points of the history-free verify front end (gdn.cu, ext 5106) for isolated A/B of
++// the b/a GEMV variant, phase stamps and benchmarking, as torch ops so bindings.cpp stays
++// untouched. Same launcher as BC_GatedDeltaNetSplit's replay_verify path, no graph sites:
++//   torch.ops.exl3_gdn.ba_ksplit(set) -> b/a GEMV variant used by later launches/captures (set < 0
++//       only reads; default EXL3_GDN_BA_KSPLIT or the production value)
++//   torch.ops.exl3_gdn.conv_rule_norm(x, ba_w, ba_bias?, ba, qkv, dt_bias, a_log, beta, g, beta_scale,
++//       conv_state, slots, conv_weight, conv_bias?, conv_out, recurrent_state, num_k_heads,
++//       num_v_heads, norm_w, gate, y, epsilon, constant_bias, gate_act, conv_sync, ksplit,
++//       stamps?, wstamps?) -> 0 declined, else 1 + the variant launched; ksplit -1 = the knob;
++//       stamps int64 [>= B * H * 8], wstamps int64 [>= B * H * 128] (globaltimer ns)
++
++static int64_t gdn_ba_ksplit_op(int64_t set)
++{
++    return gdn_ba_ksplit((int) set);
++}
++
++static unsigned long long* stamp_ptr(const c10::optional<at::Tensor>& t, int64_t need, const at::Tensor& like)
++{
++    if (!t.has_value()) return nullptr;
++    const at::Tensor& s = t.value();
++    TORCH_CHECK(s.dtype() == at::kLong && s.is_contiguous() && s.device() == like.device() && s.numel() >= need,
++                "exl3_gdn.conv_rule_norm: stamp buffers must be contiguous int64 on the device, large enough");
++    return (unsigned long long*) s.data_ptr();
++}
++
++static int64_t gdn_conv_rule_norm_op
++(
++    const at::Tensor& x,
++    const at::Tensor& ba_w,
++    const c10::optional<at::Tensor>& ba_bias,
++    const at::Tensor& ba,
++    const at::Tensor& qkv,
++    const at::Tensor& dt_bias,
++    const at::Tensor& a_log,
++    const at::Tensor& beta,
++    const at::Tensor& g,
++    double beta_scale,
++    const at::Tensor& conv_state,
++    const at::Tensor& slots,
++    const at::Tensor& conv_weight,
++    const c10::optional<at::Tensor>& conv_bias,
++    const at::Tensor& conv_out,
++    const at::Tensor& recurrent_state,
++    int64_t num_k_heads,
++    int64_t num_v_heads,
++    const at::Tensor& norm_w,
++    const at::Tensor& gate,
++    const at::Tensor& y,
++    double epsilon,
++    double constant_bias,
++    int64_t gate_act,
++    const at::Tensor& conv_sync,
++    int64_t ksplit,
++    const c10::optional<at::Tensor>& stamps,
++    const c10::optional<at::Tensor>& wstamps
++)
++{
++    const int64_t blocks = qkv.size(0) * num_v_heads;
++    unsigned long long* st = stamp_ptr(stamps, blocks * 8, qkv);
++    unsigned long long* wst = stamp_ptr(wstamps, blocks * 16 * 8, qkv);
++    at::Tensor ba_ = ba, beta_ = beta, g_ = g, cs_ = conv_state, co_ = conv_out, rs_ = recurrent_state, y_ = y, sync_ = conv_sync;
++    return gdn_conv_rule_norm_gr(x, ba_w, ba_bias, ba_, qkv, dt_bias, a_log, beta_, g_, (float) beta_scale,
++                                 cs_, slots, conv_weight, conv_bias, co_, rs_, (int) num_k_heads, (int) num_v_heads,
++                                 128, 128, norm_w, gate, y_, (float) epsilon, (float) constant_bias, (int) gate_act,
++                                 sync_, nullptr, (int) ksplit, st, wst);
++}
++
++TORCH_LIBRARY(exl3_gdn, m)
++{
++    m.def("ba_ksplit", &gdn_ba_ksplit_op);
++    m.def("conv_rule_norm", &gdn_conv_rule_norm_op);
++}
+--- a/exllamav3_ext/libtorch/gated_delta_net.cpp
++++ b/exllamav3_ext/libtorch/gated_delta_net.cpp
+@@ -338,8 +338,9 @@
+         }
+ 
+         // History-free verify: conv/ba front end, recurrence and gated norm as ONE launch where
+-        // covered (same conv_out / ba / beta / g / conv_state as gdn_conv_ba_gr; recurrent_state
+-        // untouched). It records ba x, conv_state, slots, recurrent_state, slots in that order
++        // covered (same conv_out / conv_state as gdn_conv_ba_gr; ba / beta / g from the k-split b/a
++        // GEMV of ext 5106 unless EXL3_GDN_BA_KSPLIT=0; recurrent_state untouched). It records ba x,
++        // conv_state, slots, recurrent_state, slots in that order
+         if (verify_free && norm_ok)
+         {
+             if (!conv_sync.defined() && !graph)

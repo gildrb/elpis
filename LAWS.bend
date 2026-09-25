@@ -71,3 +71,9 @@ import ./bend/attn_stride_laws.bend as AttnStrideLaws
 import ./bend/attn_stride_bounds_laws.bend as AttnStrideBoundsLaws
 # ext 8202 layer tail (o_proj split-K + F0/N norm jobs + 8201 MLP, one launch; bend/tail_m16_sched.bend): phase-0 v2 partition, ring, jobs once, barrier order.
 import ./bend/tail_m16_sched_laws.bend as TailM16SchedLaws
+# ext 8204 deferred phase-1 publish (8201 MLP and 8202 tail; bend/mlp_m16_defer.bend): same counter events and main loop as 8201, every cnt1 signal after its group's flush, levels, counts and resets unchanged.
+import ./bend/mlp_m16_defer_laws.bend as MlpM16DeferLaws
+# ext 3007 fused pre-attention kernel (attn_small.cu attn_pre_kernel: deinterleave + head norm/RoPE + quantized cache append; bend/attn_pre.bend):
+# head jobs once, q / gate / k halves from the deinterleave sources to rope's destinations exactly once, RoPE pairs equal to rope_kernel's and partitioning,
+# K/V chunks tiling the heads and refining quant_cache_paged_kernel (source halves, base, words, page slot).
+import ./bend/attn_pre_laws.bend as AttnPreLaws

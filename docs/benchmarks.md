@@ -319,6 +319,7 @@ container `b5e51bc1…`, and require an authenticated `GET /v1/models` of 200.
 |---|---|---|---|---|---|---|
 | #54 | g7kafqt | 137.39 | 0.426 | 158.34 / 132.07 / 151.37 / 117.15 | 3/3, 12/20, 2/6, 1/3 | baseline |
 | #55 | c3006 | 139.54 | 0.431 | 152.83 / 129.65 / 155.51 / 118.14 | 3/3, 13/20, 2/6, 1/3 | 3006 (numerics change) |
+| #56 | cs5 | 144.13 | 0.444 | 158.90 / 139.36 / 157.01 / 121.15 | 3/3, 12/20, 1/6, 1/3 | 8204, 9003b, 3007, 2105, 5106 |
 
 3006 replaces 3003's fixed 512-token chunks in the verify attention split with
 strided absolute 64-token tiles and one partial slot per split CTA
@@ -333,6 +334,38 @@ five rows, with one shared intercept (prefill plus per-token work, since every r
 commits 1024 tokens) and one slope per image. #54 → #55: 27.55 → 26.82 ms at 1K
 (−2.6 % ± 0.3), 26.30 → 26.34 ms at 8K (+0.2 % ± 0.1), 31.18 → 30.32 ms at 32K
 (−2.8 % ± 0.4). These match 3006's component harness (−0.59, −0.08, −0.97 ms per round).
+
+**#56 (cs5).** Five patches on c3006:
+- 8204: the 8201/8202 kernels issue their input loads before the weight-ring prologue and
+  publish phase-1 group completion once per block after its last flush, instead of with
+  a fence at every mid-slice group boundary. Bit-exact.
+- 9003b: the draft's q/k/v and K/V-refresh projections (and fc at 3-8 rows) run on the
+  grouped m16g kernel. Draft numerics only; target text is draft-independent.
+- 3007: deinterleave + RoPE + quantized cache append as one kernel, and the output gate
+  inside the attention combine. Bit-exact.
+- 2105: the m16g split-K partition weights each SM's second CTA at 0.91 of the first
+  (the second CTA streams ~10 % slower). Numerics change; error vs fp32 no worse.
+- 5106: the GDN verify kernel's b/a GEMV splits K across all 16 warps (one load round
+  instead of five serial ~1 µs rounds). Numerics change; b/a error vs fp64 lower.
+
+C1 regression against #55: 26.57 → 26.15 ms at 1K (−1.6 % ± 0.2), 26.31 → 25.81 ms at 8K
+(−1.9 % ± 0.1), 30.20 → 29.86 ms at 32K (−1.1 % ± 0.5). Invariance 45/45. The primary's
++3.3 % is larger than the step gain because the text mix moved again. Rewards differ
+from #55 only by single-task flips in both directions (i3-logic `cipher` went 0 → 1 → 0
+over #54-#56; `numbrix` already hit the 16384 budget on #55), which a numerics change
+causes at these sample sizes.
+
+**Bend coverage after #56.** `bend/mlp_m16_defer*` (8204's deferred publish) and
+`bend/attn_pre*` (3007's fused pre-attention kernel) are wired; their differentials and
+`attn_stride_diff`, `tail_m16_sched_diff`, `mlp_m16_sched_diff` and `gemm_m16_group_diff`
+pass on the #56 tree. Still unproven for the served code:
+- 2105's weighted partition. `gemm_m16_group` models the uniform v2 partition, which 2105
+  reproduces bit for bit only at equal weights (the draft rows); the target rows run at
+  (100, 91).
+- 5106's K-split GEMV. `gdn_fast`'s `task_exactly_once` models 5101's one-warp-per-task
+  GEMV.
+- A differential for 9003b's draft shapes. It exists, but quotes 2102's kernel source and
+  must be ported to 2105's.
 
 **Differentials.** `bend/attn_chunk_diff.py` quotes 3003's chunk loop, which 3006
 removes, so it applies only to trees before 3006. The attn_chunk laws stay in the gate as
@@ -355,9 +388,28 @@ committed 8202 patch and compares it byte for byte with the Bend table output.
   boundary, where 2103 added a mid-loop fence. It is not SM speed: blockIdx lands on the
   same SM in every launch, and a plain stream of equal contiguous slices runs every SM
   within 2.5 % of the median at 811 GB/s. In 2102 the loop itself streams at ~95 % of the
-  DRAM rate; the time goes to the kernel start (~12 µs, the input loads queue behind the
-  weight-ring prologue), the finish (~5 µs) and the launch ramp (~5 µs).
+  DRAM rate; the time goes to the kernel start (~8 µs of launch skew and the grid barrier;
+  2104 below shows reordering the input loads does not shorten it), the finish (~5 µs) and
+  the launch ramp (~5 µs).
 - 8203, dataflow counters instead of the 8202 tail's barriers A/B/C. Bit-exact but
   +1.6 µs per layer. Its stamps show where the tail's time goes: 217 µs per layer against
   a 170 µs DRAM floor, with block spreads of 7.7 / 30 / 20 µs at the ends of the o_proj,
   gate+up and down loops.
+- 2104, m16g start reorder (activation and Hadamard-scale loads before the weight-ring
+  prologue, counter finish instead of the second grid barrier). Bit-exact, no gain: the
+  input transform is still ready 8.4 µs after launch.
+- 5103, GDN verify split over v-columns (192 blocks). Bit-exact; faster only at 1-2 rows,
+  slower from 4 rows on.
+- 5105, GDN verify prologue reorder. Bit-exact; only issuing the state loads after the
+  conv helps (−0.65 µs per launch at 8 rows). The fix for that kernel was 5106.
+- 5104, GDN commit replay from the verify's stored v′. Bit-exact, but the verify's extra
+  stores (+29 µs per round) cancel the replay saving at ~3.4 committed tokens per round.
+- 9004, streaming kernel for the draft's dynconv projections. Correct per call, but it
+  packed its weight copy inside the loader's deferred-load bracket, before the weight was
+  read, so the draft ran on garbage: acceptance fell from 4.82 to 3.48 tokens per round
+  while the target text stayed identical. Fixed, it saves only 11 µs per round at the
+  draft's fixed 8 rows, so it is not used. A component harness must load weights through
+  the served path and gate the draft's end-to-end acceptance.
+- 8205, the same slot weighting for the 8201/8202 kernels. Correct, and the per-block
+  stamps move barrier D ~6 µs earlier per tail launch, but the 64-layer chain measured
+  +1.2 µs per launch at every weighted setting. Not kept until that gap is explained.

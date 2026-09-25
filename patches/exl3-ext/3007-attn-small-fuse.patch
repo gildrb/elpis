@@ -1,0 +1,871 @@
+--- /dev/null
++++ b/exllamav3_ext/attn_small.cu
+@@ -0,0 +1,487 @@
++#include <cuda_fp16.h>
++#include <cuda_runtime.h>
++#include <cuda_bf16.h>
++#include <c10/cuda/CUDAGuard.h>
++#include <ATen/cuda/CUDAContext.h>
++#include "util.h"
++#include "util.cuh"
++#include "reduction.cuh"
++#include "rope.cuh"
++#include "attn_small.cuh"
++#include "cache/q_cache_kernels.cuh"
++
++// See attn_small.cuh. Every floating-point expression below is rope_kernel's (rope.cu) or
++// quant_block_x4's (cache/q_cache_kernels.cuh, called as is) with the same operands, operand order,
++// intrinsics and roundings, and every per-head reduction keeps rope_kernel's thread layout (one
++// head per blockDim.x = 32 * ceil(head_dim / 64) threads, half2 per thread, warp butterfly then the
++// warp partials summed in warp order). Only integer addressing differs: q heads read the
++// interleaved row, and the per-head work that followed in separate launches (the gate copy, the
++// K/V quantization) runs in the same thread row right after the head is stored.
++
++#define AP_MAX_THREADS 1024
++#define AP_MAX_ROTATE_DIMS 4
++
++using bfloat16 = __nv_bfloat16;
++using bfloat162 = __nv_bfloat162;
++
++template <int rope_mode, bool norm_bf16, int BITS>
++__global__ __launch_bounds__(AP_MAX_THREADS)
++void attn_pre_kernel
++(
++    const half* __restrict__ qg,                    // 0
++    half* __restrict__ q_out,                       // 1
++    half* __restrict__ g_out,                       // 2
++    half* __restrict__ k,                           // 3  in place
++    const half* __restrict__ v,                     // 4
++    const float* __restrict__ inv_freq,             // 5  GP_rope_inv_freq
++    const int seq_len,                              // 6
++    const int num_heads_q,                          // 7
++    const int num_heads_k,                          // 8
++    const int head_dim,                             // 9
++    const int partial_head_dim,                     // 10
++    const int position,                             // 11 GP_rope_position
++    const uint32_t* __restrict__ positions,         // 12 GP_rope_positions
++    const uint32_t* __restrict__ position_ids,      // 13 GP_rope_position_ids
++    float attn_factor,                              // 14
++    const void* __restrict__ q_norm,                // 15
++    const void* __restrict__ k_norm,                // 16
++    const float norm_eps,                           // 17
++    const float norm_constant_bias,                 // 18
++    const bool inv_freq_table,                      // 19
++    const int inv_freq_stride,                      // 20
++    const float llama_4_scaling_beta,               // 21
++    const int llama_4_scaling_original,             // 22
++    int position_ids_stride,                        // 23 GP_rope_pid_stride
++    int rotate_dims,                                // 24
++    uint32_t* __restrict__ k_cache,                 // 25
++    half* __restrict__ k_scales,                    // 26
++    uint32_t* __restrict__ v_cache,                 // 27
++    half* __restrict__ v_scales,                    // 28
++    const uint32_t* __restrict__ cache_seqlens,     // 29 GP_qcache_seqlens
++    const uint32_t* __restrict__ block_table,       // 30 GP_qcache_block_table
++    const int blocks_per_seq,                       // 31 GP_qcache_blocks_per_seq
++    const int groups_per_token,                     // 32
++    const float compand_a                           // 33
++)
++{
++    int batch = blockIdx.y;
++    int token_pos = blockIdx.x;
++    int t = threadIdx.x;
++    int t_head = threadIdx.y;
++
++    auto get_pos = [&] (int rdim) -> int
++    {
++        int pos = token_pos + position;
++        if (positions)
++            pos = token_pos + positions[batch];
++        else if (position_ids)
++        {
++            int idx = (batch * seq_len + token_pos) * position_ids_stride;
++            if (position_ids_stride > 1) idx += rdim;
++            pos = position_ids[idx];
++        }
++        return pos;
++    };
++
++    auto get_sincos = [&] (int rdim, float &sin, float &cos)
++    {
++        int pos = get_pos(rdim);
++        if (!inv_freq_table)
++        {
++            float fr = inv_freq[t];
++            float pf = __int2float_rn(pos);
++            sin = __sinf(fr * pf) * attn_factor;
++            cos = __cosf(fr * pf) * attn_factor;
++        }
++        else
++        {
++            float fr = inv_freq[batch * inv_freq_stride + pos * partial_head_dim / 2 + t];
++            sin = __sinf(fr) * attn_factor;
++            cos = __cosf(fr) * attn_factor;
++        }
++    };
++
++    float l4_scaling = 1.0f;
++    if (llama_4_scaling_beta > 0.0f)
++        l4_scaling = 1.0f + llama_4_scaling_beta * __logf(1.0f + (float)(get_pos(0) / llama_4_scaling_original));
++
++    float sin_cache[AP_MAX_ROTATE_DIMS];
++    float cos_cache[AP_MAX_ROTATE_DIMS];
++    if (t < partial_head_dim / 2)
++    {
++        for (int rdim = 0; rdim < rotate_dims; ++rdim)
++        {
++            get_sincos(rdim, sin_cache[rdim], cos_cache[rdim]);
++        }
++    }
++
++    __shared__ half norm_head[AP_MAX_THREADS * 2];
++    __shared__ float sums[AP_MAX_THREADS / 32];
++    __shared__ uint32_t sh_pack[AP_MAX_THREADS / 32][32];
++
++    int head_dim_pad = (head_dim + 63) / 64 * 64;
++    const int row = batch * seq_len + token_pos;
++
++    for (int head_idx = blockIdx.z * blockDim.y + threadIdx.y;
++         head_idx < num_heads_q + num_heads_k;
++         head_idx += gridDim.z * blockDim.y)
++    {
++        const bool is_q = head_idx < num_heads_q;
++        const int kv_head = head_idx - num_heads_q;
++        const half* g_head_in_ptr;
++        half* g_head_out_ptr;
++        const void* norm_weight;
++        if (is_q)
++        {
++            g_head_in_ptr = qg + ((size_t) row * num_heads_q + head_idx) * 2 * head_dim;
++            g_head_out_ptr = q_out + ((size_t) row * num_heads_q + head_idx) * head_dim;
++            norm_weight = q_norm;
++        }
++        else
++        {
++            g_head_out_ptr = k + ((size_t) row * num_heads_k + kv_head) * head_dim;
++            g_head_in_ptr = g_head_out_ptr;
++            norm_weight = k_norm;
++        }
++
++        half* sh_head = norm_head + t_head * head_dim_pad;
++        auto load_head = [&] ()
++        {
++            if (t < head_dim / 2)
++                ((half2*) sh_head)[t] = ((half2*)g_head_in_ptr)[t];
++            else
++                ((half2*) sh_head)[t] = {};
++            __syncthreads();
++        };
++        auto store_head = [&] ()
++        {
++            if (t < head_dim / 2)
++                ((half2*) g_head_out_ptr)[t] = ((half2*) sh_head)[t];
++            __syncthreads();
++        };
++
++        auto apply_rope = [&] ()
++        {
++            for (int rdim = 0; rdim < rotate_dims; ++rdim)
++            {
++                int offset = partial_head_dim * rdim;
++                if (t < partial_head_dim / 2)
++                {
++                    float sin = sin_cache[rdim];
++                    float cos = cos_cache[rdim];
++
++                    if constexpr (rope_mode == ROPESTYLE_NEOX)
++                    {
++                        float v1 = __half2float(sh_head[offset + t]);
++                        float v2 = __half2float(sh_head[offset + t + partial_head_dim / 2]);
++                        float r1 = v1 * cos - v2 * sin;
++                        float r2 = v2 * cos + v1 * sin;
++                        sh_head[offset + t] = __float2half_rn(r1);
++                        sh_head[offset + t + partial_head_dim / 2] = __float2half_rn(r2);
++                    }
++                    else if constexpr (rope_mode == ROPESTYLE_GPTJ)
++                    {
++                        half2 *tptr = (half2*)(sh_head + offset + t * 2);
++                        half2 v = *tptr;
++                        float v1 = __low2float(v);
++                        float v2 = __high2float(v);
++                        float r1 = v1 * cos - v2 * sin;
++                        float r2 = v2 * cos + v1 * sin;
++                        v = __floats2half2_rn(r1, r2);
++                        *tptr = v;
++                    }
++                }
++            }
++            __syncthreads();
++        };
++
++        auto apply_norm = [&] ()
++        {
++            half2 *tptr = (half2*)(sh_head + t * 2);
++            int lane_id = threadIdx.x % 32;
++            int warp_id = threadIdx.x / 32;
++            int warps = blockDim.x / 32;
++
++            half2 v = *tptr;
++            float v1 = __low2float(v);
++            float v2 = __high2float(v);
++            float sum = v1 * v1 + v2 * v2;
++            sum = warp_reduce_sum_f(sum);
++            if (lane_id == 0) sums[warps * t_head + warp_id] = sum;
++            __syncthreads();
++
++            sum = sums[warps * t_head];
++            for (int i = 1; i < warps; ++i) sum += sums[warps * t_head + i];
++
++            float rmf = rsqrtf(sum / (float) head_dim + norm_eps);
++            v1 *= rmf;
++            v2 *= rmf;
++
++            if (t * 2 < head_dim)
++            {
++                if constexpr (norm_bf16)
++                {
++                    bfloat162 *wptr = (bfloat162*)(((bfloat16*)norm_weight) + t * 2);
++                    float2 w = __bfloat1622float2(*wptr);
++                    w.x += norm_constant_bias;
++                    w.y += norm_constant_bias;
++                    v1 *= w.x;
++                    v2 *= w.y;
++                    v = __floats2half2_rn(v1, v2);
++                }
++                else
++                {
++                    half2 norm_constant_bias_h2 = __float2half2_rn(norm_constant_bias);
++                    half2 *wptr = (half2*)(((half*)norm_weight) + t * 2);
++                    half2 w = __hadd2(*wptr, norm_constant_bias_h2);
++                    v = __floats2half2_rn(v1, v2);
++                    v = __hmul2(w, v);
++                }
++
++                *tptr = v;
++            }
++            __syncthreads();
++        };
++
++        auto apply_l4_scaling = [&] (float scaling)
++        {
++            if (t < head_dim / 2)
++            {
++                half2* tptr = ((half2*) sh_head) + t;
++                half2 v = *tptr;
++                *tptr = __floats2half2_rn(__low2float(v) * scaling, __high2float(v) * scaling);
++            }
++            __syncthreads();
++        };
++
++        load_head();
++        if (q_norm) apply_norm();
++        apply_rope();
++        if (l4_scaling != 1.0f) apply_l4_scaling(is_q ? l4_scaling : 1.0f);
++        store_head();
++
++        if (is_q)
++        {
++            // deinterleave_qg_kernel: the head's gate half, copied as is
++            const uint4* gs = (const uint4*) (g_head_in_ptr + head_dim);
++            uint4* gd = (uint4*) (g_out + ((size_t) row * num_heads_q + head_idx) * head_dim);
++            for (int i = t; i < head_dim / 8; i += blockDim.x)
++                gd[i] = gs[i];
++        }
++        else
++        {
++            // quant_cache_paged_kernel (in_contiguous) for this kv head's 4-group warp chunks: K from
++            // the stored head (sh_head holds exactly the halves written to k), V from v
++            int token_idx = token_pos + cache_seqlens[batch];
++            int page_idx = token_idx / CQ_PAGE_SIZE;
++            int token_phys = block_table[blocks_per_seq * batch + page_idx] * CQ_PAGE_SIZE + (token_idx % CQ_PAGE_SIZE);
++            int warp_id = threadIdx.x >> 5;
++            int warps = blockDim.x >> 5;
++            int chunks = head_dim / 128;
++            for (int c = warp_id; c < 2 * chunks; c += warps)
++            {
++                bool is_v = c >= chunks;
++                int cc = is_v ? c - chunks : c;
++                int g0 = (kv_head * head_dim + cc * 128) / 32;
++                int active = min(4, groups_per_token - g0);
++                int base = token_phys * groups_per_token + g0;
++                uint32_t* sp = sh_pack[warps * t_head + warp_id];
++                if (!is_v)
++                    quant_block_x4<BITS>(sh_head + cc * 128, k_cache + (size_t) base * BITS, k_scales + base, sp, active, compand_a);
++                else
++                    quant_block_x4<BITS>(v + ((size_t) row * num_heads_k + kv_head) * head_dim + cc * 128,
++                                         v_cache + (size_t) base * BITS, v_scales + base, sp, active, compand_a);
++                __syncwarp();
++            }
++        }
++        // sh_head / sh_pack are reused by this thread row's next head
++        __syncthreads();
++    }
++}
++
++#define AP_KERNEL(mode, bf16, bits) ((void*) attn_pre_kernel<mode, bf16, bits>)
++
++void attn_pre_gr
++(
++    const at::Tensor& qg,
++    at::Tensor& q,
++    at::Tensor& g,
++    at::Tensor& k,
++    const at::Tensor& v,
++    const at::Tensor& inv_freq,
++    uint32_t position,
++    const c10::optional<at::Tensor>& positions,
++    const c10::optional<at::Tensor>& position_ids,
++    int rope_mode,
++    float attn_factor,
++    const c10::optional<at::Tensor>& q_norm,
++    const c10::optional<at::Tensor>& k_norm,
++    float norm_eps,
++    float norm_constant_bias,
++    float llama_4_scaling_beta,
++    int llama_4_scaling_original,
++    int rotate_dims,
++    const at::Tensor& cache_k,
++    const at::Tensor& cache_k_scales,
++    const at::Tensor& cache_v,
++    const at::Tensor& cache_v_scales,
++    const at::Tensor& cache_seqlens,
++    const at::Tensor& block_table,
++    int page_size,
++    int heads_per_block,
++    Graph* graph
++)
++{
++    const at::cuda::OptionalCUDAGuard device_guard(q.device());
++    cudaStream_t stream = graph ? graph->capture_stream : at::cuda::getCurrentCUDAStream().stream();
++
++    // Operands: q/k/v statics (bsz, q_len, heads, head_dim), dense
++    TORCH_CHECK_DTYPE(qg, kHalf);
++    TORCH_CHECK_DTYPE(q, kHalf);
++    TORCH_CHECK_DTYPE(g, kHalf);
++    TORCH_CHECK_DTYPE(k, kHalf);
++    TORCH_CHECK_DTYPE(v, kHalf);
++    TORCH_CHECK_DIM(q, 4);
++    TORCH_CHECK_DIM(k, 4);
++    TORCH_CHECK_DIM(v, 4);
++    TORCH_CHECK(qg.is_contiguous() && q.is_contiguous() && g.is_contiguous() && k.is_contiguous() && v.is_contiguous(),
++                "attn_pre: tensors must be contiguous");
++    int bsz = (int) q.size(0);
++    int seq_len = (int) q.size(1);
++    int num_heads_q = (int) q.size(2);
++    int head_dim = (int) q.size(3);
++    int num_heads_k = (int) k.size(2);
++    TORCH_CHECK(k.size(0) == bsz && k.size(1) == seq_len && k.size(3) == head_dim, "attn_pre: k is incorrect shape");
++    TORCH_CHECK(v.sizes() == k.sizes(), "attn_pre: v is incorrect shape");
++    TORCH_CHECK(qg.numel() == 2 * q.numel() && g.numel() == q.numel(), "attn_pre: qg / g size mismatch");
++    TORCH_CHECK(head_dim % 128 == 0, "attn_pre: head_dim must be a multiple of 128");
++
++    // RoPE (rope_gr's checks)
++    int partial_head_dim = inv_freq.size(-1) * 2;
++    int inv_freq_stride = 0;
++    TORCH_CHECK(rotate_dims > 0 && rotate_dims <= AP_MAX_ROTATE_DIMS, "rotate_dims out of range");
++    TORCH_CHECK(rotate_dims == 1 || head_dim == partial_head_dim * rotate_dims, "rotate_dims is inconsistent with inv_freq and head_dim");
++    TORCH_CHECK(partial_head_dim * rotate_dims <= head_dim, "rotate_offset out of range");
++    TORCH_CHECK_DTYPE(inv_freq, kFloat);
++    bool inv_freq_table = false;
++    if (inv_freq.dim() > 1)
++    {
++        TORCH_CHECK(inv_freq.dim() >= 2 && inv_freq.dim() <= 3, "inv_freq table must be 2-D or 3-D");
++        inv_freq_table = true;
++        inv_freq_stride = inv_freq.size(-1) * inv_freq.size(-2);
++    }
++    const float* inv_freq_ptr = (const float*) inv_freq.data_ptr();
++
++    uint32_t* positions_ptr = (uint32_t*) OPTPTR(positions);
++    uint32_t* position_ids_ptr = (uint32_t*) OPTPTR(position_ids);
++    int position_ids_stride = 1;
++    TORCH_CHECK_DTYPE_OPT(positions, kInt);
++    TORCH_CHECK_DTYPE_OPT(position_ids, kInt);
++    TORCH_CHECK((positions_ptr != nullptr) + (position_ids_ptr != nullptr) <= 1, "invalid arguments")
++    if (positions_ptr)
++    {
++        TORCH_CHECK_DIM(positions.value(), 1)
++        TORCH_CHECK(positions.value().size(0) == bsz, "positions is incorrect shape");
++    }
++    if (position_ids_ptr)
++    {
++        TORCH_CHECK(position_ids.value().is_contiguous(), "position_ids must be contiguous");
++        int rd = position_ids.value().dim();
++        TORCH_CHECK(rd == 2 || (rd == 3 && position_ids.value().size(-1) == rotate_dims), "position_ids wrong number of dims")
++        TORCH_CHECK(position_ids.value().size(0) == bsz, "position_ids is incorrect shape");
++        TORCH_CHECK(position_ids.value().size(1) == seq_len, "position_ids is incorrect shape");
++        if (rd == 3) position_ids_stride = rotate_dims;
++    }
++
++    void* q_norm_ptr = (void*) OPTPTR(q_norm);
++    void* k_norm_ptr = (void*) OPTPTR(k_norm);
++    TORCH_CHECK((q_norm_ptr != nullptr) == (k_norm_ptr != nullptr), "attn_pre: q_norm and k_norm must be given together");
++    bool norm_fp16 = true;
++    bool norm_bf16 = false;
++    if (q_norm_ptr)
++    {
++        TORCH_CHECK_DIM(q_norm.value(), 1);
++        TORCH_CHECK(q_norm.value().size(0) == head_dim, "q_norm is incorrect size");
++        TORCH_CHECK(k_norm.value().size(0) == head_dim, "k_norm is incorrect size");
++        norm_bf16 = q_norm.value().dtype() == at::kBFloat16;
++        norm_fp16 = q_norm.value().dtype() == at::kHalf;
++        TORCH_CHECK(k_norm.value().dtype() == q_norm.value().dtype(), "q_norm and k_norm must be same dtype");
++    }
++
++    // Cache append (quant_cache_paged_gr's checks; in_contiguous, compand_a 0)
++    TORCH_CHECK_DTYPE(cache_k, kInt);
++    TORCH_CHECK_DTYPE(cache_v, kInt);
++    TORCH_CHECK_DTYPE(cache_k_scales, kHalf);
++    TORCH_CHECK_DTYPE(cache_v_scales, kHalf);
++    TORCH_CHECK(cache_k_scales.sizes() == cache_v_scales.sizes(), "attn_pre: scale shapes differ");
++    TORCH_CHECK(page_size == CQ_PAGE_SIZE, "Page size mismatch");
++    TORCH_CHECK(cache_k.dim() == 3 && cache_v.dim() == 3, "paged q.cache must have shape (num_pages, page_size, dim // 32 * bitrate)");
++    int groups_per_token = num_heads_k * head_dim / 32;
++    int k_bits = cache_k.size(2) / groups_per_token;
++    int v_bits = cache_v.size(2) / groups_per_token;
++    TORCH_CHECK(k_bits == v_bits && (k_bits == 3 || k_bits == 4), "attn_pre: K and V bitrates must be equal, 3 or 4");
++    TORCH_CHECK(block_table.size(0) == bsz, "attn_pre: block_table batch mismatch");
++    int blocks_per_seq = block_table.size(1);
++    float compand_a = 0.0f;
++
++    // Launch: rope_kernel's block shape per head, heads_per_block heads per CTA
++    int warps = CEIL_DIVIDE(head_dim / 2, 32);
++    int thr = warps * 32;
++    int heads = num_heads_q + num_heads_k;
++    TORCH_CHECK(heads_per_block >= 1 && heads_per_block * thr <= AP_MAX_THREADS &&
++                heads_per_block * ((head_dim + 63) / 64 * 64) <= AP_MAX_THREADS * 2,
++                "attn_pre: heads_per_block out of range");
++    int parallel_heads = MIN(heads_per_block, heads);
++    dim3 blocks(seq_len, bsz, CEIL_DIVIDE(heads, parallel_heads));
++    dim3 threads(thr, parallel_heads);
++
++    void* kernel_ptr = nullptr;
++    bool neox = rope_mode == ROPESTYLE_NEOX;
++    TORCH_CHECK(neox || rope_mode == ROPESTYLE_GPTJ, "attn_pre: unsupported rope style");
++    TORCH_CHECK(norm_fp16 || norm_bf16, "rope: incorrect norm dtype");
++    if (k_bits == 3)
++        kernel_ptr = neox ? (norm_bf16 ? AP_KERNEL(ROPESTYLE_NEOX, true, 3) : AP_KERNEL(ROPESTYLE_NEOX, false, 3))
++                          : (norm_bf16 ? AP_KERNEL(ROPESTYLE_GPTJ, true, 3) : AP_KERNEL(ROPESTYLE_GPTJ, false, 3));
++    else
++        kernel_ptr = neox ? (norm_bf16 ? AP_KERNEL(ROPESTYLE_NEOX, true, 4) : AP_KERNEL(ROPESTYLE_NEOX, false, 4))
++                          : (norm_bf16 ? AP_KERNEL(ROPESTYLE_GPTJ, true, 4) : AP_KERNEL(ROPESTYLE_GPTJ, false, 4));
++
++    const half* qg_ptr = (const half*) qg.data_ptr();
++    half* q_ptr = (half*) q.data_ptr();
++    half* g_ptr = (half*) g.data_ptr();
++    half* k_ptr = (half*) k.data_ptr();
++    const half* v_ptr = (const half*) v.data_ptr();
++    uint32_t* kc_ptr = (uint32_t*) cache_k.data_ptr();
++    half* ks_ptr = (half*) cache_k_scales.data_ptr();
++    uint32_t* vc_ptr = (uint32_t*) cache_v.data_ptr();
++    half* vs_ptr = (half*) cache_v_scales.data_ptr();
++    const uint32_t* sl_ptr = (const uint32_t*) cache_seqlens.data_ptr();
++    const uint32_t* bt_ptr = (const uint32_t*) block_table.data_ptr();
++
++    void* kernel_args[] =
++    {
++        &qg_ptr, &q_ptr, &g_ptr, &k_ptr, &v_ptr, &inv_freq_ptr,
++        &seq_len, &num_heads_q, &num_heads_k, &head_dim, &partial_head_dim,
++        &position, &positions_ptr, &position_ids_ptr, &attn_factor, &q_norm_ptr, &k_norm_ptr,
++        &norm_eps, &norm_constant_bias, &inv_freq_table, &inv_freq_stride,
++        &llama_4_scaling_beta, &llama_4_scaling_original, &position_ids_stride, &rotate_dims,
++        &kc_ptr, &ks_ptr, &vc_ptr, &vs_ptr, &sl_ptr, &bt_ptr, &blocks_per_seq, &groups_per_token, &compand_a
++    };
++    cuda_check(cudaLaunchKernel(kernel_ptr, blocks, threads, kernel_args, 0, stream));
++
++    if (graph)
++    {
++        // rope_gr's sites, then quant_cache_paged_gr's, in their order
++        graph->record_param(kernel_ptr, GP_rope_inv_freq, 5);
++        graph->record_param(kernel_ptr, GP_rope_position, 11, 4);
++        graph->record_param(kernel_ptr, GP_rope_positions, 12);
++        graph->record_param(kernel_ptr, GP_rope_position_ids, 13);
++        graph->record_param(kernel_ptr, GP_rope_pid_stride, 23, 4);
++        graph->record_param(kernel_ptr, GP_qcache_seqlens, 29);
++        graph->record_param(kernel_ptr, GP_qcache_block_table, 30);
++        graph->record_param(kernel_ptr, GP_qcache_blocks_per_seq, 31, 4);
++        graph->record_param(kernel_ptr, GP_end, 0);
++    }
++
++    cuda_check(cudaPeekAtLastError());
++}
+--- /dev/null
++++ b/exllamav3_ext/attn_small.cuh
+@@ -0,0 +1,52 @@
++#pragma once
++
++// Ext 3007: the small pre-attention kernels of the graphed target verify attention, fused.
++//
++// attn_pre_gr = deinterleave_qg_gr + rope_gr (head norms + RoPE, in place) + quant_cache_paged_gr
++// (in_contiguous, compand_a 0) as ONE launch, for BC_Attention's interleaved-gate (gate_mode 3),
++// quantized-cache (K bits == V bits in {3, 4}), head_dim 256 slots:
++//   - q heads: read from the interleaved projection output qg, head-normed + rotated exactly as
++//     rope_kernel does it (same per-thread layout, reduction order and roundings), stored to q; the
++//     head's gate half is copied to g (deinterleave_qg_kernel's copy)
++//   - k heads: normed + rotated in place in k (rope_kernel), then this head's K groups are quantized
++//     from the stored fp16 values and its V groups from v into the paged cache (quant_block_x4, the
++//     quant_cache_paged_kernel device code itself), at the same page positions
++// The graph sites are the union of rope_gr's and quant_cache_paged_gr's, in the same order
++// (GP_rope_inv_freq, GP_rope_position, GP_rope_positions, GP_rope_position_ids, GP_rope_pid_stride,
++// GP_qcache_seqlens, GP_qcache_block_table, GP_qcache_blocks_per_seq), so BC_Attention's patched
++// parameter list is the same with and without the fusion.
++
++#include <ATen/Tensor.h>
++#include "graph.cuh"
++
++// heads_per_block: head jobs (of the n_q + n_kv per token) per CTA, 1 .. 8 (blockDim.y)
++void attn_pre_gr
++(
++    const at::Tensor& qg,           // (R, n_q * 2 * head_dim) half, interleaved [q | g] per head
++    at::Tensor& q,                  // (bsz, q_len, n_q, head_dim) half, out
++    at::Tensor& g,                  // (R, n_q * head_dim) half, out
++    at::Tensor& k,                  // (bsz, q_len, n_kv, head_dim) half, in/out
++    const at::Tensor& v,            // (bsz, q_len, n_kv, head_dim) half
++    const at::Tensor& inv_freq,
++    uint32_t position,
++    const c10::optional<at::Tensor>& positions,
++    const c10::optional<at::Tensor>& position_ids,
++    int rope_mode,
++    float attn_factor,
++    const c10::optional<at::Tensor>& q_norm,
++    const c10::optional<at::Tensor>& k_norm,
++    float norm_eps,
++    float norm_constant_bias,
++    float llama_4_scaling_beta,
++    int llama_4_scaling_original,
++    int rotate_dims,
++    const at::Tensor& cache_k,
++    const at::Tensor& cache_k_scales,
++    const at::Tensor& cache_v,
++    const at::Tensor& cache_v_scales,
++    const at::Tensor& cache_seqlens,
++    const at::Tensor& block_table,
++    int page_size,
++    int heads_per_block,
++    Graph* graph
++);
+--- a/exllamav3_ext/attn_verify.cu
++++ b/exllamav3_ext/attn_verify.cu
+@@ -457,8 +457,23 @@
+ // sees (m = -inf: every tile of the slot past the row's absolute position) are skipped, so the
+ // merged set is the row's slots 0 .. min(S - 1, q_abs / 64) whatever the round. Thread s < live
+ // stages slot s's (m, l) and then its weight in shared memory, so the per-dimension loop issues
+-// its partial_o loads independently. Then fp16(o) is H32-rotated back (fp32 FMA, fp16 out)
+-extern "C" __global__ void __launch_bounds__(AV_HD) attn_verify_combine(AV_COMBINE_ARGS)
++// its partial_o loads independently. Then fp16(o) is H32-rotated back (fp32 FMA, fp16 out).
++// GATE (ext 3007, attn_verify_combine_gate): the output gate o *= sigmoid(g) of the interleaved /
++// full-gate attention is applied to the stored fp16 o exactly as mul_sigmoid_kernel_h does it (the
++// same half2 pair (2i, 2i + 1), the same half2 intrinsics), instead of a separate launch
++
++// activation_kernels.cuh _sigmoid(half2), verbatim
++__device__ __forceinline__ half2 av_gate_sigmoid(half2 x)
++{
++    half2 one = __float2half2_rn(1.0f);
++    half2 neg_x = __hneg2(x);
++    half2 e = h2exp(neg_x);
++    half2 sum = __hadd2(one, e);
++    return h2rcp(sum);
++}
++
++template <bool GATE>
++__device__ __forceinline__ void combine_body(AV_COMBINE_ARGS, const half* __restrict__ gate)
+ {
+     __shared__ half oh[AV_HD];
+     __shared__ float sw[AV_HD];                               // slot s: m, then its weight (-1: skipped)
+@@ -508,4 +523,30 @@
+     #pragma unroll
+     for (int i = 0; i < 32; ++i) y = fmaf(__half2float(oh[g0 + i]), __half2float(h32[i * 32 + jn]), y);
+     out[((size_t) (b * q_len + q_pos) * n_q_heads + kvh * group + hl) * AV_HD + d] = __float2half_rn(y);
+-}
++    if constexpr (GATE)
++    {
++        // The pair (d, d + 1), d even, lies in one warp and one row; its odd half was stored by the
++        // neighbouring lane above (__syncwarp orders the warp's stores before the reload)
++        __syncwarp();
++        if ((d & 1) == 0)
++        {
++            half2* o2 = reinterpret_cast<half2*>(out + ((size_t) (b * q_len + q_pos) * n_q_heads + kvh * group + hl) * AV_HD + d);
++            const half2* g2 = reinterpret_cast<const half2*>(gate + ((size_t) (b * q_len + q_pos) * n_q_heads + kvh * group + hl) * AV_HD + d);
++            half2 x2 = *o2;
++            half2 y2 = *g2;
++            x2 = __hmul2(x2, av_gate_sigmoid(y2));
++            *o2 = x2;
++        }
++    }
++}
++
++extern "C" __global__ void __launch_bounds__(AV_HD) attn_verify_combine(AV_COMBINE_ARGS)
++{
++    combine_body<false>(partial_o, partial_ml, h32, cache_seqlens, out, splits, q_len, n_q_heads, n_kv_heads, nullptr);
++}
++
++// Combine + output gate (ext 3007): gate is (bsz * q_len, n_q_heads * AV_HD) fp16, laid out like out
++extern "C" __global__ void __launch_bounds__(AV_HD) attn_verify_combine_gate(AV_COMBINE_ARGS, const half* __restrict__ gate)
++{
++    combine_body<true>(partial_o, partial_ml, h32, cache_seqlens, out, splits, q_len, n_q_heads, n_kv_heads, gate);
++}
+--- a/exllamav3_ext/attn_verify.cuh
++++ b/exllamav3_ext/attn_verify.cuh
+@@ -89,4 +89,5 @@
+ extern "C" __global__ void attn_verify_split_k3v3(AV_SPLIT_ARGS);
+ extern "C" __global__ void attn_verify_split_k4v4(AV_SPLIT_ARGS);
+ extern "C" __global__ void attn_verify_combine(AV_COMBINE_ARGS);
++extern "C" __global__ void attn_verify_combine_gate(AV_COMBINE_ARGS, const half* __restrict__ gate);
+ #endif
+--- a/exllamav3_ext/attn_verify_gr.cu
++++ b/exllamav3_ext/attn_verify_gr.cu
+@@ -40,6 +40,7 @@
+     int n_q_heads,
+     int n_kv_heads,
+     float scale_log2,
++    const c10::optional<at::Tensor>& gate,
+     cudaStream_t stream,
+     Graph* graph
+ )
+@@ -81,17 +82,28 @@
+         graph->record_param(fn, GP_end, 0);
+     }
+ 
++    // gate (ext 3007): the combine applies o *= sigmoid(gate) itself (attn_verify_combine_gate, one
++    // extra trailing argument; the plain combine ignores it)
++    const half* gate_ptr = nullptr;
++    if (gate)
++    {
++        TORCH_CHECK(gate.value().dtype() == at::kHalf && gate.value().is_contiguous() &&
++                    gate.value().numel() == out.numel() && out.is_contiguous(),
++                    "attn_verify: gate must be a contiguous fp16 tensor shaped like out");
++        gate_ptr = (const half*) gate.value().data_ptr();
++    }
++    void* combine_fn = gate_ptr ? (void*) attn_verify_combine_gate : (void*) attn_verify_combine;
+     const float* cpo_ptr = po_ptr;
+     const float* cpml_ptr = pml_ptr;
+     void* combine_args[] =
+     {
+-        &cpo_ptr, &cpml_ptr, &h32_ptr, &sl_ptr, &out_ptr, &splits, &q_len, &n_q_heads, &n_kv_heads
++        &cpo_ptr, &cpml_ptr, &h32_ptr, &sl_ptr, &out_ptr, &splits, &q_len, &n_q_heads, &n_kv_heads, &gate_ptr
+     };
+-    cuda_check(cudaLaunchKernel((void*) attn_verify_combine, dim3(AV_ROWS, n_kv_heads, bsz), dim3(AV_HD),
++    cuda_check(cudaLaunchKernel(combine_fn, dim3(AV_ROWS, n_kv_heads, bsz), dim3(AV_HD),
+                                 combine_args, 0, stream));
+     if (graph)
+     {
+-        graph->record_param((void*) attn_verify_combine, GP_attn_seqlens, 3);
+-        graph->record_param((void*) attn_verify_combine, GP_end, 0);
++        graph->record_param(combine_fn, GP_attn_seqlens, 3);
++        graph->record_param(combine_fn, GP_end, 0);
+     }
+ }
+--- a/exllamav3_ext/attn_verify_gr.cuh
++++ b/exllamav3_ext/attn_verify_gr.cuh
+@@ -14,7 +14,8 @@
+ // Split + combine over the paged quantized cache into out (bsz, q_len, n_q_heads, 256): `splits`
+ // = S CTAs per (kv head, batch), CTA x over the absolute 64-token tiles x, x + S, ..., one partial
+ // slot per CTA (S per (batch, kv head)); records the block table, cache_seqlens and block-table
+-// width sites when graph is non-null
++// width sites when graph is non-null. With gate (ext 3007) the combine also applies the output gate
++// out *= sigmoid(gate) (mul_sigmoid__gr's half2 ops), gate shaped like out
+ void attn_verify_gr
+ (
+     const at::Tensor& q,
+@@ -33,6 +34,7 @@
+     int n_q_heads,
+     int n_kv_heads,
+     float scale_log2,
++    const c10::optional<at::Tensor>& gate,
+     cudaStream_t stream,
+     Graph* graph
+ );
+--- a/exllamav3_ext/libtorch/attention.cpp
++++ b/exllamav3_ext/libtorch/attention.cpp
+@@ -16,6 +16,9 @@
+ #include "../dsa_topk.cuh"
+ #include "../attn_verify.cuh"
+ #include "../attn_verify_gr.cuh"
++#include "../attn_small.cuh"
++#include <cstdlib>
++#include <cstring>
+ 
+ BC_Attention::BC_Attention
+ (
+@@ -140,6 +143,22 @@
+     TORCH_CHECK(!g_weight || gate_mode == 1 || (gate_mode == 2 && !qg_ptrs_trellis && !g_proj), "BC_Attention: fp16 gate weight requires full gate mode without a quantized g projection");
+     slots.resize(2 * MAX_BSZ * MAX_QLEN);
+ 
++    // Ext 3007 kill switch / knob (see attention.h)
++    if (const char* e = std::getenv("EXL3_ATTN_SMALL_FUSE"))
++    {
++        char* end = nullptr;
++        long m = std::strtol(e, &end, 10);
++        TORCH_CHECK(end != e && *end == '\0' && m >= 0 && m <= 3, "EXL3_ATTN_SMALL_FUSE must be 0..3");
++        small_fuse = (int) m;
++    }
++    if (const char* e = std::getenv("EXL3_ATTN_SMALL_PRE_HEADS"))
++    {
++        char* end = nullptr;
++        long h = std::strtol(e, &end, 10);
++        TORCH_CHECK(end != e && *end == '\0' && h >= 1 && h <= 8, "EXL3_ATTN_SMALL_PRE_HEADS must be 1..8");
++        small_pre_heads = (int) h;
++    }
++
+     if (qkv_ptrs_trellis)
+     {
+         TORCH_CHECK(qkv_ptrs_suh && qkv_ptrs_svh && qkv_meta, "BC_Attention: incomplete qkv bundle");
+@@ -421,6 +440,40 @@
+     *split_len = CEIL_DIVIDE(CEIL_DIVIDE(bound, *num_splits), block_n) * block_n;
+ }
+ 
++void BC_Attention::set_small_fuse(int mask, int pre_heads)
++{
++    TORCH_CHECK(mask >= 0 && mask <= 3 && pre_heads >= 1 && pre_heads <= 8, "BC_Attention: bad small-fuse selection");
++    TORCH_CHECK(!graph_outer_capture(), "BC_Attention: set_small_fuse during an outer capture");
++    cuda_check(cudaDeviceSynchronize());
++    small_fuse = mask;
++    small_pre_heads = pre_heads;
++    for (Slot& s : slots)
++    {
++        if (!s.configured) continue;
++        s.graph = std::make_unique<Graph>();
++        s.runs = 0;
++        s.graph_defer = std::make_unique<Graph>();
++        s.runs_defer = 0;
++    }
++}
++
++// Ext 3007 eligibility. Pre: the interleaved gate (deinterleave present), RoPE, quantized cache on
++// the CUDA verify attention's shapes (av_splits > 0: K bits == V bits in {3, 4}, head_dim 256,
++// dense regime), NEOX / GPT-J rope, head norms both or neither. Post: the verify attention's
++// combine with the full / interleaved gate (mul_sigmoid__gr(o2, g2))
++bool BC_Attention::small_pre_ok(const Slot& s, int regime) const
++{
++    return (small_fuse & 1) && regime == 0 && s.av_splits > 0 && gate_mode == 3 && inv_freq.has_value() &&
++           quant_cache && head_dim == 256 &&
++           (rope_style == ROPESTYLE_NEOX || rope_style == ROPESTYLE_GPTJ) &&
++           q_norm.has_value() == k_norm.has_value();
++}
++
++bool BC_Attention::small_post_ok(const Slot& s, int regime) const
++{
++    return (small_fuse & 2) && regime == 0 && s.av_splits > 0 && (gate_mode == 2 || gate_mode == 3);
++}
++
+ void BC_Attention::run_gr
+ (
+     int bsz,
+@@ -444,6 +497,9 @@
+     int R = bsz * q_len;
+     bool use_mgemm = kv_ptrs_trellis.has_value() && (R <= 32 || !k_proj);
+     TORCH_CHECK(use_mgemm || (k_proj && (v_proj || use_k_as_v)), "BC_Attention: no k/v projection path for this batch shape");
++    // Ext 3007: fused pre-attention launch / gated combine (fixed per captured graph)
++    const bool fuse_pre = small_pre_ok(s, regime);
++    const bool fuse_post = small_post_ok(s, regime);
+ 
+     at::Tensor xh_flat = xh.view({-1});
+     at::Tensor x2 = x.view({R, hidden_size});
+@@ -504,7 +560,7 @@
+         }
+         if (gate_mode == 2 && g_weight)
+             hgemm_gr(x2, g_weight.value(), s.g2, graph);
+-        if (gate_mode == 3)
++        if (gate_mode == 3 && !fuse_pre)
+             deinterleave_qg_gr(s.qg2, s.q2, s.g2, head_dim, graph);
+     }
+     else if (gate_mode == 3)
+@@ -512,7 +568,8 @@
+         exl3_gemm_gr(x2, q_proj->trellis, s.qg2, q_proj->suh, xh_q, q_proj->svh, -1, q_proj->mcg, q_proj->mul1, 0, graph);
+         if (q_proj->bias)
+             add_gr(s.qg2, q_proj->bias.value(), s.qg2, graph);
+-        deinterleave_qg_gr(s.qg2, s.q2, s.g2, head_dim, graph);
++        if (!fuse_pre)
++            deinterleave_qg_gr(s.qg2, s.q2, s.g2, head_dim, graph);
+     }
+     else if (use_qg_mgemm)
+     {
+@@ -610,6 +667,18 @@
+     // fused head norms either) skip the stage entirely; whether the stage exists must be
+     // constant between capture and replay, so it keys on the member alone
+     TORCH_CHECK(inv_freq || !inv_freq_override, "BC_Attention: inv_freq override on a NoPE module");
++    if (fuse_pre)
++    {
++        // Ext 3007: deinterleave + head norm/RoPE + cache append as one launch, the same sites as
++        // rope_gr then quant_cache_paged_gr (run_mode's parameter list is unchanged)
++        const at::Tensor& ivf = inv_freq_override ? inv_freq_override.value() : inv_freq.value();
++        attn_pre_gr(s.qg2, s.q4, s.g2, s.k4, s.v4, ivf, (uint32_t) position, positions, position_ids,
++                    rope_style, attn_factor, q_norm, k_norm, norm_eps, norm_constant_bias, l4_scaling_beta,
++                    l4_scaling_original, rotate_dims, cache_k, cache_k_scales.value(), cache_v,
++                    cache_v_scales.value(), cache_seqlens, block_table, page_size, small_pre_heads, graph);
++    }
++    else
++    {
+     if (inv_freq)
+     {
+         c10::optional<at::Tensor> out_k4 = s.k4;
+@@ -647,6 +716,7 @@
+             graph->record_param(s.k_update->handle(), GP_end, 0);
+         }
+     }
++    }   // separate rope / cache append (ext 3007 off or ineligible)
+ 
+     // QSA indexer planes (both regimes, so the selection has complete history once it
+     // activates): fused q/raw-key projection, staging split + per-head q norm, raw-key plane
+@@ -820,7 +890,8 @@
+         // absolute position
+         attn_verify_gr(s.q, cache_k, cache_v, cache_k_scales.value(), cache_v_scales.value(), h32,
+                        block_table, cache_seqlens, s.partial_o, s.partial_ml, s.o, s.av_splits,
+-                       q_len, num_q_heads, num_kv_heads, s.av_scale_log2, stream, graph);
++                       q_len, num_q_heads, num_kv_heads, s.av_scale_log2,
++                       fuse_post ? c10::optional<at::Tensor>(s.g2) : c10::nullopt, stream, graph);
+     }
+     else
+     {
+@@ -893,7 +964,7 @@
+         else
+             mul_sigmoid_broadcast__gr(s.o4, g3, graph);
+     }
+-    else if (gate_mode == 2 || gate_mode == 3)
++    else if ((gate_mode == 2 || gate_mode == 3) && !fuse_post)
+         mul_sigmoid__gr(s.o2, s.g2, graph);
+ 
+     // Layer tail (ext 8202): the MLP-side tail launch runs o_proj from o2
+--- a/exllamav3_ext/libtorch/attention.h
++++ b/exllamav3_ext/libtorch/attention.h
+@@ -146,6 +146,15 @@
+     int qsa_cr = 0;              // compress ratio P (tokens per block)
+     at::Tensor qsa_raw_plane;    // flat (pages * page_size, D_i) fp16
+     at::Tensor qsa_pool_plane;   // flat (pages * page_size / P, D_i) fp16
++
++    // Ext 3007 (attn_small.cu, attn_verify_combine_gate): bit 0 = one fused pre-attention launch
++    // (deinterleave_qg + head norm/RoPE + quantized cache append), bit 1 = the output gate applied
++    // by the verify-attention combine (no mul_sigmoid launch). Default 3; EXL3_ATTN_SMALL_FUSE=0
++    // restores the separate launches (any value 0..3 selects the bits). small_pre_heads = head jobs
++    // per pre-attention CTA (EXL3_ATTN_SMALL_PRE_HEADS, 1..8, default 4). Both are read when the
++    // slot graphs are captured; set_small_fuse() changes them and drops every captured slot graph
++    int small_fuse = 3;
++    int small_pre_heads = 4;
+ 
+     struct Slot
+     {
+@@ -301,6 +310,15 @@
+         float av_scale_log2 = 0.0f
+     );
+ 
++    // Ext 3007: select the fused launches (mask, see small_fuse) and the pre-attention CTA shape;
++    // every slot graph is dropped and re-warmed / recaptured on its next run
++    void set_small_fuse(int mask, int pre_heads);
++    int get_small_fuse() const { return small_fuse; }
++
++    // Whether the slot's graph takes the fused pre-attention launch / the gated combine
++    bool small_pre_ok(const Slot& s, int regime) const;
++    bool small_post_ok(const Slot& s, int regime) const;
++
+     // Attaches the QSA statics/kernels to an already-configured slot. Selection pieces are
+     // nullopt/null for regime-0 slots
+     void configure_slot_qsa
+--- a/exllamav3_ext/libtorch/attention_bc.h
++++ b/exllamav3_ext/libtorch/attention_bc.h
+@@ -185,4 +185,6 @@
+     py::arg("qsa_programs") = 0
+ )
+ .def("run", &BC_Attention::run)
+-.def("run_defer", &BC_Attention::run_defer);
++.def("run_defer", &BC_Attention::run_defer)
++.def("set_small_fuse", &BC_Attention::set_small_fuse, py::arg("mask"), py::arg("pre_heads"))
++.def("get_small_fuse", &BC_Attention::get_small_fuse);

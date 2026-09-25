@@ -1,0 +1,442 @@
+--- a/exllamav3_ext/quant/exl3_mlp_m16.cu
++++ b/exllamav3_ext/quant/exl3_mlp_m16.cu
+@@ -105,6 +105,37 @@
+     }();
+     if (set >= 0) value = set;
+     return value;
++}
++
++// ext 8204 knobs of the fused MLP and the layer tail, read at launch/capture time (captured graphs keep
++// theirs); value = env (first character '0' = off, '1' = on) or the default, then the last set >= 0
++static int exl3_m16_knob(int& value, const char* env_name, int def, int set)
++{
++    if (value < 0)
++    {
++        const char* env = std::getenv(env_name);
++        value = env && env[0] ? (env[0] == '0' ? 0 : 1) : def;
++    }
++    if (set >= 0) value = set ? 1 : 0;
++    return value;
++}
++
++int exl3_m16_start_order(int set)
++{
++    static int value = -1;
++    return exl3_m16_knob(value, "EXL3_M16_START_ORDER", 1, set);
++}
++
++int exl3_m16_defer_pub(int set)
++{
++    static int value = -1;
++    return exl3_m16_knob(value, "EXL3_M16_DEFER_PUB", 1, set);
++}
++
++int exl3_m16_vperm(int set)
++{
++    static int value = -1;
++    return exl3_m16_knob(value, "EXL3_M16_VPERM", 0, set);
+ }
+ 
+ bool exl3_mlp_m16_supported
+@@ -213,6 +244,9 @@
+     args.size_m = size_m;
+     args.act_limit = act_limit;
+     args.l2pf = exl3_mlp_m16_l2pf(-1);
++    args.start_order = exl3_m16_start_order(-1);
++    args.defer_pub = exl3_m16_defer_pub(-1);
++    args.vperm = exl3_m16_vperm(-1);
+ 
+     const half* A_ptr = (const half*) x.data_ptr();
+     half* g_ptr = (half*) g.data_ptr();
+--- a/exllamav3_ext/quant/exl3_mlp_m16.cuh
++++ b/exllamav3_ext/quant/exl3_mlp_m16.cuh
+@@ -12,6 +12,18 @@
+ // L2 prefetch depth (down tiles per warp, issued once between the phases): returns the value used
+ // by later launches; set >= 0 changes it (benchmark knob; default EXL3_MLP_M16_L2PF or 0).
+ int exl3_mlp_m16_l2pf(int set);
++
++// ext 8204 knobs, shared by the fused MLP (8201) and the layer tail (8202/8203); every setting gives
++// bit-identical outputs. Each returns the value used by later launches (captured graphs keep theirs);
++// set >= 0 changes it; the default comes from the environment variable ('0' off, '1' on) or as noted.
++// start_order: 1 = the first input-transform job's loads go out before the weight ring prologue
++//   (EXL3_M16_START_ORDER, default 1).
++// defer_pub: 1 = phase 1 publishes its cnt1 counters once, after the slice's last flush, instead of a
++//   fence + add at every group flush (EXL3_M16_DEFER_PUB, default 1).
++// vperm: diagnostic, 1 = CTA b runs virtual block (b + G/2) mod G (EXL3_M16_VPERM, default 0).
++int exl3_m16_start_order(int set);
++int exl3_m16_defer_pub(int set);
++int exl3_m16_vperm(int set);
+ 
+ bool exl3_mlp_m16_supported
+ (
+--- a/exllamav3_ext/quant/exl3_mlp_m16_kernel.cuh
++++ b/exllamav3_ext/quant/exl3_mlp_m16_kernel.cuh
+@@ -31,6 +31,11 @@
+ //   (count from the schedule) zeroes the counter and the pass counter. The next launch is
+ //   stream-ordered after this one.
+ // - Deadlock-freedom needs all blocks co-resident (cooperative launch, grid = 2 blocks/SM).
++// - Start order (ext 8204, p.start_order = 1): each warp's first input-transform loads (A, suh) are
++//   issued before the weight ring prologue, so they do not queue behind 4.7 MB of weight requests.
++//   Same loads and arithmetic (exl3_m16_had_load / _store = had_hf_r_128_inner<true, false>).
++// - Deferred publish (ext 8204, p.defer_pub = 1): no fence / cnt1 add at a mid-slice group crossing; one
++//   fence and the adds of all the slice's groups after its last flush. vperm (diagnostic): see below.
+ 
+ #include "exl3_gemm_m16_kernel.cuh"
+ #include "exl3_mlp_m16_sched.h"
+@@ -68,7 +73,57 @@
+     int size_m;
+     float act_limit;
+     int l2pf;                        // down tiles per warp prefetched to L2 across the finish (0 = off)
++    int start_order;                 // 1: input-transform loads issued before the weight ring prologue (8204)
++    int defer_pub;                   // 1: phase-1 counter publish once after the slice's last flush (8204)
++    int vperm;                       // 1: diagnostic, CTA runs virtual block (blockIdx + G/2) mod G (8204)
+ };
++
++// had_hf_r_128_inner<true, false> (hadamard_inner.cuh) split into its loads and its arithmetic, so a
++// kernel can issue the loads of its first input-transform job BEFORE its weight ring prologue: at
++// kernel start the 7 ring stages (4.7 MB grid-wide) would otherwise sit in front of these small
++// loads in the memory queues. Same loads (the 1-D grids here have blockIdx.y == 0, so the scale
++// index is the lane), same operations in the same order: bit-identical output.
++struct Exl3HadIn
++{
++    half4 v;
++    half4 s;
++};
++
++__device__ __forceinline__ void exl3_m16_had_load(Exl3HadIn& h, const half* __restrict__ in, const half* __restrict__ scale, int t)
++{
++    h.v = ((const half4*) in)[t];
++    h.s = ((const half4*) scale)[t];
++}
++
++__device__ __forceinline__ void exl3_m16_had_store(const Exl3HadIn& h, half* __restrict__ out, int t)
++{
++    const float r_scale = 0.088388347648f;  // 1/sqrt(128)
++    half4 v = h.v;
++    v.x = __hmul2(v.x, h.s.x);
++    v.y = __hmul2(v.y, h.s.y);
++    float v0 = __half2float(__low2half(v.x));
++    float v1 = __half2float(__high2half(v.x));
++    float v2 = __half2float(__low2half(v.y));
++    float v3 = __half2float(__high2half(v.y));
++    float s0 = v0 + v1;
++    float d0 = v0 - v1;
++    float s1 = v2 + v3;
++    float d1 = v2 - v3;
++    float h0 = s0 + s1;
++    float h1 = d0 + d1;
++    float h2 = s0 - s1;
++    float h3 = d0 - d1;
++    shuffle_had_f4x32(h0, h1, h2, h3, t);
++    v.x = __floats2half2_rn(h0 * r_scale, h1 * r_scale);
++    v.y = __floats2half2_rn(h2 * r_scale, h3 * r_scale);
++    ((half4*) out)[t] = v;
++}
++
++// Start stamp helper: stamps only once the loaded registers have arrived (the empty asm consumes them)
++__device__ __forceinline__ void exl3_m16_had_arrived(const Exl3HadIn& h)
++{
++    asm volatile ("" :: "r"(*reinterpret_cast<const uint32_t*>(&h.v.x)), "r"(*reinterpret_cast<const uint32_t*>(&h.s.x)));
++}
+ 
+ // act_mul_kernel_h<ACT_SILU>'s _silu(half2) (activation_kernels.cuh), same operations
+ __device__ __forceinline__ half2 exl3_mlp_silu_h2(half2 x)
+@@ -195,7 +250,10 @@
+     const int lane = threadIdx.x & 31;
+     const int size_m = p.size_m;
+     const int G = gridDim.x;
+-    const int b = blockIdx.x;
++    // ext 8204 diagnostic (vperm = 1): this CTA runs virtual block (blockIdx + G / 2) mod G, i.e. every slice
++    // moves to the other CTA of its SM pair; all work is indexed by the virtual block, so outputs are identical
++    // (stamps stay indexed by the physical CTA)
++    const int b = p.vperm ? (int) ((blockIdx.x + gridDim.x / 2) % gridDim.x) : (int) blockIdx.x;
+ 
+     // Schedule record of this block (exl3_mlp_m16_sched.h field order)
+     const unsigned short* rec = p.sched + b * EXL3_MLP_SCHED_BF;
+@@ -295,6 +353,29 @@
+         }
+     };
+ 
++    // Gate/up input transform (v2, num_mats = 2): warp job w = (mat, r). ext 8204: the loads of this
++    // warp's first job (a and suh) are issued BEFORE the ring prologue (start_order = 1), so they do not
++    // queue behind 4.7 MB of weight requests; start_order = 0 keeps 8201's order (prologue first)
++    const int per_mat = size_m * K1 / 128;
++    const int had_jobs = 2 * per_mat;
++    const int had_w0 = warp + EXL3_M16_WARPS * b;
++    const int had_stride = G * EXL3_M16_WARPS;
++    Exl3HadIn hin;
++    auto had_load0 = [&] ()
++    {
++        if (had_w0 < had_jobs)
++        {
++            const int mat = had_w0 >= per_mat ? 1 : 0;
++            const int r = had_w0 - mat * per_mat;
++            exl3_m16_had_load(hin, A + r * 128, (mat ? p.suh_u : p.suh_g) + (r * 128) % K1, lane);
++        }
++    };
++    if (p.start_order)
++    {
++        had_load0();
++        asm volatile ("" ::: "memory");   // keep the loads ahead of the prologue's cp.async issue
++    }
++
+     // Prologue: first PF - 1 ring tiles (independent of the input transform)
+     #pragma unroll
+     for (int d = 0; d < PF - 1; ++d)
+@@ -302,14 +383,23 @@
+         if (iss_j < n_tot) issue_w(d);
+         cp_async_fence();
+     }
+-
+-    // Gate/up input scales and Hadamard transform (v2, num_mats = 2), then the only grid barrier
+-    // before the down GEMM's final reduction (same placement as v2's grid.sync, backoff polling)
+-    {
+-        int per_mat = size_m * K1 / 128;
+-        int total_warps = 2 * per_mat;
+-        int warps_grid = G * EXL3_M16_WARPS;
+-        for (int w = warp + EXL3_M16_WARPS * b; w < total_warps; w += warps_grid)
++    if (!p.start_order) had_load0();
++
++    // Input transform (first job from the registers, any further job as v2), then the only grid
++    // barrier before the down GEMM's final reduction (same placement as v2's grid.sync, backoff polling)
++    {
++        if (had_w0 < had_jobs)
++        {
++            if (prof && threadIdx.x == 0)
++            {
++                exl3_m16_had_arrived(hin);
++                stamp(13);
++            }
++            const int mat = had_w0 >= per_mat ? 1 : 0;
++            const int r = had_w0 - mat * per_mat;
++            exl3_m16_had_store(hin, (mat ? p.xh_u : p.xh_g) + r * 128, lane);
++        }
++        for (int w = had_w0 + had_stride; w < had_jobs; w += had_stride)
+         {
+             int mat = w >= per_mat ? 1 : 0;
+             int r = w - mat * per_mat;
+@@ -321,6 +411,7 @@
+                 0.088388347648f  // 1/sqrt(128)
+             );
+         }
++        stamp(14);
+         exl3_mlp_grid_sync(p.cnt + EXL3_MLP_GBAR);
+     }
+     stamp(1);
+@@ -329,6 +420,7 @@
+     cp_async_fence();
+     cp_async_wait<0>();
+     __syncthreads();
++    stamp(15);
+ 
+     int ldsm_off;
+     {
+@@ -388,9 +480,24 @@
+                 }
+         if constexpr (PH == 1)
+         {
+-            __threadfence();
+-            __syncwarp();
+-            if (lane == 0) atomicAdd(p.cnt + EXL3_MLP_CNT1 + g, 1u);
++            // 8201 publishes every group at its flush. ext 8204 (defer_pub = 1): a flush in the middle of the
++            // slice (group crossing) does not fence; after the slice's last flush one fence releases the
++            // slots of all its groups and the warp adds 1 to each group's counter (a mid-stream fence waits
++            // for the block's in-flight ring loads, ~5 us; same stores and values, so bit-identical)
++            if (!p.defer_pub)
++            {
++                __threadfence();
++                __syncwarp();
++                if (lane == 0) atomicAdd(p.cnt + EXL3_MLP_CNT1 + g, 1u);
++            }
++            else if (g == (s1 + n1 - 1) / KT1)   // the slice's last group
++            {
++                __threadfence();
++                __syncwarp();
++                const int g_first = s1 / KT1;         // lane i publishes group g_first + i (no loop:
++                if (lane <= g - g_first)              // a lane-0 loop here de-converges the hot loop)
++                    atomicAdd(p.cnt + EXL3_MLP_CNT1 + g_first + lane, 1u);
++            }
+         }
+     };
+ 
+--- a/exllamav3_ext/quant/exl3_mlp_m16_op.cpp
++++ b/exllamav3_ext/quant/exl3_mlp_m16_op.cpp
+@@ -8,6 +8,8 @@
+ //   torch.ops.exl3_mlp_m16.mlp(x, gate trellis/suh/svh, up ..., down ..., g, u, a, xh_g, xh_u, xh_d, d,
+ //                              act_limit, prof?) -> grid size
+ //   torch.ops.exl3_mlp_m16.l2pf(set) -> current L2 prefetch depth (set < 0 only reads)
++//   torch.ops.exl3_mlp_m16.start_order(set) / defer_pub(set) / vperm(set) -> ext 8204 knobs shared with the
++//                                             layer tail (exl3_mlp_m16.cuh; set < 0 only reads)
+ 
+ static bool exl3_mlp_m16_supported_op(int64_t m, const at::Tensor& gt, const at::Tensor& ut, const at::Tensor& dt)
+ {
+@@ -37,9 +39,27 @@
+     return exl3_mlp_m16_l2pf((int) set);
+ }
+ 
++static int64_t exl3_m16_start_order_op(int64_t set)
++{
++    return exl3_m16_start_order((int) set);
++}
++
++static int64_t exl3_m16_defer_pub_op(int64_t set)
++{
++    return exl3_m16_defer_pub((int) set);
++}
++
++static int64_t exl3_m16_vperm_op(int64_t set)
++{
++    return exl3_m16_vperm((int) set);
++}
++
+ TORCH_LIBRARY(exl3_mlp_m16, m)
+ {
+     m.def("l2pf", &exl3_mlp_m16_l2pf_op);
++    m.def("start_order", &exl3_m16_start_order_op);
++    m.def("defer_pub", &exl3_m16_defer_pub_op);
++    m.def("vperm", &exl3_m16_vperm_op);
+     m.def("supported", &exl3_mlp_m16_supported_op);
+     m.def("mlp", &exl3_mlp_m16_op);
+ }
+--- a/exllamav3_ext/quant/exl3_tail_m16.cu
++++ b/exllamav3_ext/quant/exl3_tail_m16.cu
+@@ -260,6 +260,9 @@
+     m.size_m = size_m;
+     m.act_limit = act_limit;
+     m.l2pf = exl3_mlp_m16_l2pf(-1);
++    m.start_order = exl3_m16_start_order(-1);
++    m.defer_pub = exl3_m16_defer_pub(-1);
++    m.vperm = exl3_m16_vperm(-1);
+ 
+     const half* A_ptr = (const half*) a.data_ptr();
+     float* X_ptr = (float*) x.data_ptr();
+--- a/exllamav3_ext/quant/exl3_tail_m16_kernel.cuh
++++ b/exllamav3_ext/quant/exl3_tail_m16_kernel.cuh
+@@ -24,6 +24,10 @@
+ //   runs PF - 1 tiles ahead across both phase boundaries, so each phase starts with a full ring.
+ // - Deadlock-freedom: every block executes barriers S, A, B, C, D in that order; all counter waits
+ //   and signals lie between C and D (8201's stratification). All blocks co-resident (cooperative).
++//
++// ext 8204 (runtime knobs in Exl3MlpM16Args, shared with 8201's kernel; all bit-identical): start_order
++// issues the o input-transform loads before the ring prologue, defer_pub publishes phase 1's cnt1 once
++// after the slice's last flush (no mid-slice fence), vperm (diagnostic) swaps each SM pair's slices.
+ 
+ #include <cuda_bf16.h>
+ #include "exl3_mlp_m16_kernel.cuh"
+@@ -51,7 +55,7 @@
+     half* g;                         // 8201's g / u outputs
+     half* u;
+     int l2pf0;                       // phase-1 tiles per warp prefetched to L2 across F0 / N (0 = off)
+-    Exl3MlpM16Args mlp;              // 8201's arguments (phases 1/2); prof/size_m/act_limit/l2pf used
++    Exl3MlpM16Args mlp;              // 8201's arguments (phases 1/2); prof/size_m/act_limit/l2pf/start_order used
+ };
+ 
+ template <int dummy>
+@@ -108,7 +112,10 @@
+     const int lane = threadIdx.x & 31;
+     const int size_m = q.size_m;
+     const int G = gridDim.x;
+-    const int b = blockIdx.x;
++    // ext 8204 diagnostic (vperm = 1): this CTA runs virtual block (blockIdx + G / 2) mod G, i.e. every slice
++    // moves to the other CTA of its SM pair; all work is indexed by the virtual block, so outputs are identical
++    // (stamps stay indexed by the physical CTA)
++    const int b = q.vperm ? (int) ((blockIdx.x + gridDim.x / 2) % gridDim.x) : (int) blockIdx.x;
+ 
+     // Schedule records of this block: phase 0 + ring offsets (tail table), phases 1/2 (8201 table)
+     const unsigned short* trec = p.tsched + b * EXL3_TAIL_SCHED_BF;
+@@ -228,6 +235,23 @@
+         }
+     };
+ 
++    // o_proj input transform: warp job w = 128 columns of one row of `a`. ext 8204: the loads of this
++    // warp's first job (a and the o suh) are issued BEFORE the ring prologue (start_order = 1), so they
++    // do not queue behind 4.7 MB of weight requests; start_order = 0 keeps 8202's order
++    const int had_jobs = size_m * K0 / 128;
++    const int had_w0 = warp + EXL3_M16_WARPS * b;
++    const int had_stride = G * EXL3_M16_WARPS;
++    Exl3HadIn hin;
++    auto had_load0 = [&] ()
++    {
++        if (had_w0 < had_jobs) exl3_m16_had_load(hin, Ao + had_w0 * 128, p.suh_o + (had_w0 * 128) % K0, lane);
++    };
++    if (q.start_order)
++    {
++        had_load0();
++        asm volatile ("" ::: "memory");   // keep the loads ahead of the prologue's cp.async issue
++    }
++
+     // Prologue: first PF - 1 ring tiles (o_proj weights, independent of the input transform)
+     #pragma unroll
+     for (int d = 0; d < PF - 1; ++d)
+@@ -235,12 +259,21 @@
+         if (iss_j < n_tot) issue_w(d);
+         cp_async_fence();
+     }
+-
+-    // o_proj input scales and Hadamard transform (v2, one matrix), then grid barrier S
+-    {
+-        int total_warps = size_m * K0 / 128;
+-        int warps_grid = G * EXL3_M16_WARPS;
+-        for (int w = warp + EXL3_M16_WARPS * b; w < total_warps; w += warps_grid)
++    if (!q.start_order) had_load0();
++
++    // o_proj input scales and Hadamard transform (first job from the registers, any further job as
++    // v2), then grid barrier S
++    {
++        if (had_w0 < had_jobs)
++        {
++            if (prof && threadIdx.x == 0)
++            {
++                exl3_m16_had_arrived(hin);
++                stamp(13);
++            }
++            exl3_m16_had_store(hin, p.xh_o + had_w0 * 128, lane);
++        }
++        for (int w = had_w0 + had_stride; w < had_jobs; w += had_stride)
+         {
+             had_hf_r_128_inner<true, false>
+             (
+@@ -250,6 +283,7 @@
+                 0.088388347648f  // 1/sqrt(128)
+             );
+         }
++        stamp(14);
+         exl3_mlp_grid_sync(q.cnt + EXL3_MLP_GBAR);
+     }
+     stamp(1);
+@@ -258,6 +292,7 @@
+     cp_async_fence();
+     cp_async_wait<0>();
+     __syncthreads();
++    stamp(15);
+ 
+     int ldsm_off;
+     {
+@@ -319,9 +354,24 @@
+                 }
+         if constexpr (PH == 1)
+         {
+-            __threadfence();
+-            __syncwarp();
+-            if (lane == 0) atomicAdd(q.cnt + EXL3_MLP_CNT1 + g, 1u);
++            // 8201 publishes every group at its flush. ext 8204 (defer_pub = 1): a flush in the middle of the
++            // slice (group crossing) does not fence; after the slice's last flush one fence releases the
++            // slots of all its groups and the warp adds 1 to each group's counter (a mid-stream fence waits
++            // for the block's in-flight ring loads, ~5 us; same stores and values, so bit-identical)
++            if (!q.defer_pub)
++            {
++                __threadfence();
++                __syncwarp();
++                if (lane == 0) atomicAdd(q.cnt + EXL3_MLP_CNT1 + g, 1u);
++            }
++            else if (g == (s1 + n1 - 1) / KT1)   // the slice's last group
++            {
++                __threadfence();
++                __syncwarp();
++                const int g_first = s1 / KT1;         // lane i publishes group g_first + i (no loop:
++                if (lane <= g - g_first)              // a lane-0 loop here de-converges the hot loop)
++                    atomicAdd(q.cnt + EXL3_MLP_CNT1 + g_first + lane, 1u);
++            }
+         }
+     };
+ 

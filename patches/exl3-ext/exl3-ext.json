@@ -16,7 +16,7 @@
     "path": "/opt/venv/lib/python3.13/site-packages/exllamav3_ext.cpython-313-x86_64-linux-gnu.so",
     "base_sha256": "6d30690fdb76b3c4ad3fb5e69f0479707e410fc9b6194e2a5e32f4d7fe1fd8b3"
   },
-  "series_sha256": "15937c0acbb75eb60e416c1e5779b814c35f1780e3b35551cf3d951aeba4d237",
+  "series_sha256": "d608a7c6bbf266d726c1f0dfd4d85b456fd5ca1cc0a5d1fcfdf1f77fb6919774",
   "patches": [
     {
       "name": "0001-gdn-shared-carveout.patch",
@@ -93,28 +93,60 @@
     {
       "name": "3006-attn-verify-stride.patch",
       "sha256": "171f9c2ae5df21f173391604367d355aa47c548fe8fc4b7a5513092457e72d0e"
+    },
+    {
+      "name": "8204-tail-start-order-on3006.patch",
+      "sha256": "cae388f59bb5db85db2563f48366f1bf2ee17ad563cad4d473df292c0ee121c0"
+    },
+    {
+      "name": "9003b-draft-proj-m16g.patch",
+      "sha256": "e051bff495213a7e6932326ee16f2603c648a6fa77d68fde0f1b9a74bc48a917"
+    },
+    {
+      "name": "3007-attn-small-fuse.patch",
+      "sha256": "84a9672df2a869ff99b214968569bbe6b930f8d17f53cf5002c788845f612e40"
+    },
+    {
+      "name": "2105-proj-m16g-weighted-on9003b.patch",
+      "sha256": "d9a9479b3061f94da97529d944c27e5ef9cda619b85d38e66cbcceb83910149a"
+    },
+    {
+      "name": "5106-gdn-ba-ksplit.patch",
+      "sha256": "69900961ba46c94b52811f42e249c128a7f1d0bdc4e67e3643182f6d5af72970"
     }
   ],
   "files": {
+    "architecture/dflash.py": {
+      "pre": "c9ae7d7950936687168c89ae8441bf547118f740da8962ea48844402dde2250f",
+      "post": "204d0bf27c4cf22ac04c202ce59529ae382de57a6cc2fb98cc27e300f8635157"
+    },
     "architecture/dflash2.py": {
       "pre": "03f93098649173a3f023a584e68d2db6124480508354aebd2cc56e5855bf7ee7",
       "post": "16a2982724b070b7328a652e4127fda0da3e3836228234bc864f6190b8657fa2"
     },
+    "exllamav3_ext/attn_small.cu": {
+      "pre": null,
+      "post": "3106cf10a37eebb67d9e7ddd795981564d4f5eb0aca066f60cc3a6eb6a1dcfe3"
+    },
+    "exllamav3_ext/attn_small.cuh": {
+      "pre": null,
+      "post": "3ba2466e1e18b4102663c7237efcb3af1d9cba1620a918d9d03bd7780a30c3c9"
+    },
     "exllamav3_ext/attn_verify.cu": {
       "pre": null,
-      "post": "bb7c00e7233602f25a237f27bba10411be761262f277e362651d21c2b36eacdb"
+      "post": "9e34b6c774a639b24bdb899c4be36ebdf4e6c79898242babee5af17e7f613c5c"
     },
     "exllamav3_ext/attn_verify.cuh": {
       "pre": null,
-      "post": "2167e145cf1814e2272c99b732a26958cf87fbd2aeb1d4e61604de898241707d"
+      "post": "df353988e16fcf71f5b6f086fd6277597c4fc901a23c8ea7b3eb02bdfd0f9c65"
     },
     "exllamav3_ext/attn_verify_gr.cu": {
       "pre": null,
-      "post": "64ff8c3a5601a43ace50edb9ed57c8a7611bae4afb2d7d363aef57e7a5e737bf"
+      "post": "b6d588819846abc7c8d5ec75eae8eb918d576984696ce8e0ca0fffdf4250b1bf"
     },
     "exllamav3_ext/attn_verify_gr.cuh": {
       "pre": null,
-      "post": "0b73b7aae0f80c07e7fb26f9fdc9f2865cd90c71707777b33d6dc2c7a76f34b9"
+      "post": "8d60a45fec7a819168301c3c539a2560cc08d7bd0a2b2f93ee5108332b8180eb"
     },
     "exllamav3_ext/bindings.cpp": {
       "pre": "381d867b845335b15106f86aa79e284c9d6b7d316703dd555d8a86a13ed2b465",
@@ -130,11 +162,15 @@
     },
     "exllamav3_ext/gdn.cu": {
       "pre": "a06effe57ac621eea19d908796b4848135f675438d5b3eedbd3c4e67d336eaf0",
-      "post": "d0beb818c910e1a3d2b2ed4379160bdc1e35a89de191c0b49977081c406d3eed"
+      "post": "cce51b97fbbca664fd24a5bb6a6c7ca331b6fe184bb351fb11186c09f29e2d71"
     },
     "exllamav3_ext/gdn.cuh": {
       "pre": "c64e35c29d7ebc40b7b10b64d4015dff7a5ab1409865f7ebf8cd38a903ab05fd",
-      "post": "3f3a4105cabd538a20af47229cf179b136d2e0b9eccb3396adf808a57a6d1bbc"
+      "post": "8f225ec744a5f086cb77fdfe7d21f50eb1c00b9b2f8acbf03ed602f9fb6527df"
+    },
+    "exllamav3_ext/gdn_ba_ksplit_op.cpp": {
+      "pre": null,
+      "post": "6f222e6cf86cbf24b255567c84d665d3bbcb9ef5a7396361d20d803af21faf1b"
     },
     "exllamav3_ext/graph.cu": {
       "pre": "8e57b2f599df4df9ac7cdd06dd7e175d511e5780b59e9b6f3570c3476f0a7901",
@@ -146,19 +182,19 @@
     },
     "exllamav3_ext/libtorch/attention.cpp": {
       "pre": "78ed122f0cf0a345755a306713ed982137b2bfbee62f6b17cf8bf4b0056427e4",
-      "post": "aec41f9e3642c2df3a6535574a1a879c8b0f7628821aad35082e55145c9f4f18"
+      "post": "771633eb3ffc99f1d388f52b9022d75016b851f8bd86af090657779316170735"
     },
     "exllamav3_ext/libtorch/attention.h": {
       "pre": "628741cc309a351507b09d992c09d8d2972a113afb3ff76e0a6323ed0b0ee4b4",
-      "post": "5e4accef77948417381d74f32fbb83d83dea1e0d7855fa760035decebb37db69"
+      "post": "44e9b6c004c01539b29c0f81e443c04471a2b0b62833aa11e2b794b662e464dc"
     },
     "exllamav3_ext/libtorch/attention_bc.h": {
       "pre": "b007768c5be8f34d8b9765213480c59867cc23784539b5fa2c97d0c235504db5",
-      "post": "fe26c3f654df696c3992955696002fca0896bc558d484d9d2dd0073d174430b0"
+      "post": "bb037b2141ac5416cfe2b509f889ccec62fba59c1fc71e6b4d5cdf29e5ff572f"
     },
     "exllamav3_ext/libtorch/gated_delta_net.cpp": {
       "pre": "d8a31ef61e42ce753f7a9ee2a55c7e25a1c51e0a0a8d148d6058f9d96120dfef",
-      "post": "3926d8138d4a0f76b70cb5adfcd92b6668f7577333afbaf28e9de5b358f7bd46"
+      "post": "2b0e90aeea1257a35f32cae7e0e4a790065dfb8ee4e14e05a66e24ae5d2bf1b8"
     },
     "exllamav3_ext/libtorch/gated_delta_net.h": {
       "pre": "57e460d9e8d5097f647b59b6d20c8be5162386e11ec168ced7903471f4b4205f",
@@ -202,35 +238,35 @@
     },
     "exllamav3_ext/quant/exl3_gemm_m16g.cu": {
       "pre": null,
-      "post": "1fa3e00f6a287c6f9ac56edf2f3be59ea33fc69292f9c9a93ea4d739405f87e8"
+      "post": "aa732db40867e7f1515e446b8cbcb4e91f58ac297c265eb2c5ad02c4a4447f6f"
     },
     "exllamav3_ext/quant/exl3_gemm_m16g.cuh": {
       "pre": null,
-      "post": "dfa3c9551efdbcb1a84b2ab2625a69412aa421639c3ac33eff14cfcc2f25420b"
+      "post": "bcad901949373db8378c912baaf3b89f04eec859c60b4188549c1126f17115a6"
     },
     "exllamav3_ext/quant/exl3_gemm_m16g_kernel.cuh": {
       "pre": null,
-      "post": "3a4ca9a9da1c19ddb6ad58a3cd7dbb62b34c0858c4967d1096fa68e5467ef71f"
+      "post": "2af0472d4ecf9321ea121ef6e87c10bb772b2fafad573a0f01b3ba4c6a9e0bbf"
     },
     "exllamav3_ext/quant/exl3_gemm_m16g_op.cpp": {
       "pre": null,
-      "post": "05deddb90a9095223295b069daaac9e75da457d88f54240a0e1a4fbadcbae0be"
+      "post": "041e2549d8229298303ac01ed8a6a85580bcf779b86aa028a62da2fd58a1d807"
     },
     "exllamav3_ext/quant/exl3_mlp_m16.cu": {
       "pre": null,
-      "post": "e6f4b8c2b8f20e886557a40f00ff3b0a676207855ed23ce1313042fbd26432ef"
+      "post": "d766b4393e9e47cf6e0f631b3003ba373f9e516c1cc1a8418d59a219f45bd677"
     },
     "exllamav3_ext/quant/exl3_mlp_m16.cuh": {
       "pre": null,
-      "post": "40d5cfb08cad3a77dc2af8ab5f62488d5752ace1074c0bcb78189c39b8f0b781"
+      "post": "95a4f74bdcb786f8569d8d0f93c1896ba3690ce55ace62359ea9113364b20023"
     },
     "exllamav3_ext/quant/exl3_mlp_m16_kernel.cuh": {
       "pre": null,
-      "post": "5d1632301a3a33a3b8b4f5ab8e894862a9e8c202319ec9d95ea817af39449602"
+      "post": "294e9ed66dad1ed1ee17ec6840d2a15d25cd90e852b10fb078eda8a46b683d71"
     },
     "exllamav3_ext/quant/exl3_mlp_m16_op.cpp": {
       "pre": null,
-      "post": "0611be25f6fb6b64e2bd6fa8d6677f024a427b73a793d3a8752c9c52dea0d0d9"
+      "post": "59a959437ece7db484618c02f47518782bf8a2215259ed5c9d7c66b9ddae14c7"
     },
     "exllamav3_ext/quant/exl3_mlp_m16_sched.h": {
       "pre": null,
@@ -238,7 +274,7 @@
     },
     "exllamav3_ext/quant/exl3_tail_m16.cu": {
       "pre": null,
-      "post": "7f74d5a4449a8c34a581e71f5831384021e4d52649ee197d071cc96c561318de"
+      "post": "2993d13dfa188daf4792453034e20a694b100050c6524b7201d54632f04c2f19"
     },
     "exllamav3_ext/quant/exl3_tail_m16.cuh": {
       "pre": null,
@@ -246,7 +282,7 @@
     },
     "exllamav3_ext/quant/exl3_tail_m16_kernel.cuh": {
       "pre": null,
-      "post": "bc5f0a7d896cb8c7ccef6f3a3c97ae65db9d7a4d07403310f53ac45205381226"
+      "post": "6e3e5a6a53602f68ec601e95130b0caf6e99922f6a9be9cc0e16e24e95bb6f36"
     },
     "exllamav3_ext/quant/exl3_tail_m16_op.cpp": {
       "pre": null,
