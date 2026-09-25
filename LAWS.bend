@@ -39,3 +39,6 @@ import ./bend/gemm_m16_group_laws.bend as GemmM16GroupLaws
 # maps, exactly-once coverage, conv channel ownership and the conv_sync handshake over the Nat model
 # bend/gdn_fast.bend (reference bend/gdn_fast_spec.bend; routine tied to bend/gdn_replay.bend).
 import ./bend/gdn_fast_laws.bend as GdnFastLaws
+# DFlash2 draft attention mask (exl3 patch 0005): config -> _normalize_window -> GQA split kernel
+# window start and mask (bend/draft_mask.bend) against the z-lab reference (bend/draft_mask_spec.bend).
+import ./bend/draft_mask_laws.bend as DraftMaskLaws

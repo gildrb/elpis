@@ -1,0 +1,80 @@
+--- a/architecture/dflash.py
++++ b/architecture/dflash.py
+@@ -1,5 +1,7 @@
+ from __future__ import annotations
+ from typing_extensions import override
++import os
++import re
+ import torch
+ 
+ from ..cache import Cache
+@@ -16,6 +18,36 @@
+ 
+ # TODO: Support DFlash models trained in Speculators (includes lm_head for speculator with limited vocabulary?)
+ 
++# DFlash2 draft attention mask (litos patch 0005-draft-block-mask). The reference drafter
++# (z-lab dflash/model.py, _attention_mask) lets key k be seen by query q iff q - k < W and, for a
++# non-causal checkpoint (config is_causal false), k - q < W; a causal one (is_causal true, or
++# absent on a sliding_attention layer) adds k <= q. The paged kernels keep key n for query q iff
++# n >= q - left and (right < 0 or n <= q + right), so the reference mask is exactly (W - 1, W - 1)
++# or, causal, (W - 1, 0). EXL3_DFLASH2_WINDOW overrides W; every other combination fails closed.
++DFLASH2_ARCH = "DFlash2DraftModel"
++DFLASH2_WINDOW_ENV = "EXL3_DFLASH2_WINDOW"
++DFLASH2_WINDOW_MAX = 1 << 30
++
++
++def dflash2_kernel_window(window: int, is_causal: bool | None, layer_types: list) -> tuple[int, int]:
++    kinds = set(layer_types)
++    if not kinds <= {"sliding_attention", "full_attention"}:
++        raise ValueError(f"DFlash2: unsupported layer_types {sorted(kinds)}")
++    if "full_attention" in kinds and is_causal:
++        raise ValueError("DFlash2: causal full_attention layers are not expressible (the engine runs them bidirectional)")
++    raw = os.environ.get(DFLASH2_WINDOW_ENV)
++    if raw is not None:
++        if "sliding_attention" not in kinds:
++            raise ValueError(f"{DFLASH2_WINDOW_ENV} is set but the draft has no sliding_attention layer")
++        if re.fullmatch(r"[1-9][0-9]*", raw) is None:
++            raise ValueError(f"{DFLASH2_WINDOW_ENV} must be a positive decimal integer, got {raw!r}")
++        window = int(raw)
++    if type(window) is not int or not 1 <= window <= DFLASH2_WINDOW_MAX:
++        raise ValueError(f"DFlash2: sliding window {window!r} outside [1, {DFLASH2_WINDOW_MAX}]")
++    causal = True if is_causal is None else is_causal
++    return (window - 1, 0 if causal else window - 1)
++
++
+ class DFlashConfig(Config):
+     arch_string = "DFlashDraftModel"
+ 
+@@ -57,6 +89,9 @@
+         # self.num_target_layers = self.read_cfg(int, "num_target_layers", no_default)
+         self.layer_types = self.read_cfg(list, "layer_types", ["full_attention"] * self.num_hidden_layers)
+         self.sliding_window = self.read_cfg(int, "sliding_window", 2048)
++        if self.arch_string == DFLASH2_ARCH:
++            self.sliding_window = dflash2_kernel_window(
++                self.sliding_window, self.read_cfg(bool, "is_causal", None), self.layer_types)
+ 
+         # DFlash. Config keys live under dflash_config-> in the original release, at the top
+         # level in later ones (MuseGlimmerAssistant)
+--- a/modules/attn.py
++++ b/modules/attn.py
+@@ -852,6 +852,9 @@
+         seqlen: int,
+         params: dict,
+     ):
++        # A (left, right) window (DFlash2 draft block mask) is only expressed by the BC kernels
++        if isinstance(self.sliding_window, tuple):
++            raise ValueError(f"Attention: window {self.sliding_window} requires the paged BC decode path")
+         causal = params.get("causal", True)
+         position = params.get("position", 0)
+         positions = get_for_device(params, "positions", self.device, None)
+@@ -1072,6 +1075,10 @@
+                                   host_seqlens = qsa_seqlens_cpu)
+             if o is not None:
+                 return o
++        # A (left, right) window (DFlash2 draft block mask) is only expressed by the BC kernels:
++        # the dispatch backends below read an int window as (window, 0)
++        if isinstance(self.sliding_window, tuple):
++            raise ValueError(f"Attention: window {self.sliding_window} requires the paged BC decode path")
+ 
+         if self.qsa_indexer is not None:
+             qsa_q_idx = self.qsa_indexer.update_planes(qsa_layer, x, self.rope, block_table, qsa_seqlens_cpu, params)

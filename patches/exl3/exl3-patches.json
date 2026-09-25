@@ -6,7 +6,7 @@
     "revision": "355c6ee10fbd25b79070316a81ea0708cc18155a",
     "root": "/opt/venv/lib/python3.13/site-packages/exllamav3"
   },
-  "series_sha256": "c9d99326dc59f7903a34537f2bb857f3380ecef208c5c1cdc34574b10fc06cb7",
+  "series_sha256": "00a648948426e5706bb9d41e25ee2f0efc8004e6ad5a3cc9bd9c49a4f2ddf221",
   "patches": [
     {
       "name": "0001-greedy-batched-verify.patch",
@@ -19,6 +19,10 @@
     {
       "name": "0003-draft-graph.patch",
       "sha256": "5b361f784ffa56d15e3f9b727eeaa89b3f91799298ca89e48743e122dc939df6"
+    },
+    {
+      "name": "0005-draft-block-mask.patch",
+      "sha256": "0ffcbeb53807b38d7129b2198f55bddb616370740b3b6ce0527a0ed2270b6d8d"
     }
   ],
   "files": {
@@ -37,6 +41,14 @@
     "modules/arch_specific/dflash.py": {
       "pre": "fd97c97ebec458b9827c00134d34354b0528ae905a49fdcb9e87a46fb258c8b8",
       "post": "3d5f817728caf105a09daf7da3953fb2051d47549b928de059d1147ac7c316f0"
+    },
+    "architecture/dflash.py": {
+      "pre": "283b8cbeec0c96be45d4665171824a82bf05fa40f7ee80f342dc17c878689a6a",
+      "post": "c9ae7d7950936687168c89ae8441bf547118f740da8962ea48844402dde2250f"
+    },
+    "modules/attn.py": {
+      "pre": "13f8f46ca5cf2cc434c404b9f23a92c76e74c99af69027e9b0f28adb228e018a",
+      "post": "92075ee1f8890c014fbf9fb62fecb705dba793ac96dbd794c1d399e284034c26"
     }
   },
   "acceptor": {
