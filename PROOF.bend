@@ -15,3 +15,5 @@ import ./bend/attn_bounds_proof.bend as AttnBoundsProof
 import ./bend/gemm_m16_group_proof.bend as GemmM16GroupProof
 import ./bend/gdn_fast_proof.bend as GdnFastProof
 import ./bend/draft_mask_proof.bend as DraftMaskProof
+import ./bend/attn_chunk_proof.bend as AttnChunkProof
+import ./bend/attn_chunk_bounds_proof.bend as AttnChunkBoundsProof

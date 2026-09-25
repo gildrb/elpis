@@ -42,3 +42,12 @@ import ./bend/gdn_fast_laws.bend as GdnFastLaws
 # DFlash2 draft attention mask (exl3 patch 0005): config -> _normalize_window -> GQA split kernel
 # window start and mask (bend/draft_mask.bend) against the z-lab reference (bend/draft_mask_spec.bend).
 import ./bend/draft_mask_laws.bend as DraftMaskLaws
+# Verify attention as shipped by ext patch 3003 (fixed absolute kv chunks, attn_verify.cu): exactly-once
+# causal coverage, one store per live chunk, row invariance (a row's tiles, chunks and combine list
+# depend only on its absolute position) over the Nat model bend/attn_chunk.bend; supersedes the
+# round-relative split modelled by bend/attn_split.bend.
+import ./bend/attn_chunk_laws.bend as AttnChunkLaws
+# ext 3003 buffers: split stores / combine reads are the row-major cells inside the checked sizes, the
+# traps never fire, the host allocation (max of the 3004 dense size and the 3003 size) passes the checks,
+# tiles stay inside one page (bend/attn_chunk_bounds.bend).
+import ./bend/attn_chunk_bounds_laws.bend as AttnChunkBoundsLaws
