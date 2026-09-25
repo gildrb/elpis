@@ -290,8 +290,8 @@ The largest remaining losses per step at short depth:
 
 **Open items:**
 - 8202 schedule laws: the baked header is byte-identical to
-  `TAIL_M16_SCHED_TABLE.bend` output, but four laws are still unproven, so the
-  module is not yet wired into `LAWS.bend`/`PROOF.bend`.
+  `TAIL_M16_SCHED_TABLE.bend` output, but four laws were still unproven at the end of
+  segment 4. They are proven and wired in segment 5 (see §5).
 - Measured and dropped:
   - device-side acceptance with speculative next draft (+0.35 %, flat);
   - one whole-target CUDA graph (−4.2 %);
@@ -339,12 +339,25 @@ removes, so it applies only to trees before 3006. The attn_chunk laws stay in th
 the model of the removed partition, as attn_split did when 3003 replaced it.
 `bend/attn_stride_diff.py` is the differential for the current tree.
 
+**8202 schedule laws.** `bend/tail_m16_sched*.bend` are wired into `LAWS.bend`/`PROOF.bend`.
+The four laws left open in segment 4 (`mc0_served`, `f0_partials_once`,
+`norm_reads_partials`, `norm_cells_once`) are proven. `mc0_served` uses a scaling lemma so
+the checker evaluates the owner bound at total 960 and G 41 instead of the served 3840 and
+164. `bend/tail_m16_sched_diff.py` extracts the baked `exl3_tail_m16_sched.h` from the
+committed 8202 patch and compares it byte for byte with the Bend table output.
+
 **Measured and dropped in this segment:**
 - 5102, the GDN commit replay folded into the next verify. Bit-exact, but the GDN part of
   a round grew 0.5-0.75 ms (a 3 MB state write per layer inside a latency-bound 48-SM
   kernel), against 0.49 ms of replay removed.
 - 2103, the m16g projection without grid barriers. Bit-exact but slower: 79 against
-  70 µs per GDN launch. The weight stream alone already takes 70 µs: the same blocks
-  stream up to 25 % slower than the median in every launch and layer, so the slowest
-  blocks set the end of each streaming phase. Whether this follows the SM or the address
-  slice is still being measured.
+  70 µs per GDN launch. Its slow blocks are the ones whose slice crosses a group
+  boundary, where 2103 added a mid-loop fence. It is not SM speed: blockIdx lands on the
+  same SM in every launch, and a plain stream of equal contiguous slices runs every SM
+  within 2.5 % of the median at 811 GB/s. In 2102 the loop itself streams at ~95 % of the
+  DRAM rate; the time goes to the kernel start (~12 µs, the input loads queue behind the
+  weight-ring prologue), the finish (~5 µs) and the launch ramp (~5 µs).
+- 8203, dataflow counters instead of the 8202 tail's barriers A/B/C. Bit-exact but
+  +1.6 µs per layer. Its stamps show where the tail's time goes: 217 µs per layer against
+  a 170 µs DRAM floor, with block spreads of 7.7 / 30 / 20 µs at the ends of the o_proj,
+  gate+up and down loops.

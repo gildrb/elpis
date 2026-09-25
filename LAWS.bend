@@ -69,3 +69,5 @@ import ./bend/spec_inv_laws.bend as SpecInvLaws
 import ./bend/attn_stride_laws.bend as AttnStrideLaws
 # ext 3006 buffers: stores / reads inside the checked sizes, host allocation fits, tiles in one page and in the table, traps never fire.
 import ./bend/attn_stride_bounds_laws.bend as AttnStrideBoundsLaws
+# ext 8202 layer tail (o_proj split-K + F0/N norm jobs + 8201 MLP, one launch; bend/tail_m16_sched.bend): phase-0 v2 partition, ring, jobs once, barrier order.
+import ./bend/tail_m16_sched_laws.bend as TailM16SchedLaws
