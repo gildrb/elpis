@@ -1,0 +1,941 @@
+--- /dev/null
++++ b/exllamav3_ext/attn_verify.cuh
+@@ -0,0 +1,80 @@
++#pragma once
++
++// Target-model verify attention over the CQ (2..7-bit) paged cache, head_dim 256, up to 6 query
++// heads per kv head x up to 8 query positions (48 MMA rows per kv head).
++//
++// Split kernel: gridDim.x CTAs per (kv head, batch). The kv positions are cut into fixed absolute
++// chunks of `chunk` tokens (a multiple of AV_T, fixed per slot): chunk c covers [c * chunk,
++// (c + 1) * chunk) of every sequence, whatever the round's live length L, and CTA x processes the
++// live chunks x, x + gridDim.x, ... (one partial per chunk). Every K/V tile is dequantized once per
++// CTA straight into mma.m16n8k16 fragments (fp16 x fp16 -> fp32) and serves all 48 rows.
++// Combine kernel: exact log-sum-exp merge of the live chunks in chunk order, H32 back-rotation.
++// A verify row's result depends only on its absolute position and the cache contents: its chunk
++// boundaries, tile starts, visible positions and combine order do not depend on the round's start
++// or row count (bend/attn_split_laws.bend: row_invariant, store_in_bounds).
++
++#include <cuda_runtime.h>
++#include <cuda_fp16.h>
++#include <stdint.h>
++
++#define AV_HD 256          // head dim
++#define AV_ROWS 48         // 6 heads x 8 query positions
++#define AV_QPOS 8          // query positions per head block (row = head_local * 8 + q_pos)
++#define AV_NW 8            // warps per split CTA
++#define AV_T 64            // kv tokens per tile (divides the 256-token page)
++#define AV_STAGES 3
++#define AV_PAGE 256
++
++// Live chunks (modelled in bend/attn_split.bend): ceil(L / chunk); chunks at or above it hold no
++// position of the round
++__host__ __device__ inline int av_live_chunks(int L, int chunk)
++{
++    return (L + chunk - 1) / chunk;
++}
++
++// Dynamic shared memory of the split kernel for (k_bits, v_bits)
++__host__ __device__ inline int av_smem_bytes(int kb, int vb)
++{
++    int q = AV_ROWS * (AV_HD + 8) * 2;
++    int p = AV_ROWS * (AV_T + 8) * 2;
++    int red = 2 * AV_NW * AV_ROWS * 4;
++    int stage = AV_T * ((8 * kb + 4) + (8 * vb + 4)) * 4;
++    return q + p + red + AV_STAGES * stage;
++}
++
++#define AV_SPLIT_ARGS \
++    const half* __restrict__ q, \
++    const uint32_t* __restrict__ k_cache, \
++    const uint32_t* __restrict__ v_cache, \
++    const half* __restrict__ k_scales, \
++    const half* __restrict__ v_scales, \
++    const half* __restrict__ h32, \
++    const int* __restrict__ block_table, \
++    const int* __restrict__ cache_seqlens, \
++    float* __restrict__ partial_o, \
++    float* __restrict__ partial_ml, \
++    int num_pages_per_seq, \
++    int q_len, \
++    int n_q_heads, \
++    int n_kv_heads, \
++    float scale_log2, \
++    int chunk, \
++    int max_chunks
++
++#define AV_COMBINE_ARGS \
++    const float* __restrict__ partial_o, \
++    const float* __restrict__ partial_ml, \
++    const half* __restrict__ h32, \
++    const int* __restrict__ cache_seqlens, \
++    half* __restrict__ out, \
++    int max_chunks, \
++    int q_len, \
++    int n_q_heads, \
++    int n_kv_heads, \
++    int chunk
++
++#ifdef __CUDACC__
++extern "C" __global__ void attn_verify_split_k3v3(AV_SPLIT_ARGS);
++extern "C" __global__ void attn_verify_split_k4v4(AV_SPLIT_ARGS);
++extern "C" __global__ void attn_verify_combine(AV_COMBINE_ARGS);
++#endif
+--- /dev/null
++++ b/exllamav3_ext/attn_verify.cu
+@@ -0,0 +1,515 @@
++#include "attn_verify.cuh"
++#include <math_constants.h>
++
++// See attn_verify.cuh. Fragment conventions (mma.m16n8k16.row.col, lane = 4 * gid + t):
++//   A (16x16, row-major): a0 = (gid, 2t..2t+1), a1 = (gid+8, 2t..), a2 = (gid, 2t+8..), a3 = (gid+8, 2t+8..)
++//   B (16x8, [k][n]):     b0 = (k 2t..2t+1, n gid), b1 = (k 2t+8..2t+9, n gid)
++//   C (16x8 fp32):        c0,c1 = (gid, 2t..2t+1), c2,c3 = (gid+8, 2t..2t+1)
++// Rows: row = 16 * mtile + 8 * half + gid = 8 * head_local + q_pos, so q_pos = gid for every row a
++// thread touches, and head_local = 2 * mtile + half.
++
++namespace {
++
++constexpr int QSTR = AV_HD + 8;   // Q smem row stride (halves): conflict-free ldmatrix
++constexpr int PSTR = AV_T + 8;    // P smem row stride (halves)
++
++template <int BITS> struct Geo
++{
++    static constexpr int WPT = 8 * BITS;          // words per token per kv head (8 groups of 32)
++    static constexpr int ROWW = WPT + 4;          // smem words per token: words + 8 fp16 scales
++    static constexpr int CHUNKS = 2 * BITS + 1;   // 16-byte chunks per token (words, scales)
++};
++
++// Word base of plane W within a group: planes are stored in descending width (8, 4, 2, 1)
++template <int BITS, int W> __device__ constexpr int plane_base()
++{
++    int pb = 0;
++    if (W < 8 && (BITS & 8)) pb += 8;
++    if (W < 4 && (BITS & 4)) pb += 4;
++    if (W < 2 && (BITS & 2)) pb += 2;
++    return pb;
++}
++
++// Raw codes of values j and j + 1 (j even) of one 32-value group whose words start at gw
++template <int BITS, int W>
++__device__ __forceinline__ void plane_pair(const uint32_t* gw, int j, uint32_t& r0, uint32_t& r1)
++{
++    if constexpr ((BITS & W) != 0)
++    {
++        constexpr int PB = plane_base<BITS, W>();
++        constexpr int VPW = 32 / W;
++        constexpr uint32_t M = (1u << W) - 1u;
++        uint32_t x = gw[PB + j / VPW] >> ((j % VPW) * W);
++        r0 = (r0 << W) | (x & M);
++        r1 = (r1 << W) | ((x >> W) & M);
++    }
++}
++
++template <int BITS, int W>
++__device__ __forceinline__ void plane_one(const uint32_t* gw, int j, uint32_t& r)
++{
++    if constexpr ((BITS & W) != 0)
++    {
++        constexpr int PB = plane_base<BITS, W>();
++        constexpr int VPW = 32 / W;
++        constexpr uint32_t M = (1u << W) - 1u;
++        r = (r << W) | ((gw[PB + j / VPW] >> ((j % VPW) * W)) & M);
++    }
++}
++
++// Exact centered code: bit pattern 0x4A800000 | (raw << 1) is 2^22 + raw; minus 2^22 + mh (exact)
++template <int BITS> __device__ __forceinline__ float centered(uint32_t raw)
++{
++    constexpr float BIAS = 4194304.0f + ((float) (1 << (BITS - 1)) - 0.5f);
++    return __fsub_rn(__uint_as_float((raw << 1) | 0x4A800000u), BIAS);
++}
++
++// Group scale times 2^-(BITS-1), in fp32 (exact)
++template <int BITS> __device__ __forceinline__ float group_scale(half s)
++{
++    return __fmul_rn(__half2float(s), 1.0f / (float) (1 << (BITS - 1)));
++}
++
++// (value j, value j + 1) of a group as a half2, each fp16(centered * scale): the 3001 dequant
++template <int BITS>
++__device__ __forceinline__ uint32_t deq_pair(const uint32_t* gw, int j, float scf)
++{
++    uint32_t r0 = 0, r1 = 0;
++    plane_pair<BITS, 8>(gw, j, r0, r1);
++    plane_pair<BITS, 4>(gw, j, r0, r1);
++    plane_pair<BITS, 2>(gw, j, r0, r1);
++    plane_pair<BITS, 1>(gw, j, r0, r1);
++    half2 h = __floats2half2_rn(__fmul_rn(centered<BITS>(r0), scf), __fmul_rn(centered<BITS>(r1), scf));
++    return *reinterpret_cast<uint32_t*>(&h);
++}
++
++template <int BITS>
++__device__ __forceinline__ float deq_one(const uint32_t* gw, int j, float scf)
++{
++    uint32_t r = 0;
++    plane_one<BITS, 8>(gw, j, r);
++    plane_one<BITS, 4>(gw, j, r);
++    plane_one<BITS, 2>(gw, j, r);
++    plane_one<BITS, 1>(gw, j, r);
++    return __fmul_rn(centered<BITS>(r), scf);
++}
++
++__device__ __forceinline__ uint32_t pack_h2(float lo, float hi)
++{
++    half2 h = __floats2half2_rn(lo, hi);
++    return *reinterpret_cast<uint32_t*>(&h);
++}
++
++__device__ __forceinline__ void mma16816(float* c, const uint32_t* a, uint32_t b0, uint32_t b1)
++{
++    asm volatile(
++        "mma.sync.aligned.m16n8k16.row.col.f32.f16.f16.f32 {%0,%1,%2,%3}, {%4,%5,%6,%7}, {%8,%9}, {%0,%1,%2,%3};\n"
++        : "+f"(c[0]), "+f"(c[1]), "+f"(c[2]), "+f"(c[3])
++        : "r"(a[0]), "r"(a[1]), "r"(a[2]), "r"(a[3]), "r"(b0), "r"(b1));
++}
++
++__device__ __forceinline__ void ldsm_x4(uint32_t* r, const void* p)
++{
++    uint32_t a = (uint32_t) __cvta_generic_to_shared(p);
++    asm volatile("ldmatrix.sync.aligned.m8n8.x4.shared.b16 {%0,%1,%2,%3}, [%4];\n"
++                 : "=r"(r[0]), "=r"(r[1]), "=r"(r[2]), "=r"(r[3]) : "r"(a));
++}
++
++__device__ __forceinline__ void cp_async16(void* s, const void* g, bool valid)
++{
++    uint32_t a = (uint32_t) __cvta_generic_to_shared(s);
++    int n = valid ? 16 : 0;   // zero-fill past the live range: no global read, K = V = 0
++    asm volatile("cp.async.cg.shared.global [%0], [%1], 16, %2;\n" :: "r"(a), "l"(g), "r"(n));
++}
++
++__device__ __forceinline__ void cp_commit() { asm volatile("cp.async.commit_group;\n" ::); }
++
++template <int N> __device__ __forceinline__ void cp_wait() { asm volatile("cp.async.wait_group %0;\n" :: "n"(N)); }
++
++__device__ __forceinline__ float ex2(float x)
++{
++    float y;
++    asm("ex2.approx.ftz.f32 %0, %1;" : "=f"(y) : "f"(x));
++    return y;
++}
++
++#define NEG_INF (-CUDART_INF_F)
++
++// Stage one tile (AV_T tokens starting at n0, one page) of K and V words + scales into smem
++template <int KB, int VB>
++__device__ __forceinline__ void load_tile(
++    uint32_t* sk, const uint32_t* k_cache, const uint32_t* v_cache,
++    const half* k_scales, const half* v_scales,
++    int row0, int n_valid, int kvh, int n_kv_heads, int tid)
++{
++    uint32_t* sv = sk + AV_T * Geo<KB>::ROWW;
++    constexpr int CK = Geo<KB>::CHUNKS;
++    constexpr int CV = Geo<VB>::CHUNKS;
++    #pragma unroll 1
++    for (int c = tid; c < AV_T * (CK + CV); c += AV_NW * 32)
++    {
++        bool is_v = c >= AV_T * CK;
++        int cc = is_v ? c - AV_T * CK : c;
++        int C = is_v ? CV : CK;
++        int bits = is_v ? VB : KB;
++        int tok = cc / C;
++        int ch = cc - tok * C;
++        bool valid = tok < n_valid;
++        size_t row = (size_t) (row0 + (valid ? tok : 0));
++        const void* src;
++        if (ch < 2 * bits)
++            src = (is_v ? v_cache : k_cache) + row * (n_kv_heads * 8 * bits) + kvh * 8 * bits + ch * 4;
++        else
++            src = (is_v ? v_scales : k_scales) + row * (n_kv_heads * 8) + kvh * 8;
++        uint32_t* dst = (is_v ? sv + tok * Geo<VB>::ROWW : sk + tok * Geo<KB>::ROWW) + ch * 4;
++        cp_async16(dst, src, valid);
++    }
++}
++
++template <int KB, int VB>
++__device__ __forceinline__ void split_body(AV_SPLIT_ARGS)
++{
++    extern __shared__ __align__(16) unsigned char smem[];
++    half* qs = (half*) smem;                                  // [48][QSTR] H32-rotated q
++    half* ps = qs + AV_ROWS * QSTR;                           // [48][PSTR] fp16 p
++    float* red_max = (float*) (ps + AV_ROWS * PSTR);          // [NW][48]
++    float* red_sum = red_max + AV_NW * AV_ROWS;               // [NW][48]
++    uint32_t* stages = (uint32_t*) (red_sum + AV_NW * AV_ROWS);
++    constexpr int STAGE_WORDS = AV_T * (Geo<KB>::ROWW + Geo<VB>::ROWW);
++
++    const int kvh = blockIdx.y;
++    const int b = blockIdx.z;
++    const int tid = threadIdx.x;
++    const int warp = tid >> 5;
++    const int lane = tid & 31;
++    const int gid = lane >> 2;
++    const int t = lane & 3;
++    const int group = n_q_heads / n_kv_heads;
++
++    // Fixed absolute chunks: chunk c = [c * chunk, (c + 1) * chunk) clipped to the live length L;
++    // this CTA processes the live chunks blockIdx.x, blockIdx.x + gridDim.x, ... in turn
++    const int L = cache_seqlens[b] + q_len;
++    const int n_chunks = av_live_chunks(L, chunk);
++    if (n_chunks > max_chunks) __trap();                      // fail closed: partials cannot hold the round
++    int c = blockIdx.x;
++    if (c >= n_chunks) return;                                // no live chunk for this CTA
++    int n_start = c * chunk;
++    int n_end = min(n_start + chunk, L);
++    int ntiles = (n_end - n_start + AV_T - 1) / AV_T;
++    const int* bt = block_table + (size_t) b * num_pages_per_seq;
++
++    auto issue = [&] (int it)
++    {
++        int n0 = n_start + it * AV_T;
++        int row0 = bt[n0 / AV_PAGE] * AV_PAGE + (n0 % AV_PAGE);
++        load_tile<KB, VB>(stages + (it % AV_STAGES) * STAGE_WORDS, k_cache, v_cache, k_scales, v_scales,
++                          row0, n_end - n0, kvh, n_kv_heads, tid);
++    };
++
++    #pragma unroll
++    for (int s = 0; s < AV_STAGES - 1; ++s)
++    {
++        if (s < ntiles) issue(s);
++        cp_commit();
++    }
++
++    // Q prologue: rows (head_local, q_pos) of this kv head, H32-rotated per 32-dim group with the
++    // fp16 x fp16 -> fp32 MMA (k = 32 in two k16 steps, as the Triton _rot_h32 dot), rounded to fp16
++    {
++        uint32_t hb[4][2][2];
++        #pragma unroll
++        for (int nt = 0; nt < 4; ++nt)
++            #pragma unroll
++            for (int ks = 0; ks < 2; ++ks)
++                #pragma unroll
++                for (int hh = 0; hh < 2; ++hh)
++                {
++                    int k = 16 * ks + 8 * hh + 2 * t;
++                    int n = 8 * nt + gid;
++                    half2 v = __halves2half2(h32[k * 32 + n], h32[(k + 1) * 32 + n]);
++                    hb[nt][ks][hh] = *reinterpret_cast<uint32_t*>(&v);
++                }
++        #pragma unroll 1
++        for (int item = warp; item < 3 * 8; item += AV_NW)
++        {
++            int mt = item >> 3;
++            int g = item & 7;
++            uint32_t a[2][4];
++            #pragma unroll
++            for (int hr = 0; hr < 2; ++hr)
++            {
++                int hl = 2 * mt + hr;
++                bool valid = gid < q_len && hl < group;
++                const half* qr = q + ((size_t) (b * q_len + (valid ? gid : 0)) * n_q_heads + kvh * group + (valid ? hl : 0)) * AV_HD + 32 * g;
++                #pragma unroll
++                for (int ks = 0; ks < 2; ++ks)
++                    #pragma unroll
++                    for (int kh = 0; kh < 2; ++kh)
++                        a[ks][hr + 2 * kh] = valid ? *reinterpret_cast<const uint32_t*>(qr + 16 * ks + 8 * kh + 2 * t) : 0u;
++            }
++            #pragma unroll
++            for (int nt = 0; nt < 4; ++nt)
++            {
++                float c[4] = {0.f, 0.f, 0.f, 0.f};
++                mma16816(c, a[0], hb[nt][0][0], hb[nt][0][1]);
++                mma16816(c, a[1], hb[nt][1][0], hb[nt][1][1]);
++                int col = 32 * g + 8 * nt + 2 * t;
++                *reinterpret_cast<uint32_t*>(qs + (16 * mt + gid) * QSTR + col) = pack_h2(c[0], c[1]);
++                *reinterpret_cast<uint32_t*>(qs + (16 * mt + 8 + gid) * QSTR + col) = pack_h2(c[2], c[3]);
++            }
++        }
++    }
++
++    // Per-thread rows: slot (mt, hr) = row 16 mt + 8 hr + gid; every warp tracks the same (m, l)
++    const int q_abs = L - q_len + gid;                        // causal bound: absolute position of the row
++    bool row_ok[6];
++    float m[6], l[6];
++    #pragma unroll
++    for (int s = 0; s < 6; ++s) row_ok[s] = gid < q_len && s < group;   // head_local = 2 mt + hr = slot
++
++    #pragma unroll 1
++    for (;;)
++    {
++        #pragma unroll
++        for (int s = 0; s < 6; ++s)
++        {
++            m[s] = NEG_INF;
++            l[s] = 0.f;
++        }
++        float acc[3][4][4];
++        #pragma unroll
++        for (int i = 0; i < 3; ++i)
++            #pragma unroll
++            for (int j = 0; j < 4; ++j)
++                #pragma unroll
++                for (int e = 0; e < 4; ++e) acc[i][j][e] = 0.f;
++
++        #pragma unroll 1
++        for (int it = 0; it < ntiles; ++it)
++        {
++            cp_wait<AV_STAGES - 2>();
++            __syncthreads();                                      // (A) tile it staged; tile it-1 done
++            if (it + AV_STAGES - 1 < ntiles) issue(it + AV_STAGES - 1);
++            cp_commit();
++
++            const uint32_t* sk = stages + (it % AV_STAGES) * STAGE_WORDS;
++            const uint32_t* sv = sk + AV_T * Geo<KB>::ROWW;
++            const int n0 = n_start + it * AV_T;
++
++            // S = Q K^T for this warp's 8 tokens (tile-local warp * 8 + gid) x 48 rows
++            float sc[3][4];
++            #pragma unroll
++            for (int i = 0; i < 3; ++i)
++                #pragma unroll
++                for (int c = 0; c < 4; ++c) sc[i][c] = 0.f;
++            {
++                const uint32_t* kt = sk + (warp * 8 + gid) * Geo<KB>::ROWW;
++                const half* ksc = reinterpret_cast<const half*>(kt + Geo<KB>::WPT);
++                #pragma unroll
++                for (int g = 0; g < 8; ++g)
++                {
++                    float scf = group_scale<KB>(ksc[g]);
++                    #pragma unroll
++                    for (int h = 0; h < 2; ++h)
++                    {
++                        uint32_t b0 = deq_pair<KB>(kt + g * KB, 16 * h + 2 * t, scf);
++                        uint32_t b1 = deq_pair<KB>(kt + g * KB, 16 * h + 8 + 2 * t, scf);
++                        #pragma unroll
++                        for (int i = 0; i < 3; ++i)
++                        {
++                            uint32_t a[4];
++                            ldsm_x4(a, qs + (16 * i + (lane & 15)) * QSTR + 32 * g + 16 * h + (lane >> 4) * 8);
++                            mma16816(sc[i], a, b0, b1);
++                        }
++                    }
++                }
++            }
++
++            // Mask (row validity, live range, causal), log2-domain scores, warp row max
++            const int tok0 = n0 + warp * 8 + 2 * t;
++            float x[6][2];
++            #pragma unroll
++            for (int i = 0; i < 3; ++i)
++                #pragma unroll
++                for (int hr = 0; hr < 2; ++hr)
++                    #pragma unroll
++                    for (int e = 0; e < 2; ++e)
++                    {
++                        int tok = tok0 + e;
++                        bool ok = row_ok[2 * i + hr] && tok < n_end && tok <= q_abs;
++                        x[2 * i + hr][e] = ok ? sc[i][2 * hr + e] * scale_log2 : NEG_INF;
++                    }
++            #pragma unroll
++            for (int s = 0; s < 6; ++s)
++            {
++                float mx = fmaxf(x[s][0], x[s][1]);
++                mx = fmaxf(mx, __shfl_xor_sync(0xffffffffu, mx, 1));
++                mx = fmaxf(mx, __shfl_xor_sync(0xffffffffu, mx, 2));
++                if (t == 0) red_max[warp * AV_ROWS + 8 * s + gid] = mx;
++            }
++            __syncthreads();                                      // (B)
++
++            float alpha[6];
++            #pragma unroll
++            for (int s = 0; s < 6; ++s)
++            {
++                int r = 8 * s + gid;
++                float tmax = red_max[r];
++                #pragma unroll
++                for (int w = 1; w < AV_NW; ++w) tmax = fmaxf(tmax, red_max[w * AV_ROWS + r]);
++                float m_new = fmaxf(m[s], tmax);
++                float m_use = m_new == NEG_INF ? 0.f : m_new;
++                // m unchanged (every token of the tile masked or below the running max): alpha is
++                // exactly 1, so masked tail tiles of a round leave (m, l, acc) bit-identical
++                alpha[s] = m[s] == NEG_INF ? 0.f : (m_new == m[s] ? 1.f : ex2(m[s] - m_use));
++                float p0 = x[s][0] == NEG_INF ? 0.f : ex2(x[s][0] - m_use);
++                float p1 = x[s][1] == NEG_INF ? 0.f : ex2(x[s][1] - m_use);
++                *reinterpret_cast<uint32_t*>(ps + r * PSTR + warp * 8 + 2 * t) = pack_h2(p0, p1);
++                float ssum = p0 + p1;
++                ssum += __shfl_xor_sync(0xffffffffu, ssum, 1);
++                ssum += __shfl_xor_sync(0xffffffffu, ssum, 2);
++                if (t == 0) red_sum[warp * AV_ROWS + r] = ssum;
++                m[s] = m_new;
++            }
++            __syncthreads();                                      // (C)
++
++            #pragma unroll
++            for (int s = 0; s < 6; ++s)
++            {
++                int r = 8 * s + gid;
++                float tsum = red_sum[r];
++                #pragma unroll
++                for (int w = 1; w < AV_NW; ++w) tsum += red_sum[w * AV_ROWS + r];
++                l[s] = l[s] * alpha[s] + tsum;
++            }
++            #pragma unroll
++            for (int i = 0; i < 3; ++i)
++                #pragma unroll
++                for (int j = 0; j < 4; ++j)
++                {
++                    acc[i][j][0] *= alpha[2 * i];
++                    acc[i][j][1] *= alpha[2 * i];
++                    acc[i][j][2] *= alpha[2 * i + 1];
++                    acc[i][j][3] *= alpha[2 * i + 1];
++                }
++
++            // O += P V: this warp owns dims [32 warp, 32 warp + 32) = scale group `warp`
++            #pragma unroll
++            for (int kk = 0; kk < AV_T / 16; ++kk)
++            {
++                uint32_t pa[3][4];
++                #pragma unroll
++                for (int i = 0; i < 3; ++i)
++                    ldsm_x4(pa[i], ps + (16 * i + (lane & 15)) * PSTR + 16 * kk + (lane >> 4) * 8);
++                float vv[4][4];                                   // [token e][n-tile j]
++                #pragma unroll
++                for (int e = 0; e < 4; ++e)
++                {
++                    int tk = 16 * kk + 2 * t + (e & 1) + 8 * (e >> 1);
++                    const uint32_t* vt = sv + tk * Geo<VB>::ROWW;
++                    float scf = group_scale<VB>(reinterpret_cast<const half*>(vt + Geo<VB>::WPT)[warp]);
++                    #pragma unroll
++                    for (int j = 0; j < 4; ++j) vv[e][j] = deq_one<VB>(vt + warp * VB, 8 * j + gid, scf);
++                }
++                #pragma unroll
++                for (int j = 0; j < 4; ++j)
++                {
++                    uint32_t b0 = pack_h2(vv[0][j], vv[1][j]);
++                    uint32_t b1 = pack_h2(vv[2][j], vv[3][j]);
++                    #pragma unroll
++                    for (int i = 0; i < 3; ++i) mma16816(acc[i][j], pa[i], b0, b1);
++                }
++            }
++        }
++        cp_wait<0>();
++
++        // Partials of chunk c: [((b * n_kv_heads + kvh) * max_chunks + c) * 48 + row] x (256 fp32 | (m, l))
++        size_t pbase = ((size_t) (b * n_kv_heads + kvh) * max_chunks + c) * AV_ROWS;
++        #pragma unroll
++        for (int i = 0; i < 3; ++i)
++            #pragma unroll
++            for (int j = 0; j < 4; ++j)
++            {
++                int col = 32 * warp + 8 * j + 2 * t;
++                *reinterpret_cast<float2*>(partial_o + (pbase + 16 * i + gid) * AV_HD + col) = make_float2(acc[i][j][0], acc[i][j][1]);
++                *reinterpret_cast<float2*>(partial_o + (pbase + 16 * i + 8 + gid) * AV_HD + col) = make_float2(acc[i][j][2], acc[i][j][3]);
++            }
++        if (warp == 0 && t == 0)
++            #pragma unroll
++            for (int s = 0; s < 6; ++s)
++                *reinterpret_cast<float2*>(partial_ml + (pbase + 8 * s + gid) * 2) = make_float2(m[s], l[s]);
++
++        c += gridDim.x;
++        if (c >= n_chunks) break;
++        n_start = c * chunk;
++        n_end = min(n_start + chunk, L);
++        ntiles = (n_end - n_start + AV_T - 1) / AV_T;
++        __syncthreads();                                      // stages, p and reductions free for chunk c
++        #pragma unroll
++        for (int s = 0; s < AV_STAGES - 1; ++s)
++        {
++            if (s < ntiles) issue(s);
++            cp_commit();
++        }
++    }   // chunks
++}
++
++} // namespace
++
++extern "C" __global__ void __launch_bounds__(AV_NW * 32, 1) attn_verify_split_k3v3(AV_SPLIT_ARGS)
++{
++    split_body<3, 3>(q, k_cache, v_cache, k_scales, v_scales, h32, block_table, cache_seqlens,
++                     partial_o, partial_ml, num_pages_per_seq, q_len, n_q_heads, n_kv_heads, scale_log2,
++                     chunk, max_chunks);
++}
++
++extern "C" __global__ void __launch_bounds__(AV_NW * 32, 1) attn_verify_split_k4v4(AV_SPLIT_ARGS)
++{
++    split_body<4, 4>(q, k_cache, v_cache, k_scales, v_scales, h32, block_table, cache_seqlens,
++                     partial_o, partial_ml, num_pages_per_seq, q_len, n_q_heads, n_kv_heads, scale_log2,
++                     chunk, max_chunks);
++}
++
++// Combine: one CTA per (row, kv head, batch), thread = output dim. The live chunks are merged in
++// chunk order 0 .. live - 1 with the exact log-sum-exp weights; chunks holding no position the row
++// sees (m = -inf: past the row's absolute position) are skipped, so the merged set is the row's
++// chunks 0 .. q_abs / chunk whatever the round. Then fp16(o) is H32-rotated back (fp32 FMA, fp16 out)
++extern "C" __global__ void __launch_bounds__(AV_HD) attn_verify_combine(AV_COMBINE_ARGS)
++{
++    __shared__ half oh[AV_HD];
++    const int r = blockIdx.x;
++    const int kvh = blockIdx.y;
++    const int b = blockIdx.z;
++    const int d = threadIdx.x;
++    const int group = n_q_heads / n_kv_heads;
++    const int q_pos = r % AV_QPOS;
++    const int hl = r / AV_QPOS;
++    if (q_pos >= q_len || hl >= group) return;
++
++    const int L = cache_seqlens[b] + q_len;
++    const int live = av_live_chunks(L, chunk);
++    if (live > max_chunks) __trap();                          // fail closed (the split kernel traps first)
++    const size_t base = (size_t) (b * n_kv_heads + kvh) * max_chunks * AV_ROWS + r;
++
++    float mmax = NEG_INF;
++    for (int s = 0; s < live; ++s) mmax = fmaxf(mmax, partial_ml[(base + (size_t) s * AV_ROWS) * 2]);
++    float m_use = mmax == NEG_INF ? 0.f : mmax;
++    float acc = 0.f, lsum = 0.f;
++    for (int s = 0; s < live; ++s)
++    {
++        size_t idx = base + (size_t) s * AV_ROWS;
++        float2 ml = *reinterpret_cast<const float2*>(partial_ml + idx * 2);
++        if (ml.x == NEG_INF) continue;
++        float w = ex2(ml.x - m_use);
++        acc = fmaf(partial_o[idx * AV_HD + d], w, acc);
++        lsum = fmaf(ml.y, w, lsum);
++    }
++    oh[d] = __float2half_rn(acc / (lsum == 0.f ? 1.f : lsum));
++    __syncthreads();
++    const int g0 = d & ~31;
++    const int jn = d & 31;
++    float y = 0.f;
++    #pragma unroll
++    for (int i = 0; i < 32; ++i) y = fmaf(__half2float(oh[g0 + i]), __half2float(h32[i * 32 + jn]), y);
++    out[((size_t) (b * q_len + q_pos) * n_q_heads + kvh * group + hl) * AV_HD + d] = __float2half_rn(y);
++}
+--- /dev/null
++++ b/exllamav3_ext/attn_verify_gr.cuh
+@@ -0,0 +1,40 @@
++#pragma once
++
++// Host launchers of the CUDA verify attention (attn_verify.cu) for BC_Attention graphs.
++
++#include <ATen/Tensor.h>
++#include "graph.cuh"
++
++// Bits per value of a quantized paged cache tensor (..., n_kv_heads * 256 / 32 * bits)
++int attn_verify_bits(const at::Tensor& cache, int n_kv_heads);
++
++// Validates the shape and sets the split kernel's dynamic shared memory limit (once per slot)
++void attn_verify_prepare(int bits);
++
++// Split + combine over the paged quantized cache into out (bsz, q_len, n_q_heads, 256): `splits`
++// CTAs per (kv head, batch) over the fixed absolute chunks of `chunk` tokens, partials laid out for
++// max_chunks chunks per (batch, kv head); records the block table, cache_seqlens and block-table
++// width sites when graph is non-null
++void attn_verify_gr
++(
++    const at::Tensor& q,
++    const at::Tensor& cache_k,
++    const at::Tensor& cache_v,
++    const at::Tensor& cache_k_scales,
++    const at::Tensor& cache_v_scales,
++    const at::Tensor& h32,
++    const at::Tensor& block_table,
++    const at::Tensor& cache_seqlens,
++    const at::Tensor& partial_o,
++    const at::Tensor& partial_ml,
++    const at::Tensor& out,
++    int splits,
++    int chunk,
++    int max_chunks,
++    int q_len,
++    int n_q_heads,
++    int n_kv_heads,
++    float scale_log2,
++    cudaStream_t stream,
++    Graph* graph
++);
+--- /dev/null
++++ b/exllamav3_ext/attn_verify_gr.cu
+@@ -0,0 +1,98 @@
++#include "attn_verify_gr.cuh"
++#include "attn_verify.cuh"
++#include <c10/cuda/CUDAGuard.h>
++#include <ATen/cuda/CUDAContext.h>
++#include "util.h"
++#include "util.cuh"
++
++int attn_verify_bits(const at::Tensor& cache, int n_kv_heads)
++{
++    return (int) (cache.size(-1) / (n_kv_heads * (AV_HD / 32)));
++}
++
++static void* split_fn(int bits)
++{
++    TORCH_CHECK(bits == 3 || bits == 4, "attn_verify: no split kernel for this bitrate");
++    return bits == 3 ? (void*) attn_verify_split_k3v3 : (void*) attn_verify_split_k4v4;
++}
++
++void attn_verify_prepare(int bits)
++{
++    cuda_check(cudaFuncSetAttribute(split_fn(bits), cudaFuncAttributeMaxDynamicSharedMemorySize,
++                                    av_smem_bytes(bits, bits)));
++}
++
++void attn_verify_gr
++(
++    const at::Tensor& q,
++    const at::Tensor& cache_k,
++    const at::Tensor& cache_v,
++    const at::Tensor& cache_k_scales,
++    const at::Tensor& cache_v_scales,
++    const at::Tensor& h32,
++    const at::Tensor& block_table,
++    const at::Tensor& cache_seqlens,
++    const at::Tensor& partial_o,
++    const at::Tensor& partial_ml,
++    const at::Tensor& out,
++    int splits,
++    int chunk,
++    int max_chunks,
++    int q_len,
++    int n_q_heads,
++    int n_kv_heads,
++    float scale_log2,
++    cudaStream_t stream,
++    Graph* graph
++)
++{
++    int bits = attn_verify_bits(cache_k, n_kv_heads);
++    TORCH_CHECK(attn_verify_bits(cache_v, n_kv_heads) == bits, "attn_verify: K and V bitrates differ");
++    void* fn = split_fn(bits);
++    int bsz = (int) block_table.size(0);
++
++    const half* q_ptr = (const half*) q.data_ptr();
++    const uint32_t* k_ptr = (const uint32_t*) cache_k.data_ptr();
++    const uint32_t* v_ptr = (const uint32_t*) cache_v.data_ptr();
++    const half* ks_ptr = (const half*) cache_k_scales.data_ptr();
++    const half* vs_ptr = (const half*) cache_v_scales.data_ptr();
++    const half* h32_ptr = (const half*) h32.data_ptr();
++    const int* bt_ptr = (const int*) block_table.data_ptr();
++    const int* sl_ptr = (const int*) cache_seqlens.data_ptr();
++    float* po_ptr = (float*) partial_o.data_ptr();
++    float* pml_ptr = (float*) partial_ml.data_ptr();
++    half* out_ptr = (half*) out.data_ptr();
++    int num_pages = (int) block_table.size(1);
++    TORCH_CHECK(chunk > 0 && chunk % AV_T == 0, "attn_verify: chunk must be a positive multiple of 64");
++    TORCH_CHECK((int64_t) max_chunks * chunk >= (int64_t) num_pages * AV_PAGE,
++                "attn_verify: partials hold fewer chunks than the block table spans");
++
++    void* split_args[] =
++    {
++        &q_ptr, &k_ptr, &v_ptr, &ks_ptr, &vs_ptr, &h32_ptr, &bt_ptr, &sl_ptr, &po_ptr, &pml_ptr,
++        &num_pages, &q_len, &n_q_heads, &n_kv_heads, &scale_log2, &chunk, &max_chunks
++    };
++    cuda_check(cudaLaunchKernel(fn, dim3(splits, n_kv_heads, bsz), dim3(AV_NW * 32), split_args,
++                                av_smem_bytes(bits, bits), stream));
++    if (graph)
++    {
++        graph->record_param(fn, GP_attn_block_table, 6);
++        graph->record_param(fn, GP_attn_seqlens, 7);
++        graph->record_param(fn, GP_attn_num_pages, 10, 4);
++        graph->record_param(fn, GP_end, 0);
++    }
++
++    const float* cpo_ptr = po_ptr;
++    const float* cpml_ptr = pml_ptr;
++    void* combine_args[] =
++    {
++        &cpo_ptr, &cpml_ptr, &h32_ptr, &sl_ptr, &out_ptr, &max_chunks, &q_len, &n_q_heads, &n_kv_heads, &chunk
++    };
++    cuda_check(cudaLaunchKernel((void*) attn_verify_combine, dim3(AV_ROWS, n_kv_heads, bsz), dim3(AV_HD),
++                                combine_args, 0, stream));
++    if (graph)
++    {
++        graph->record_param((void*) attn_verify_combine, GP_attn_seqlens, 3);
++        graph->record_param((void*) attn_verify_combine, GP_end, 0);
++    }
++}
+--- a/exllamav3_ext/libtorch/attention.h
++++ b/exllamav3_ext/libtorch/attention.h
+@@ -156,6 +156,13 @@
+                               // runtime argument patched per call, extra splits idle
+         int programs = 0;
+         dim3 upd_grid;
++        // CUDA verify attention (ext 3003, attn_verify.cu): split CTAs per (batch, kv head); 0 = the
++        // Triton split/combine kernels. Fixed absolute kv chunks of av_chunk tokens, partials for
++        // av_max_chunks chunks per (batch, kv head). av_scale_log2 = softmax scale * log2(e)
++        int av_splits = 0;
++        int av_chunk = 0;
++        int av_max_chunks = 0;
++        float av_scale_log2 = 0.0f;
+ 
+         // Static intermediates (python tensor cache) and precomputed views. gate_a/gate_b by
+         // gate mode: full = qg (2, R, qh*hd) with q aliasing qg[0]; interleaved = qg_i
+@@ -286,7 +293,11 @@
+         int block_n,
+         int splits_cap,
+         c10::optional<at::Tensor> xp,
+-        c10::optional<at::Tensor> yp
++        c10::optional<at::Tensor> yp,
++        int av_splits = 0,
++        int av_chunk = 0,
++        int av_max_chunks = 0,
++        float av_scale_log2 = 0.0f
+     );
+ 
+     // Attaches the QSA statics/kernels to an already-configured slot. Selection pieces are
+--- a/exllamav3_ext/libtorch/attention_bc.h
++++ b/exllamav3_ext/libtorch/attention_bc.h
+@@ -156,7 +156,11 @@
+     py::arg("block_n"),
+     py::arg("splits_cap"),
+     py::arg("xp"),
+-    py::arg("yp")
++    py::arg("yp"),
++    py::arg("av_splits") = 0,
++    py::arg("av_chunk") = 0,
++    py::arg("av_max_chunks") = 0,
++    py::arg("av_scale_log2") = 0.0f
+ )
+ .def("configure_slot_qsa", &BC_Attention::configure_slot_qsa,
+     py::arg("bsz"),
+--- a/exllamav3_ext/libtorch/attention.cpp
++++ b/exllamav3_ext/libtorch/attention.cpp
+@@ -13,6 +13,8 @@
+ #include "../activation.cuh"
+ #include "../norm.cuh"
+ #include "../dsa_topk.cuh"
++#include "../attn_verify.cuh"
++#include "../attn_verify_gr.cuh"
+ 
+ BC_Attention::BC_Attention
+ (
+@@ -210,7 +212,11 @@
+     int block_n,
+     int splits_cap,
+     c10::optional<at::Tensor> xp,
+-    c10::optional<at::Tensor> yp
++    c10::optional<at::Tensor> yp,
++    int av_splits,
++    int av_chunk,
++    int av_max_chunks,
++    float av_scale_log2
+ )
+ {
+     TORCH_CHECK(regime == 0 || qsa, "BC_Attention: sparse regime without QSA indexer");
+@@ -229,6 +235,30 @@
+     s.k_update = k_update;
+     s.block_n = block_n;
+     s.splits_cap = splits_cap;
++    s.av_splits = av_splits;
++    s.av_chunk = av_chunk;
++    s.av_max_chunks = av_max_chunks;
++    s.av_scale_log2 = av_scale_log2;
++    if (av_splits)
++    {
++        // CUDA verify attention: quantized K/V of equal width 3 or 4 bits, head_dim 256, up to 6 q
++        // heads per kv head and 8 query positions (48 MMA rows), dense regime, 256-token pages
++        int kb = quant_cache ? attn_verify_bits(cache_k, num_kv_heads) : 0;
++        int vb = quant_cache ? attn_verify_bits(cache_v, num_kv_heads) : 0;
++        TORCH_CHECK(regime == 0 && quant_cache && head_dim == AV_HD && kb == vb && (kb == 3 || kb == 4) &&
++                    num_q_heads % num_kv_heads == 0 && num_q_heads / num_kv_heads <= AV_ROWS / AV_QPOS &&
++                    q_len >= 1 && q_len <= AV_QPOS && page_size == AV_PAGE,
++                    "BC_Attention: unsupported shape for the CUDA verify attention");
++        TORCH_CHECK(av_chunk > 0 && av_chunk % AV_T == 0 && av_max_chunks > 0,
++                    "BC_Attention: CUDA verify attention chunk must be a positive multiple of 64");
++        TORCH_CHECK(s.partial_o.numel() >= (int64_t) bsz * num_kv_heads * av_max_chunks * AV_ROWS * AV_HD &&
++                    s.partial_ml.numel() >= (int64_t) bsz * num_kv_heads * av_max_chunks * AV_ROWS * 2,
++                    "BC_Attention: partials too small for the CUDA verify attention");
++        TORCH_CHECK(s.o.numel() >= (int64_t) bsz * q_len * num_q_heads * AV_HD &&
++                    s.q.numel() >= (int64_t) bsz * q_len * num_q_heads * AV_HD,
++                    "BC_Attention: q/o too small for the CUDA verify attention");
++        attn_verify_prepare(kb);
++    }
+ 
+     if (hidden_size_padded != hidden_size || g_weight)
+     {
+@@ -754,6 +784,18 @@
+ 
+     // Flash-decoding split kernel + combine, with the split configuration derived from the
+     // current block-table bound per call
++    if (s.av_splits)
++    {
++        // CUDA verify attention (ext 3003): fixed absolute kv chunks of av_chunk tokens over the
++        // grid (av_splits, kv heads, bsz), live chunks from cache_seqlens in-kernel; the combine
++        // merges them in chunk order, so a row's result depends only on its absolute position
++        attn_verify_gr(s.q, cache_k, cache_v, cache_k_scales.value(), cache_v_scales.value(), h32,
++                       block_table, cache_seqlens, s.partial_o, s.partial_ml, s.o, s.av_splits,
++                       s.av_chunk, s.av_max_chunks, q_len, num_q_heads, num_kv_heads, s.av_scale_log2,
++                       stream, graph);
++    }
++    else
++    {
+     void* scales_k = quant_cache ? cache_k_scales.value().data_ptr() : s.q.data_ptr();
+     void* scales_v = quant_cache ? cache_v_scales.value().data_ptr() : s.q.data_ptr();
+     int num_splits, split_len;
+@@ -809,6 +851,7 @@
+             graph->record_param(s.k_combine->handle(), GP_end, 0);
+         }
+     }
++    }   // Triton split/combine
+ 
+     }   // regime == 0
+ 
+@@ -994,6 +1037,16 @@
+         params.emplace_back(GP_dsa_qpos, (void*) (uintptr_t) (uint32_t) position);   // expand
+         params.emplace_back(GP_attn_block_table, (void*) block_table.data_ptr());    // gather
+     }
++    else if (s.av_splits)
++    {
++        // CUDA verify attention (ext 3003): exactly the sites attn_verify_gr records, in its order
++        // (split: block table, seqlens, block-table width; combine: seqlens). No split configuration:
++        // the grid is fixed and the live chunks come from cache_seqlens in-kernel
++        params.emplace_back(GP_attn_block_table, (void*) block_table.data_ptr());
++        params.emplace_back(GP_attn_seqlens, (void*) cache_seqlens.data_ptr());
++        params.emplace_back(GP_attn_num_pages, (void*) (uintptr_t) bt_width);
++        params.emplace_back(GP_attn_seqlens, (void*) cache_seqlens.data_ptr());   // combine kernel
++    }
+     else
+     {
+         int num_splits, split_len;
+--- a/modules/attention_fn/bc_attn.py
++++ b/modules/attention_fn/bc_attn.py
+@@ -1,3 +1,4 @@
++import math
+ import os
+ 
+ import torch
+@@ -110,6 +111,12 @@
+             k = ext.TritonKernel(ck.asm["cubin"], ck.metadata.name, ck.metadata.num_warps, ck.metadata.shared)
+         _kernel_cache[key] = k
+     return k
++
++
++# CUDA verify attention (ext 3003); EXL3_ATTN_VERIFY_CUDA=0 keeps the Triton split/combine kernels.
++# _AV_CHUNK: fixed absolute kv chunk (tokens, multiple of 64) of its split/combine partition
++_av_enable = os.environ.get("EXL3_ATTN_VERIFY_CUDA", "1") != "0"
++_AV_CHUNK = 512
+ 
+ 
+ def _get_sm_count(device: torch.device | int) -> int:
+@@ -409,6 +416,23 @@
+         dense_blocks = dense_partial_blocks(bsz, kvh, splits_p, nsub_p)
+         pn_o = dense_blocks * block_rows * hd_pad
+         pn_ml = dense_blocks * block_rows * 2
++        # CUDA verify attention (ext 3003, exllamav3_ext/attn_verify.cu) for the dense regime of the
++        # quantized cache: 3+3 or 4+4 bits, head_dim 256, <= 6 q heads per kv head, 1..8 query rows
++        # (decode and verify rounds share it, so a row's output does not depend on how rounds are
++        # cut), causal, no window, softcap or sinks. Fixed absolute kv chunks of _AV_CHUNK tokens,
++        # SMs // (bsz * kv heads) split CTAs per (kv head, batch), partials for every chunk the
++        # cache can hold
++        av_splits = av_max_chunks = 0
++        if (
++            _av_enable and regime == 0 and self.quant and hd == 256 and self.k_bits == self.v_bits and
++            self.k_bits in (3, 4) and group_size <= 6 and qh % kvh == 0 and 1 <= q_len <= 8 and
++            causal and window_left < 0 and window_right < 0 and not self.softcap and
++            self.sinks is None and PAGE_SIZE == 256
++        ):
++            av_splits = max(1, _get_sm_count(dev) // (bsz * kvh))
++            av_max_chunks = -(-self.max_pages * PAGE_SIZE // _AV_CHUNK)
++            pn_o = max(pn_o, bsz * kvh * av_max_chunks * 48 * 256)
++            pn_ml = max(pn_ml, bsz * kvh * av_max_chunks * 48 * 2)
+         if regime == 1:
+             pn_o, pn_ml = self._qsa_partial_sizes(bsz * q_len)
+         partial_o = g_tensor_cache.get_bucketed(dev, pn_o, torch.float, "bca_po")
+@@ -440,6 +464,8 @@
+             k_split, k_combine, k_update,
+             block_n, splits_cap,
+             xp, yp,
++            av_splits, _AV_CHUNK, av_max_chunks,
++            float(self.sm_scale) * math.log2(math.e),
+         )
+ 
+         if self.qsa:

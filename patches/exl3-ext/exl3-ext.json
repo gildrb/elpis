@@ -16,7 +16,7 @@
     "path": "/opt/venv/lib/python3.13/site-packages/exllamav3_ext.cpython-313-x86_64-linux-gnu.so",
     "base_sha256": "6d30690fdb76b3c4ad3fb5e69f0479707e410fc9b6194e2a5e32f4d7fe1fd8b3"
   },
-  "series_sha256": "b52bf95e5874462ea5533feb9d780f2f5b47bb981f01b34ced7d15db8ca3e744",
+  "series_sha256": "004e29043c5f7a7fc436ce70fc07cac09f5ee88300e41896bafa1695484ac34b",
   "patches": [
     {
       "name": "0001-gdn-shared-carveout.patch",
@@ -73,12 +73,32 @@
     {
       "name": "8201-mlp-m16-fused.patch",
       "sha256": "23c54fa0b589a264f311737fa2c2105c42b4d3f5f682461a6cf53b9ef30493f5"
+    },
+    {
+      "name": "3003-attn-verify-cuda.patch",
+      "sha256": "1d1fbcad1c0080dde8c72e4ff2b10c4b06d61a861fd973569db28b523d54d175"
     }
   ],
   "files": {
     "architecture/dflash2.py": {
       "pre": "03f93098649173a3f023a584e68d2db6124480508354aebd2cc56e5855bf7ee7",
       "post": "16a2982724b070b7328a652e4127fda0da3e3836228234bc864f6190b8657fa2"
+    },
+    "exllamav3_ext/attn_verify.cu": {
+      "pre": null,
+      "post": "6a262c6d196296f6df321890757eda88137bdf37cae5972c5b914425a47ab052"
+    },
+    "exllamav3_ext/attn_verify.cuh": {
+      "pre": null,
+      "post": "ac09e04f76ba1d63e94de89c4bcc8662e9bae5b25cd4cb966e020779e7547d07"
+    },
+    "exllamav3_ext/attn_verify_gr.cu": {
+      "pre": null,
+      "post": "727290a7a36bb6be185bd41fde86759cd453dcbce0ca3d9efc2df1b5800d8f84"
+    },
+    "exllamav3_ext/attn_verify_gr.cuh": {
+      "pre": null,
+      "post": "0fd1ef06149d3742b72fd732f8ad4b1e6b9c47209cc2761eaa102aa452ce56ea"
     },
     "exllamav3_ext/bindings.cpp": {
       "pre": "381d867b845335b15106f86aa79e284c9d6b7d316703dd555d8a86a13ed2b465",
@@ -110,7 +130,15 @@
     },
     "exllamav3_ext/libtorch/attention.cpp": {
       "pre": "78ed122f0cf0a345755a306713ed982137b2bfbee62f6b17cf8bf4b0056427e4",
-      "post": "5f03987609bd1d6c65c8ac711e213b4365bc3e2fdd15ec64d6305e06102c5ace"
+      "post": "2ab6db947085bc81c4c4ad258616cc72443b4bcec92341644812377b25843803"
+    },
+    "exllamav3_ext/libtorch/attention.h": {
+      "pre": "628741cc309a351507b09d992c09d8d2972a113afb3ff76e0a6323ed0b0ee4b4",
+      "post": "e151781e4c003e5418ac5aff64dcbbad16b003f1c43b4c2acf6731f4e790c464"
+    },
+    "exllamav3_ext/libtorch/attention_bc.h": {
+      "pre": "b007768c5be8f34d8b9765213480c59867cc23784539b5fa2c97d0c235504db5",
+      "post": "2b0e8d2d9ceb815f08fab3171cfdbf689e3a9fe00e84b1b3fb86227cf94e2a24"
     },
     "exllamav3_ext/libtorch/gated_delta_net.cpp": {
       "pre": "d8a31ef61e42ce753f7a9ee2a55c7e25a1c51e0a0a8d148d6058f9d96120dfef",
@@ -186,7 +214,7 @@
     },
     "modules/attention_fn/bc_attn.py": {
       "pre": "63f0768f313cb7015485d4655b433020f2e9e66bb44d971a9e6c65bc306994e0",
-      "post": "513d62f9f7a855bd306fef985e5558ef386802b091cccda83a41597d63edc610"
+      "post": "98490ef1b46c696a0fae9d36b63015fe8b356dbf7c38569e2dfe1e559b0a7e7b"
     },
     "modules/attention_fn/triton_paged.py": {
       "pre": "910379b663acb08711c3be207cd3e9ed96658527cc110a6ce39c793f997836d9",
