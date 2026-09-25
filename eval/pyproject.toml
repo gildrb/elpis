@@ -10,6 +10,7 @@ dependencies = [
     "aime26==0.1.0",
     "i3-logic==0.2.1",
     "livecodebench==0.1.0",
+    "mmlu-pro==0.1.0",
     "mrcr-v2==0.1.0",
     "graphwalks==0.1.0",
 ]
@@ -25,5 +26,6 @@ aime25 = { path = ".sources/prime-envs/environments/math/aime25", editable = tru
 aime26 = { path = ".sources/prime-envs/environments/math/aime26", editable = true }
 i3-logic = { path = ".sources/prime-envs/environments/reasoning/i3_logic", editable = true }
 livecodebench = { path = ".sources/prime-envs/environments/code/livecodebench", editable = true }
+mmlu-pro = { path = ".sources/prime-envs/environments/knowledge/mmlu_pro", editable = true }
 mrcr-v2 = { path = ".sources/prime-envs/environments/long_context/mrcr_v2", editable = true }
 graphwalks = { path = ".sources/prime-envs/environments/long_context/graphwalks", editable = true }

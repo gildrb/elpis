@@ -10,6 +10,7 @@ repo=$(cd -- "$root/.." && pwd -P)
 usage() {
     printf '%s\n' 'Usage: eval/scripts/run PROFILE [TASKSET] [--dry-run] [--measure-power] [--output FRESH_DIRECTORY]' \
         '  tiny aime25                  Three native seed-0 shuffled math tasks; not full qualification.' \
+        '  broad [TASKSET]              Autoresearch lane tasksets after tiny/aime25: mmlu-pro 20, i3-logic 6, livecodebench 3.' \
         '  diverse i3-logic             First native eligible logic task; separate 8192-token sentinel.' \
         '  --output FRESH_DIRECTORY     Exclusive-create the result group at this path.' \
         '  --measure-power              Collect board energy and per-environment task efficiency.' \
@@ -23,7 +24,7 @@ usage() {
 if [[ ${1:-} == --help || ${1:-} == -h ]]; then usage; exit 0; fi
 profile=${1:?Usage: eval/scripts/run PROFILE [TASKSET] [--dry-run] [--measure-power] [--output FRESH_DIRECTORY]}
 shift
-case "$profile" in smoke|tiny|diverse|quick|full|agentic|agentic-full) ;; *) printf 'Unknown profile: %s\n' "$profile" >&2; exit 2 ;; esac
+case "$profile" in smoke|tiny|broad|diverse|quick|full|agentic|agentic-full) ;; *) printf 'Unknown profile: %s\n' "$profile" >&2; exit 2 ;; esac
 selection=""
 dry=false
 measure=false
@@ -161,14 +162,16 @@ for config in "${configs[@]}"; do
             fi
             ;;
     esac
-    if [[ "$taskset" == graphwalks ]]; then
-        dataset_repo=$(jq -r '.huggingface.graphwalks.repo' "$root/datasets.lock")
-        revision=$(jq -r '.huggingface.graphwalks.revision' "$root/datasets.lock")
+    if [[ "$taskset" == graphwalks || "$taskset" == mmlu-pro ]]; then
+        dataset_repo=$(jq -r --arg key "$taskset" '.huggingface[$key].repo' "$root/datasets.lock")
+        revision=$(jq -r --arg key "$taskset" '.huggingface[$key].revision' "$root/datasets.lock")
         snapshot="$HF_HUB_CACHE/datasets--${dataset_repo//\//--}/snapshots/$revision"
-        # GraphWalks has no dataset-name option. datasets.load_dataset natively
-        # resolves this relative local directory before trying the Hub.
-        mkdir -p -- "$group/local-datasets/openai"
-        ln -s -- "$snapshot" "$group/local-datasets/openai/graphwalks"
+        # GraphWalks and MMLU-Pro hardcode their Hub names (MMLU-Pro also its
+        # revision, equal to the lock) and take no dataset-name option.
+        # datasets.load_dataset natively resolves this relative local directory
+        # before trying the Hub.
+        mkdir -p -- "$group/local-datasets/${dataset_repo%%/*}"
+        ln -s -- "$snapshot" "$group/local-datasets/$dataset_repo"
         cd -- "$group/local-datasets"
     fi
     pwd -P >"$group/provenance/$taskset-working-directory.txt"

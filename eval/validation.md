@@ -48,6 +48,25 @@ with a mounted Nix source overlay. Its serving-recipe commit was not established
 The recorded checkout was dirty. Do not use this smoke run for a release claim
 or matched recipe comparison.
 
+## 2026-09-25: MMLU-Pro and the broad lane profiles
+
+- `mmlu-pro 0.1.0` (editable, pinned Prime Envs checkout) was added to
+  `pyproject.toml`; `uv lock --offline` added only that package (dependency:
+  `verifiers`, already locked) and `uv sync --locked --offline` installed it.
+  `setup --check` passes.
+- `datasets.lock` pins `TIGER-Lab/MMLU-Pro` at
+  `b189ec765aa7ed75c8acfea42df31fdae71f97be`, the revision the taskset hardcodes:
+  `README.md` (configs metadata), `data/test-00000-of-00001.parquet` and
+  `data/validation-00000-of-00001.parquet` (the default config's two splits).
+  `data mmlu-pro` downloaded and `data --check mmlu-pro` verified them.
+- The native offline loader (relative `TIGER-Lab/MMLU-Pro` link in a fresh
+  working directory, fresh Arrow cache, HF offline) selected the 20 seed-0
+  shuffled zero-shot tasks, and `run tiny --dry-run` and `run broad --dry-run`
+  passed. For every lane taskset the lane's offline selection replay produced
+  exactly the resolved config of the native `--dry-run`; the AIME25 selection
+  and resolved config are byte-identical to the historical v1 lane's. No model
+  endpoint was used; no task or scorer was changed.
+
 ## Failures found and fixed during integration
 
 A raw HF snapshot is not enough for a fresh offline repository-name lookup.

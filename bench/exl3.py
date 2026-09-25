@@ -1,5 +1,5 @@
 # Copyright (c) 2026 inference contributors.
-"""EXL3 + Bend measurement lane: identity, native tiny math and C1 whole requests.
+"""EXL3 + Bend measurement lane: identity, native broad tasksets and C1 whole requests.
 
 Standard library plus the prepared evaluator's ``tokenizers`` wheel only. Every
 record is exclusive-create canonical JSON. Nothing here starts, stops, flushes
@@ -21,8 +21,9 @@ import subprocess
 import time
 import tomllib
 from collections.abc import Callable
+from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Literal
 
 if TYPE_CHECKING:
     from tokenizers import Tokenizer
@@ -64,7 +65,9 @@ REQUEST_TIMEOUT_SECONDS = 1800
 PROBE_TIMEOUT_SECONDS = 600
 PUBLIC_SECRET_MARKERS = ("KEY", "SECRET", "TOKEN", "PASSWORD", "CREDENTIAL")
 C1_PROTOCOL = "exl3-c1-whole-request-v1"
-MATH_INPUTS_PRODUCER = "bench.exl3.math_inputs"
+INPUTS_PRODUCER = "bench.exl3.taskset_inputs"
+# Offline native selection replay; LiveCodeBench builds Arrow from ~4.49 GB JSON.
+PLAN_TIMEOUT_SECONDS = 600
 PROBE_HASH_LIMIT = 64 * 1024 * 1024
 
 
@@ -760,9 +763,60 @@ def capture_file(
 
 
 # ---------------------------------------------------------------------------
-# Native tiny AIME25 math (unchanged Prime/Verifiers producer and grader).
+# Native tasksets (unchanged Prime/Verifiers producers, tasks and graders).
 
-TINY_NATIVE_PLAN = r"""
+Loader = Literal["dataset_name", "i3_subset", "hub_ref", "relative_directory"]
+
+
+@dataclass(frozen=True)
+class NativeTaskset:
+    """One frozen native taskset: launch profile, per-call budget and offline data."""
+
+    name: str
+    """Native taskset id, output group directory and ``eval/datasets.lock`` key."""
+    metric: str
+    """METRIC name prefix of its throughput, reward and truncation count."""
+    config: str
+    """Launch profile relative to ``eval/``; only its sandbox image is replaced."""
+    tasks: int
+    """Native seed-zero shuffled tasks, one rollout and one model call each."""
+    output_tokens: int
+    """Per-call ``sampling.max_tokens`` and the matching soft episode cap."""
+    loader: Loader
+    """How the verified snapshot is loaded offline, exactly as ``eval/scripts/run``."""
+    pinned_module: str | None = None
+    """Module whose hardcoded DATASET_NAME/DATASET_REVISION must equal the lock."""
+
+
+# Frozen order of protocol exl3-native-broad-c1-request-v2; C1 runs afterwards.
+TASKSETS = (
+    NativeTaskset(
+        "aime25", "aime25", "configs/tiny/aime25.toml", 3, 32768, "dataset_name"
+    ),
+    NativeTaskset(
+        "mmlu-pro",
+        "mmlu_pro",
+        "configs/broad/mmlu-pro.toml",
+        20,
+        8192,
+        "relative_directory",
+        "mmlu_pro.taskset",
+    ),
+    NativeTaskset(
+        "i3-logic", "i3_logic", "configs/broad/i3-logic.toml", 6, 16384, "i3_subset"
+    ),
+    NativeTaskset(
+        "livecodebench",
+        "livecodebench",
+        "configs/broad/livecodebench.toml",
+        3,
+        16384,
+        "hub_ref",
+    ),
+)
+
+NATIVE_PLAN = r"""
+import importlib
 import json
 import os
 from pathlib import Path
@@ -770,7 +824,8 @@ import sys
 import tempfile
 import tomllib
 
-root, provenance, snapshot = map(Path, sys.argv[1:])
+root, provenance = map(Path, sys.argv[1:3])
+name, overrides, module = sys.argv[3], json.loads(sys.argv[4]), sys.argv[5]
 os.environ.update({
     "HOME": str(root / ".cache/home"),
     "HF_HOME": str(root / ".cache/huggingface"),
@@ -778,7 +833,18 @@ os.environ.update({
     "HF_HUB_OFFLINE": "1", "HF_DATASETS_OFFLINE": "1",
     "HF_HUB_DISABLE_TELEMETRY": "1",
 })
-with tempfile.TemporaryDirectory(prefix=".tiny-selection.", dir=provenance.parent) as cache:
+
+
+def merge(base, update):
+    # The native CLI deep-merges `@ local.toml @ launch.toml` and dotted flags.
+    for key, value in update.items():
+        if isinstance(value, dict) and isinstance(base.get(key), dict):
+            merge(base[key], value)
+        else:
+            base[key] = value
+
+
+with tempfile.TemporaryDirectory(prefix=".selection.", dir=provenance.parent) as cache:
     os.environ["HF_DATASETS_CACHE"] = cache
     from verifiers.v1.configs.cli.eval import EvalConfig
     from verifiers.v1.taskset import SEED
@@ -786,9 +852,9 @@ with tempfile.TemporaryDirectory(prefix=".tiny-selection.", dir=provenance.paren
 
     with (root / "configs/local.toml").open("rb") as stream:
         settings = tomllib.load(stream)
-    with (provenance / "aime25.toml").open("rb") as stream:
-        settings.update(tomllib.load(stream))
-    settings["env"]["taskset"]["dataset_name"] = str(snapshot)
+    with (provenance / (name + ".toml")).open("rb") as stream:
+        merge(settings, tomllib.load(stream))
+    merge(settings, overrides)
     settings["rich"] = None
     config = EvalConfig.model_validate(settings)
     taskset = load_taskset(config.env.taskset)
@@ -800,7 +866,12 @@ with tempfile.TemporaryDirectory(prefix=".tiny-selection.", dir=provenance.paren
     resolved = config.model_dump(mode="json")
     resolved.pop("run")
     resolved.pop("output_dir")
-    print(json.dumps({"shuffle_seed": SEED, "tasks": tasks, "resolved_config": resolved}))
+    pinned = None
+    if module:
+        source = importlib.import_module(module)
+        pinned = {"repo": source.DATASET_NAME, "revision": source.DATASET_REVISION}
+    print(json.dumps({"shuffle_seed": SEED, "tasks": tasks,
+                      "resolved_config": resolved, "module_dataset": pinned}))
 """
 
 
@@ -818,9 +889,11 @@ def sandbox_image() -> str:
     return image
 
 
-def dataset_snapshot() -> tuple[Path, dict[str, object]]:
-    """Locked local AIME25 snapshot directory and its lock entry."""
-    entry = mapping(mapping(document(EVAL / "datasets.lock")["huggingface"])["aime25"])
+def dataset_snapshot(taskset: NativeTaskset) -> tuple[Path, dict[str, object]]:
+    """Locked local snapshot directory of one taskset and its lock entry."""
+    entry = mapping(
+        mapping(document(EVAL / "datasets.lock")["huggingface"])[taskset.name]
+    )
     snapshot = (
         EVAL
         / ".cache/huggingface/hub"
@@ -831,11 +904,88 @@ def dataset_snapshot() -> tuple[Path, dict[str, object]]:
     return snapshot, entry
 
 
-def expected_call_sampling() -> dict[str, object]:
-    """Provider wire sampling the unchanged native client sends from local.toml."""
+def dataset_overrides(taskset: NativeTaskset) -> dict[str, object]:
+    """Native config values that point a taskset at its verified local snapshot."""
+    snapshot, _ = dataset_snapshot(taskset)
+    if taskset.loader == "dataset_name":
+        return {"env": {"taskset": {"dataset_name": str(snapshot)}}}
+    if taskset.loader == "i3_subset":
+        # Raw logic/ parquet through the native parquet builder's default config.
+        return {
+            "env": {
+                "taskset": {
+                    "dataset": {"name": str(snapshot / "logic"), "subset": "default"}
+                }
+            }
+        }
+    require(
+        taskset.loader in ("hub_ref", "relative_directory"),
+        f"Unknown native dataset loader: {taskset.loader}",
+    )
+    return {}
+
+
+def _flags(value: dict[str, object], prefix: tuple[str, ...] = ()) -> list[str]:
+    """Dotted native CLI flags carrying exactly the replayed config overrides."""
+    result: list[str] = []
+    for key, item in value.items():
+        path = (*prefix, key.replace("_", "-"))
+        if isinstance(item, dict):
+            result.extend(_flags(mapping(item), path))
+        else:
+            result.extend(["--" + ".".join(path), text(item)])
+    return result
+
+
+def working_directory(group: Path, taskset: NativeTaskset) -> Path:
+    """Native producer working directory, as ``eval/scripts/run`` uses it."""
+    if taskset.loader == "relative_directory":
+        # The taskset hardcodes its Hub name; datasets resolves this relative
+        # local directory (a link to the verified snapshot) before the Hub.
+        return group / "local-datasets"
+    return EVAL / ".sources/prime-envs"
+
+
+def _local_dataset(group: Path, taskset: NativeTaskset) -> dict[str, object] | None:
+    """Verify the offline binding of a taskset without revision knobs."""
+    snapshot, entry = dataset_snapshot(taskset)
+    revision = text(entry["revision"])
+    if taskset.loader == "hub_ref":
+        ref = snapshot.parent.parent / "refs/main"
+        require(
+            not ref.is_symlink() and ref.read_text(encoding="ascii") == revision,
+            f"Owned HF cache main ref is not bound to the pinned revision: {ref}",
+        )
+        return {"hub_ref": str(ref), "revision": revision}
+    if taskset.loader != "relative_directory":
+        return None
+    link = working_directory(group, taskset) / text(entry["repo"])
+    require(
+        link.is_symlink()
+        and os.readlink(link) == str(snapshot)
+        and link.resolve(strict=True) == snapshot.resolve(strict=True),
+        f"Local dataset directory is not the verified snapshot: {link}",
+    )
+    return {"link": str(link), "target": str(snapshot)}
+
+
+def expected_call_sampling(taskset: NativeTaskset) -> dict[str, object]:
+    """Provider wire sampling the unchanged native client sends for one taskset."""
     with (EVAL / "configs/local.toml").open("rb") as stream:
         local = mapping(tomllib.load(stream))
+    with (EVAL / taskset.config).open("rb") as stream:
+        profile = mapping(tomllib.load(stream))
     sampling = mapping(local["sampling"])
+    override = mapping(profile.get("sampling", {}))
+    require(
+        set(override) <= {"max_tokens"},
+        "Taskset profiles may override only the per-call output budget",
+    )
+    sampling.update(override)
+    require(
+        sampling.get("max_tokens") == taskset.output_tokens,
+        f"Per-call output budget of {taskset.name} differs from its frozen budget",
+    )
     extra = mapping(sampling.pop("extra_body"))
     return {
         **{key: value for key, value in extra.items() if not isinstance(value, dict)},
@@ -843,36 +993,42 @@ def expected_call_sampling() -> dict[str, object]:
     }
 
 
-def write_launch(provenance: Path, image: str) -> None:
-    """Freeze the tiny profile, replacing only its runtime image with the pin."""
-    config = (EVAL / "configs/tiny/aime25.toml").read_text(encoding="utf-8")
+def write_launch(provenance: Path, taskset: NativeTaskset, image: str) -> None:
+    """Freeze one profile, replacing only its runtime image with the pin."""
+    config = (EVAL / taskset.config).read_text(encoding="utf-8")
     launch, replacements = re.subn(
         r"^image = .*$", f'image = "{image}"', config, flags=re.MULTILINE
     )
-    require(replacements == 1, "Tiny profile must bind one sandbox image")
-    write_new(provenance / "aime25.toml", launch.encode())
+    require(replacements == 1, f"{taskset.config} must bind one sandbox image")
+    write_new(provenance / f"{taskset.name}.toml", launch.encode())
 
 
-def _tiny_plan(provenance: Path) -> dict[str, object]:
-    with (EVAL / "configs/tiny/aime25.toml").open("rb") as stream:
+def _native_plan(provenance: Path, taskset: NativeTaskset) -> dict[str, object]:
+    with (EVAL / taskset.config).open("rb") as stream:
         settings = mapping(tomllib.load(stream))
+    env = mapping(settings.get("env"))
+    agent = mapping(env.get("agent"))
     require(
         all(
             settings.get(key) == value
             for key, value in (
-                ("num_tasks", 3),
+                ("num_tasks", taskset.tasks),
                 ("num_rollouts", 1),
                 ("shuffle", True),
                 ("max_concurrent", 1),
             )
-        ),
-        "Tiny requires exactly three native shuffled tasks and one rollout each",
+        )
+        and mapping(env.get("taskset")).get("id") == taskset.name
+        and agent.get("max_turns") == 1
+        and agent.get("max_output_tokens") == taskset.output_tokens
+        and mapping(agent.get("harness")).get("id") == "null",
+        f"{taskset.config} differs from its frozen task count, rollout, budget or harness",
     )
-    with (provenance / "aime25.toml").open("rb") as stream:
+    _ = expected_call_sampling(taskset)
+    with (provenance / f"{taskset.name}.toml").open("rb") as stream:
         launch = mapping(tomllib.load(stream))
-    env = mapping(settings.get("env"))
-    agent = mapping(env.get("agent"))
     runtime = mapping(agent.get("runtime"))
+    require(runtime.get("type") == "docker", "Native tasksets use the Docker runtime")
     runtime["image"] = (
         (EVAL / ".cache/sandbox-image").read_text(encoding="utf-8").strip()
     )
@@ -881,40 +1037,57 @@ def _tiny_plan(provenance: Path) -> dict[str, object]:
     settings["env"] = env
     require(
         launch == settings,
-        "Tiny launch differs from its profile beyond the sandbox pin",
+        f"{taskset.name} launch differs from its profile beyond the sandbox pin",
     )
-    snapshot, _ = dataset_snapshot()
     try:
         result = subprocess.run(
             [
                 str(EVAL / ".venv/bin/python"),
                 "-I",
                 "-c",
-                TINY_NATIVE_PLAN,
+                NATIVE_PLAN,
                 str(EVAL),
                 str(provenance),
-                str(snapshot),
+                taskset.name,
+                json.dumps(dataset_overrides(taskset)),
+                taskset.pinned_module or "",
             ],
+            cwd=working_directory(provenance.parent, taskset),
             capture_output=True,
             text=True,
-            timeout=120,
+            timeout=PLAN_TIMEOUT_SECONDS,
             check=False,
         )
     except subprocess.TimeoutExpired as error:
-        raise ValueError("Pinned offline tiny selection did not finish") from error
-    require(result.returncode == 0, "Pinned offline native tiny task selection failed")
+        raise ValueError(
+            f"Pinned offline {taskset.name} selection did not finish"
+        ) from error
+    require(
+        result.returncode == 0,
+        f"Pinned offline native {taskset.name} task selection failed",
+    )
     plan = mapping(loads(result.stdout))
     tasks = sequence(plan.get("tasks"))
     require(
         integer(plan.get("shuffle_seed")) == 0
-        and len(tasks) == 3
-        and len({text(mapping(task).get("hash")) for task in tasks}) == 3,
-        "Tiny native selection requires seed zero and three distinct tasks",
+        and len(tasks) == taskset.tasks
+        and len({text(mapping(task).get("hash")) for task in tasks}) == taskset.tasks,
+        f"Native {taskset.name} selection requires seed zero and distinct tasks",
+    )
+    _, entry = dataset_snapshot(taskset)
+    require(
+        plan.get("module_dataset")
+        == (
+            None
+            if taskset.pinned_module is None
+            else {"repo": entry["repo"], "revision": entry["revision"]}
+        ),
+        f"{taskset.name} hardcodes a dataset other than its lock entry",
     )
     return plan
 
 
-def math_inputs(provenance: Path) -> dict[str, object]:
+def taskset_inputs(provenance: Path, taskset: NativeTaskset) -> dict[str, object]:
     """Hash the evaluator/source/config/data closure and replay native selection."""
     files = [
         EVAL / name
@@ -924,11 +1097,15 @@ def math_inputs(provenance: Path) -> dict[str, object]:
             "uv.lock",
             "pyproject.toml",
             "configs/local.toml",
-            "configs/tiny/aime25.toml",
+            taskset.config,
             ".cache/sandbox-image",
         )
     ]
-    files.extend([ROOT / "flake.lock", ROOT / "flake.nix", provenance / "aime25.toml"])
+    files.extend([
+        ROOT / "flake.lock",
+        ROOT / "flake.nix",
+        provenance / f"{taskset.name}.toml",
+    ])
     for path in files:
         require(path.is_file(), f"Missing frozen evaluator input: {path}")
     files.extend(path for path in (EVAL / "runtime").rglob("*") if path.is_file())
@@ -943,7 +1120,7 @@ def math_inputs(provenance: Path) -> dict[str, object]:
             if path.suffix in (".py", ".toml", ".lock")
         )
     hashes = {str(path.resolve()): digest(path) for path in files if path.is_file()}
-    snapshot, entry = dataset_snapshot()
+    snapshot, entry = dataset_snapshot(taskset)
     for item in sequence(entry["files"]):
         raw = mapping(item)
         path = snapshot / text(raw["path"])
@@ -964,17 +1141,17 @@ def math_inputs(provenance: Path) -> dict[str, object]:
         hashes[str(path.resolve())] = sha
     return {
         "schema_version": 1,
-        "producer": MATH_INPUTS_PRODUCER,
-        "profile": "tiny",
-        "environment": "aime25",
+        "producer": INPUTS_PRODUCER,
+        "taskset": taskset.name,
+        "profile": taskset.config,
         "files_sha256": hashes,
-        "selection": _tiny_plan(provenance),
+        "local_dataset": _local_dataset(provenance.parent, taskset),
+        "selection": _native_plan(provenance, taskset),
     }
 
 
-def math_command(group: Path) -> tuple[list[str], Path]:
+def native_command(group: Path, taskset: NativeTaskset) -> tuple[list[str], Path]:
     """The unchanged native Prime/Verifiers CLI invocation and working directory."""
-    snapshot, _ = dataset_snapshot()
     return (
         [
             "uv",
@@ -986,19 +1163,18 @@ def math_command(group: Path) -> tuple[list[str], Path]:
             "@",
             str(EVAL / "configs/local.toml"),
             "@",
-            str(group / "provenance/aime25.toml"),
+            str(group / f"provenance/{taskset.name}.toml"),
             "-o",
-            str(group / "aime25"),
+            str(group / taskset.name),
             "--no-rich",
             "--no-push",
-            "--env.taskset.dataset-name",
-            str(snapshot),
+            *_flags(dataset_overrides(taskset)),
         ],
-        EVAL / ".sources/prime-envs",
+        working_directory(group, taskset),
     )
 
 
-def math_environment(group: Path, key: str) -> dict[str, str]:
+def native_environment(group: Path, key: str) -> dict[str, str]:
     """Offline native evaluator environment; the key is passed only via env."""
     removed = (
         "PYTHONPATH",
@@ -1033,12 +1209,12 @@ def math_environment(group: Path, key: str) -> dict[str, str]:
     return env
 
 
-def freeze_math(group: Path) -> dict[str, object]:
-    """Create the fresh math group and bind its inputs before any request."""
+def freeze_taskset(group: Path, taskset: NativeTaskset) -> dict[str, object]:
+    """Create one fresh taskset group and bind its inputs before any request."""
     group.mkdir(mode=0o700)
     provenance = group / "provenance"
     provenance.mkdir(mode=0o700)
-    write_launch(provenance, sandbox_image())
+    write_launch(provenance, taskset, sandbox_image())
     for source in (
         EVAL / "configs/local.toml",
         EVAL / "prime-envs.lock",
@@ -1048,7 +1224,12 @@ def freeze_math(group: Path) -> dict[str, object]:
         ROOT / "flake.lock",
     ):
         write_new(provenance / source.name, source.read_bytes())
-    command, cwd = math_command(group)
+    if taskset.loader == "relative_directory":
+        snapshot, entry = dataset_snapshot(taskset)
+        link = working_directory(group, taskset) / text(entry["repo"])
+        link.parent.mkdir(mode=0o700, parents=True)
+        link.symlink_to(snapshot, target_is_directory=True)
+    command, cwd = native_command(group, taskset)
     save(
         provenance / "invocation.json",
         {
@@ -1057,8 +1238,8 @@ def freeze_math(group: Path) -> dict[str, object]:
             "credential": "QWEN_API_KEY loaded privately from the operator key file; value not retained",
         },
     )
-    frozen = math_inputs(provenance)
-    save(provenance / "aime25.evaluation-inputs-before.json", frozen)
+    frozen = taskset_inputs(provenance, taskset)
+    save(provenance / f"{taskset.name}.evaluation-inputs-before.json", frozen)
     return frozen
 
 
@@ -1077,54 +1258,65 @@ def _trace_window(trace: dict[str, object]) -> tuple[int, int]:
     return round(start * 1_000_000_000), round(max(ends) * 1_000_000_000)
 
 
-def admit_math(
-    evidence: Evidence, group: Path, window: tuple[int, int]
+def admit_taskset(
+    evidence: Evidence, group: Path, taskset: NativeTaskset, window: tuple[int, int]
 ) -> dict[str, object]:
-    """Replay the complete native AIME25 evidence; fail on any missing/failed call."""
+    """Replay one complete native taskset; fail on any missing/failed call."""
+    name = taskset.name
     provenance = group / "provenance"
     frozen = document(
-        evidence.retain(provenance / "aime25.evaluation-inputs-before.json")
+        evidence.retain(provenance / f"{name}.evaluation-inputs-before.json")
     )
     require(
         frozen
-        == document(evidence.retain(provenance / "aime25.evaluation-inputs-after.json"))
-        and frozen.get("producer") == MATH_INPUTS_PRODUCER,
-        "Math inputs are missing or changed during the native run",
+        == document(
+            evidence.retain(provenance / f"{name}.evaluation-inputs-after.json")
+        )
+        and frozen.get("producer") == INPUTS_PRODUCER
+        and frozen.get("taskset") == name,
+        f"{name} inputs are missing or changed during the native run",
     )
     for path, expected in mapping(frozen.get("files_sha256")).items():
         require(
             digest(evidence.retain(Path(path))) == expected,
-            f"Frozen math input changed: {path}",
+            f"Frozen {name} input changed: {path}",
         )
+    require(
+        frozen.get("local_dataset") == _local_dataset(group, taskset),
+        f"{name} offline dataset binding changed",
+    )
     selection = mapping(frozen.get("selection"))
-    directory = group / "aime25"
+    directory = group / name
     paths = list(directory.glob("*/traces.jsonl"))
-    require(len(paths) == 1, "Require one unfiltered native traces.jsonl")
+    require(len(paths) == 1, f"Require one unfiltered native {name} traces.jsonl")
     trace_path = evidence.retain(paths[0])
     config = document(evidence.retain(trace_path.parent / "configs/resolved/eval.json"))
     config.pop("run", None)
     config.pop("output_dir", None)
     require(
         config == mapping(selection.get("resolved_config")),
-        "Resolved native taskset, harness, sampling, budget or runtime differs from the frozen plan",
+        f"Resolved native {name} taskset, harness, sampling, budget or runtime differs from the frozen plan",
     )
     require(
         config.get("model") == MODEL
-        and mapping(mapping(config.get("env")).get("taskset")).get("id") == "aime25",
-        "Native run selected another model or taskset",
+        and mapping(mapping(config.get("env")).get("taskset")).get("id") == name
+        and mapping(config.get("sampling")).get("max_tokens") == taskset.output_tokens,
+        f"Native {name} run selected another model, taskset or budget",
     )
     logs = list(trace_path.parent.glob("logs/attempt_*/eval.log"))
-    require(len(logs) == 1, "Missing unique native attempt log")
+    require(len(logs) == 1, f"Missing unique native {name} attempt log")
     log = evidence.retain(logs[0]).read_text(encoding="utf-8")
     require(
-        len(re.findall(r"running 3x1 rollouts on qwen3\.8-27b", log)) == 1,
-        "Missing unambiguous native 3x1 run plan",
+        len(re.findall(rf"running {taskset.tasks}x1 rollouts on qwen3\.8-27b", log))
+        == 1,
+        f"Missing unambiguous native {name} {taskset.tasks}x1 run plan",
     )
     planned = [mapping(task) for task in sequence(selection.get("tasks"))]
-    sampling = expected_call_sampling()
+    sampling = expected_call_sampling(taskset)
     rows = [mapping(loads(line)) for line in trace_path.read_bytes().splitlines()]
     require(
-        len(rows) == 3, "Require all three native episodes, without retry/filtering"
+        len(rows) == taskset.tasks,
+        f"Require all {taskset.tasks} native {name} episodes, without retry/filtering",
     )
     tasks: list[dict[str, object]] = []
     rewards: list[float] = []
@@ -1132,18 +1324,18 @@ def admit_math(
         task = mapping(episode.get("task"))
         require(
             {key: task.get(key) for key in ("key", "hash", "type")} == expected,
-            f"Task identity/order differs from the frozen plan at ordinal {ordinal}",
+            f"{name} task identity/order differs from the frozen plan at ordinal {ordinal}",
         )
         require(
             task.get("hash")
             == hashlib.sha256(
                 json.dumps(task.get("data"), sort_keys=True).encode()
             ).hexdigest(),
-            "Native task content hash mismatch",
+            f"Native {name} task content hash mismatch",
         )
         require(
             episode.get("ok") is True and not sequence(episode.get("errors")),
-            "Operationally failed native episode",
+            f"Operationally failed native {name} episode",
         )
         traces = sequence(episode.get("traces"))
         require(len(traces) == 1, "Require the native single-agent trace")
@@ -1152,7 +1344,7 @@ def admit_math(
             trace.get("ok") is True
             and not sequence(trace.get("errors"))
             and trace.get("is_completed") is True,
-            "Failed or incomplete native trace",
+            f"Failed or incomplete native {name} trace",
         )
         require(
             mapping(trace.get("verifiers")).get("commit") == VERIFIERS_REVISION,
@@ -1169,21 +1361,21 @@ def admit_math(
             and call.get("endpoint") == "/chat/completions"
             and mapping(call.get("sampling")) == sampling
             and call.get("finish_reason") in ("stop", "length"),
-            "Native call failed or used another model, endpoint or sampling",
+            f"Native {name} call failed or used another model, endpoint or sampling",
         )
         start, end = _trace_window(trace)
         require(
             window[0] <= start <= end <= window[1],
-            "Native trace does not lie inside its serving identity captures",
+            f"Native {name} trace does not lie inside its serving identity captures",
         )
         named = mapping(trace.get("rewards"))
-        require(bool(named), "Missing native rewards")
+        require(bool(named), f"Missing native {name} rewards")
         weighted: list[float] = []
-        for name, reward in named.items():
+        for reward_name, reward in named.items():
             record = mapping(reward)
             score, weight = number(record.get("score")), number(record.get("weight"))
             weighted.append(number(score * weight))
-            require(bool(name), "Unnamed native reward")
+            require(bool(reward_name), "Unnamed native reward")
         reward_sum = number(math.fsum(weighted))
         rewards.append(reward_sum)
         tasks.append({
@@ -1198,10 +1390,12 @@ def admit_math(
             "truncated": call["finish_reason"] == "length",
         })
     return {
+        "taskset": name,
         "config_sha256": hashlib.sha256(canonical(config)).hexdigest(),
         "tasks": tasks,
         "rollouts": len(tasks),
-        "scope": "sampled_math_only_not_full_qualification",
+        "output_budget": taskset.output_tokens,
+        "scope": f"sampled_{taskset.metric}_only_not_full_qualification",
         "weighted_reward_mean": math.fsum(rewards) / len(rewards),
         "truncated_rollouts": sum(bool(task["truncated"]) for task in tasks),
     }

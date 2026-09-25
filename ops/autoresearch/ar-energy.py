@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
-"""Per-call tok/s and energy for an autoresearch output dir, from the 250 ms nvidia-smi sampler."""
+"""Per-call tok/s and energy for an autoresearch output dir, from the 250 ms nvidia-smi sampler.
+
+Covers every native taskset trace under the run (v1: tiny-math/aime25/..., v2: <taskset>/<taskset>/...)."""
 import csv, datetime, glob, json, sys
 samples = []
 for row in csv.reader(open('/tmp/gpu-power.csv')):
@@ -18,7 +20,9 @@ def find(o):
         for v in o:
             yield from find(v)
 tt = tj = ts = 0.0
-for f in sorted(glob.glob(sys.argv[1] + '/tiny-math/**/traces.jsonl', recursive=True)):
+per = {}
+for f in sorted(glob.glob(sys.argv[1] + '/**/traces.jsonl', recursive=True)):
+    name = f.split('/')[-3]
     for line in open(f):
         for u in find(json.loads(line)):
             ct = (u['usage'] or {}).get('completion_tokens')
@@ -32,5 +36,9 @@ for f in sorted(glob.glob(sys.argv[1] + '/tiny-math/**/traces.jsonl', recursive=
             sm = sum(s[2] for s in w) / len(w)
             j = p * (t1 - t0)
             tt += ct; tj += j; ts += t1 - t0
-            print(f"tokens={ct:6d} secs={t1-t0:7.2f} tok/s={ct/(t1-t0):7.2f} mean {p:6.1f} W  SM {sm:5.0f} MHz  {ct/j:.3f} tok/J")
-print(f"tiny-math: {tt:.0f} tok, {ts:.1f} s, {tt/ts:.2f} tok/s, mean {tj/ts:.1f} W, {tt/tj:.3f} tok/J")
+            a = per.setdefault(name, [0, 0.0, 0.0, 0])
+            a[0] += ct; a[1] += t1 - t0; a[2] += j; a[3] += 1
+            print(f"{name:14s} tokens={ct:6d} secs={t1-t0:7.2f} tok/s={ct/(t1-t0):7.2f} mean {p:6.1f} W  SM {sm:5.0f} MHz  {ct/j:.3f} tok/J")
+for name, (ct, secs, j, n) in per.items():
+    print(f"{name}: {n} calls, {ct} tok, {secs:.1f} s, {ct/secs:.2f} tok/s, mean {j/secs:.1f} W, {ct/j:.3f} tok/J")
+print(f"all native calls: {tt:.0f} tok, {ts:.1f} s, {tt/ts:.2f} tok/s, mean {tj/ts:.1f} W, {tt/tj:.3f} tok/J")

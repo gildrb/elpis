@@ -12,7 +12,7 @@ if [[ ${1:-} == --check ]]; then check=true; shift; fi
 selection=${1:-all}
 if (( $# > 1 )); then printf 'Usage: %s [--check] [taskset|all]\n' "$0" >&2; exit 2; fi
 case "$selection" in
-    all|aime24|aime25|aime26|i3-logic|livecodebench|graphwalks|mrcr-v2) ;;
+    all|aime24|aime25|aime26|i3-logic|livecodebench|mmlu-pro|graphwalks|mrcr-v2) ;;
     *) printf 'Unsupported dataset selection: %s\n' "$selection" >&2; exit 2 ;;
 esac
 for executable in jq git sha256sum flock; do command -v "$executable" >/dev/null; done
@@ -111,8 +111,9 @@ while IFS= read -r taskset; do
         fi
         [[ "$actual" == "$expected" ]] || { printf 'Source hash mismatch: %s\n' "$path" >&2; exit 1; }
     done < <(jq -r --arg key "$taskset" '.huggingface[$key].files[] | [.path,.algorithm,.hash,.size] | @tsv' "$LOCK")
-    # Upstream I3/LCB/GraphWalks do not expose revision arguments. Pin the
-    # conventional HF main ref ONLY in this owned, isolated, offline run cache.
+    # Upstream I3/LCB/GraphWalks/MMLU-Pro do not take revision arguments from
+    # config (MMLU-Pro hardcodes its own). Pin the conventional HF main ref
+    # ONLY in this owned, isolated, offline run cache.
     ref="$repository/refs/main"
     if [[ -L "$repository/refs" || -L "$ref" ]]; then printf 'Refusing symlink ref\n' >&2; exit 1; fi
     if [[ -f "$ref" ]]; then

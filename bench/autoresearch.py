@@ -1,9 +1,9 @@
 # Copyright (c) 2026 inference contributors.
-"""Finite EXL3 + Bend native math and C1 whole-request measurement; see autoresearch.sh.
+"""Finite EXL3 + Bend native broad-taskset and C1 whole-request measurement; see autoresearch.sh.
 
 This supervisor never operates Docker lifecycle, promotion, power policy or the
 maintenance guardian. The latter must independently recover the owned candidate.
-Only the unchanged native math producer, frozen C1 requests and raw-evidence
+Only the unchanged native taskset producers, frozen C1 requests and raw-evidence
 replays in ``bench.exl3`` admit results.
 """
 
@@ -43,17 +43,22 @@ LAUNCH_IDENTITY = {
     "mode": 0o600,
     "nlink": 1,
 }
+TASKSET_METRICS = ("output_tok_s", "reward", "truncated")
 METRIC_NAMES = (
     "model_call_output_tok_s",
-    "c1_request_tok_s_1024",
-    "c1_request_tok_s_8192",
-    "c1_request_tok_s_32768",
-    "tiny_math_reward",
+    *(
+        f"{taskset.metric}_{name}"
+        for taskset in exl3.TASKSETS
+        for name in TASKSET_METRICS
+    ),
+    *(f"c1_request_tok_s_{depth}" for depth in exl3.DEPTHS),
 )
 OPTIONAL_METRIC = "spec_accept_length"
-SUITE_PROTOCOL = "exl3-native-math3-c1-request-v1"
-SUITE_ORDER = ("tiny-math", "c1")
-SUITE_SCOPE = "exl3_bend_sampled_math_and_c1_whole_request_not_full_qualification"
+SUITE_PROTOCOL = "exl3-native-broad-c1-request-v2"
+SUITE_ORDER = (*(taskset.name for taskset in exl3.TASKSETS), "c1")
+SUITE_SCOPE = (
+    "exl3_bend_sampled_broad_tasksets_and_c1_whole_request_not_full_qualification"
+)
 SUITE_SOURCES = (
     "autoresearch.sh",
     "bench/autoresearch.py",
@@ -383,7 +388,7 @@ def run_producer(
 def model_call_observations(
     evidence: exl3.Evidence,
     directory: Path,
-    expected_episode_count: int = 3,
+    expected_episode_count: int,
 ) -> dict[str, object]:
     """Pool every native model call, including graded incorrect/truncated answers.
 
@@ -491,6 +496,9 @@ def model_call_observations(
         "model_call_wall_seconds": seconds,
         "call_count": len(observations),
         "episode_count": episodes,
+        "length_truncated_calls": sum(
+            call["finish_reason"] == "length" for call in observations
+        ),
         "calls": observations,
         "scope": "whole native model-call wall time including prefill/decode/HTTP; not decode-only, monotonic or GPU time",
         "usage_semantics": "completion_tokens includes reasoning; optional reasoning_tokens is not added again",
@@ -505,9 +513,20 @@ def _freeze(
     client: exl3.Client,
     tokenizer: exl3.RawTokenizer,
 ) -> dict[str, object]:
-    """Bind math inputs, C1 prompts/IDs and producer bytes before any generation."""
+    """Bind taskset inputs, C1 prompts/IDs and producer bytes before any generation."""
     supervisor = exl3.document(settings.output / "supervisor.json")
-    math_inputs = exl3.freeze_math(settings.output / "tiny-math")
+    tasksets: dict[str, object] = {}
+    for taskset in exl3.TASKSETS:
+        inputs = exl3.freeze_taskset(settings.output / taskset.name, taskset)
+        tasksets[taskset.name] = {
+            "profile": taskset.config,
+            "tasks": taskset.tasks,
+            "output_budget": taskset.output_tokens,
+            "files_sha256": inputs["files_sha256"],
+            "local_dataset": inputs["local_dataset"],
+            "selection": inputs["selection"],
+            "call_sampling": exl3.expected_call_sampling(taskset),
+        }
     plan = exl3.plan_c1(settings.output / "c1", client, tokenizer)
     sources = sequence(supervisor["sources"])
     for value in sources:
@@ -521,13 +540,9 @@ def _freeze(
         "protocol": SUITE_PROTOCOL,
         "order": list(SUITE_ORDER),
         "primary_metric": "model_call_output_tok_s",
-        "primary_scope": "tiny-math native model calls only; unchanged numerator and wall-clock denominator",
+        "primary_scope": "every native model call of all four tasksets pooled: sum of completion tokens / sum of model-call wall time",
         "identity_before_sha256": identity_sha256,
-        "math": {
-            "files_sha256": math_inputs["files_sha256"],
-            "selection": math_inputs["selection"],
-            "call_sampling": exl3.expected_call_sampling(),
-        },
+        "tasksets": tasksets,
         "c1": {
             "plan_sha256": exl3.digest(settings.output / "c1/plan.json"),
             "rows": plan["rows"],
@@ -566,17 +581,20 @@ def worker(settings: Settings) -> int:
     )
     benchmark = _freeze(settings, exl3.digest(before_path), client, tokenizer)
     frozen_workload = mapping(benchmark["workload"])
-    group = settings.output / "tiny-math"
-    command, cwd = exl3.math_command(group)
-    run_producer(
-        settings,
-        "tiny-math",
-        command,
-        cwd,
-        exl3.math_environment(group, client.key),
-    )
-    after_inputs = exl3.math_inputs(group / "provenance")
-    exl3.save(group / "provenance/aime25.evaluation-inputs-after.json", after_inputs)
+    for taskset in exl3.TASKSETS:
+        group = settings.output / taskset.name
+        command, cwd = exl3.native_command(group, taskset)
+        run_producer(
+            settings,
+            taskset.name,
+            command,
+            cwd,
+            exl3.native_environment(group, client.key),
+        )
+        exl3.save(
+            group / f"provenance/{taskset.name}.evaluation-inputs-after.json",
+            exl3.taskset_inputs(group / "provenance", taskset),
+        )
     exl3.run_c1(
         settings.output / "c1",
         client,
@@ -592,19 +610,54 @@ def worker(settings: Settings) -> int:
         exl3.integer(before["finished_unix_ns"]),
         exl3.integer(after["started_unix_ns"]),
     )
-    quality = exl3.admit_math(evidence, group, window)
-    model_calls = model_call_observations(evidence, group / "aime25")
-    require(
-        model_calls["call_count"] == 3 and quality["rollouts"] == 3,
-        "Tiny math must retain all three graded one-call rollouts",
-    )
-    require(
-        mapping(frozen_workload["math"])["files_sha256"]
-        == exl3.document(group / "provenance/aime25.evaluation-inputs-before.json")[
-            "files_sha256"
-        ],
-        "Math inputs differ from the pre-suite frozen workload",
-    )
+    frozen_tasksets = mapping(frozen_workload["tasksets"])
+    qualities: dict[str, object] = {}
+    native_calls: dict[str, object] = {}
+    metrics: dict[str, float] = {}
+    pooled_tokens = 0
+    pooled_durations: list[float] = []
+    for taskset in exl3.TASKSETS:
+        group = settings.output / taskset.name
+        quality = exl3.admit_taskset(evidence, group, taskset, window)
+        calls = model_call_observations(evidence, group / taskset.name, taskset.tasks)
+        require(
+            calls["call_count"] == taskset.tasks
+            and quality["rollouts"] == taskset.tasks
+            and calls["length_truncated_calls"] == quality["truncated_rollouts"],
+            f"{taskset.name} must retain all {taskset.tasks} graded one-call rollouts",
+        )
+        require(
+            mapping(frozen_tasksets[taskset.name])["files_sha256"]
+            == exl3.document(
+                group / f"provenance/{taskset.name}.evaluation-inputs-before.json"
+            )["files_sha256"],
+            f"{taskset.name} inputs differ from the pre-suite frozen workload",
+        )
+        metrics[f"{taskset.metric}_output_tok_s"] = number(
+            calls["model_call_output_tok_s"]
+        )
+        metrics[f"{taskset.metric}_reward"] = number(quality["weighted_reward_mean"])
+        metrics[f"{taskset.metric}_truncated"] = float(
+            exl3.integer(calls["length_truncated_calls"])
+        )
+        pooled_tokens += exl3.integer(calls["completion_tokens"])
+        pooled_durations.extend(
+            number(mapping(call)["duration_wall_seconds"])
+            for call in sequence(calls["calls"])
+        )
+        qualities[taskset.name] = quality
+        native_calls[taskset.name] = calls
+    pooled_seconds = number(math.fsum(pooled_durations))
+    require(pooled_seconds > 0, "No positive pooled native model-call duration")
+    metrics["model_call_output_tok_s"] = number(pooled_tokens / pooled_seconds)
+    native_calls["pooled"] = {
+        "model_call_output_tok_s": metrics["model_call_output_tok_s"],
+        "completion_tokens": pooled_tokens,
+        "model_call_wall_seconds": pooled_seconds,
+        "call_count": len(pooled_durations),
+        "tasksets": [taskset.name for taskset in exl3.TASKSETS],
+        "scope": "every native model call of all four tasksets pooled: sum of completion tokens / sum of model-call wall time",
+    }
     c1 = exl3.admit_c1(evidence, settings.output / "c1")
     require(
         mapping(frozen_workload["c1"])["plan_sha256"]
@@ -612,11 +665,9 @@ def worker(settings: Settings) -> int:
         "C1 plan differs from the pre-suite frozen workload",
     )
     guard(settings)
-    metrics: dict[str, float] = {
-        "model_call_output_tok_s": number(model_calls["model_call_output_tok_s"]),
-        "tiny_math_reward": number(quality["weighted_reward_mean"]),
-        **{name: number(value) for name, value in mapping(c1["metrics"]).items()},
-    }
+    metrics.update({
+        name: number(value) for name, value in mapping(c1["metrics"]).items()
+    })
     for value in sequence(frozen_workload["sources"]):
         item = mapping(value)
         path = settings.output / exl3.text(item["path"])
@@ -631,8 +682,9 @@ def worker(settings: Settings) -> int:
         evidence.retain(path)
     evidence.tree(settings.output / "sources")
     evidence.tree(settings.output / "logs")
-    evidence.tree(group / "provenance")
-    evidence.tree(group / "aime25")
+    for taskset in exl3.TASKSETS:
+        evidence.tree(settings.output / taskset.name / "provenance")
+        evidence.tree(settings.output / taskset.name / taskset.name)
     evidence.tree(settings.output / "c1")
     exl3.save(
         settings.output / "admitted.json",
@@ -641,15 +693,15 @@ def worker(settings: Settings) -> int:
             "status": "complete_admitted_measurement",
             "protocol": SUITE_PROTOCOL,
             "scope": SUITE_SCOPE,
-            "quality_scope": "three original AIME25 tasks; native rewards, no combined quality score",
+            "quality_scope": "sampled native tasksets (3 AIME25, 20 MMLU-Pro, 6 I3 Logic, 3 LiveCodeBench); native rewards per taskset, no combined quality score",
             "order": list(SUITE_ORDER),
             "workload_sha256": benchmark["workload_sha256"],
             "benchmark_sha256": exl3.digest(settings.output / "benchmark.json"),
             "identity": identity,
             "metrics": metrics,
             "primary_metric": "model_call_output_tok_s",
-            "tiny_math": quality,
-            "native_model_calls": model_calls,
+            "tasksets": qualities,
+            "native_model_calls": native_calls,
             "c1": c1,
             "not_measured": {
                 "ttft": c1["ttft"],
@@ -848,7 +900,7 @@ def terminate(child: subprocess.Popen[bytes], deadline: float) -> bool:
 
 
 def supervise(settings: Settings, started: float) -> int:
-    """Enforce one deadline across capture, both native workloads and admission."""
+    """Enforce one deadline across capture, every native workload and admission."""
     require(not os.path.lexists(settings.output), "Output directory must be fresh")
     state = guard(settings)
     deadline = min(
@@ -905,16 +957,19 @@ def supervise_created(
                 "sha256": settings.operator_sha256,
             },
             "guardian_before": state,
-            "math": {
-                "profile": "tiny",
-                "environment": "aime25",
-                "tasks": 3,
-                "rollouts": 1,
-                "shuffle": True,
-                "seed": 0,
-                "output_budget": 32768,
-                "sampling": "unchanged eval/configs/local.toml; greedy, thinking enabled",
-            },
+            "tasksets": [
+                {
+                    "taskset": taskset.name,
+                    "profile": taskset.config,
+                    "tasks": taskset.tasks,
+                    "rollouts": 1,
+                    "shuffle": True,
+                    "seed": 0,
+                    "output_budget": taskset.output_tokens,
+                    "sampling": "eval/configs/local.toml; greedy, thinking enabled; only max_tokens set per taskset",
+                }
+                for taskset in exl3.TASKSETS
+            ],
             "c1": {
                 "protocol": exl3.C1_PROTOCOL,
                 "depths": list(exl3.DEPTHS),

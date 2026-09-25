@@ -2,10 +2,11 @@
 
 **Status:** the serving stack is EXL3 with native DFlash2 speculative decoding
 (greedy, one sequence, native context 262144, CQ3 cache) on one RTX 3090. The
-frozen lane below is protocol `exl3-native-math3-c1-request-v1`, a **new
-comparison segment that needs a fresh baseline**. Numbers from earlier serving
-segments are not comparable, except that the math primary keeps its exact
-definition (same native producer, tasks, budget and formula) and is therefore a
+frozen lane below is protocol `exl3-native-broad-c1-request-v2`, a **new
+comparison segment that needs a fresh baseline**. Its primary pools four native
+tasksets, so it is not comparable with `exl3-native-math3-c1-request-v1`
+(math-only primary) or any earlier segment. Only its `aime25_*` metrics keep the
+v1 math definition (same producer, tasks, config and budget); they are a
 whole-stack comparison only. No lane here is full quality, capacity or promotion
 qualification.
 
@@ -22,17 +23,30 @@ numbers across runner-configuration changes.
 Quality uses the frozen **Prime Envs + Verifiers** profiles under `eval/`
 (prime-envs `c4d04dfe`, verifiers `ef47b2e9`). `bench/` orchestrates those
 unchanged native tasks; it does not define their prompts, graders or a combined
-intelligence score.
+intelligence score. No lane uses an LLM judge. GPQA is excluded: its dataset is
+gated and its scorer can fall back to a remote LLM judge.
 
 ## 2. Frozen autoresearch lane
 
 `bash autoresearch.sh` (`bench/autoresearch.py` supervisor/worker,
-`bench/exl3.py` identity, math and C1 logic) runs exactly once, in this order:
+`bench/exl3.py` identity, native taskset and C1 logic) runs exactly once, in this
+order:
 
 | Order | Workload | Frozen selection and settings |
 | --- | --- | --- |
-| 1 | `tiny/aime25` | Unchanged three native seed-zero shuffled tasks, one rollout each, one call each, greedy/thinking, 32768 output-token budget, `eval/configs/local.toml` sampling |
-| 2 | C1 depth matrix | Raw-content depths 1024/8192/32768 (±2 tokens), five repetitions each in depth-then-repetition order, 1024 output-token budget, greedy, `top_p` 1, `n` 1, normal EOS, non-streaming |
+| 1 | `aime25` | `eval/configs/tiny/aime25.toml` unchanged: 3 native seed-zero shuffled tasks, 32768 output-token budget |
+| 2 | `mmlu-pro` | `eval/configs/broad/mmlu-pro.toml`: 20 tasks, zero-shot, 8192 budget; boxed-letter math-verify scoring |
+| 3 | `i3-logic` | `eval/configs/broad/i3-logic.toml`: 6 tasks, 16384 budget |
+| 4 | `livecodebench` | `eval/configs/broad/livecodebench.toml`: 3 tasks, 16384 budget, official v6 date filter (2024-08-01 through 2025-05-01, as `quick`); hidden tests in the sandbox |
+| 5 | C1 depth matrix | Raw-content depths 1024/8192/32768 (±2 tokens), five repetitions each in depth-then-repetition order, 1024 output-token budget, greedy, `top_p` 1, `n` 1, normal EOS, non-streaming |
+
+Every taskset uses one rollout per task, one model call per episode (null
+harness), `max_concurrent` 1, the local Docker runtime image pinned by
+`eval/.cache/sandbox-image`, native Docker timeouts (setup 600 s, rollout
+1800 s, scoring 600 s) and `eval/configs/local.toml` sampling (greedy,
+thinking enabled). A taskset profile may set only `sampling.max_tokens` (its
+per-call budget, equal to `env.agent.max_output_tokens`); any other sampling
+difference rejects the run.
 
 ### Operator contract
 
@@ -45,21 +59,22 @@ existing `output_directory`. The supervisor binds the descriptor's inode and
 digest, verifies guardian lease/launch-lock/mutex ownership on every poll,
 requires the container to be the guardian candidate publishing only
 `127.0.0.1:18020`, and enforces `min(2400 s, guardian deadline - 120 s)` over
-capture, both workloads and admission. The worker runs inside pinned offline
+capture, every workload and admission. The worker runs inside pinned offline
 Nix. There is no retry, task reduction, warmup, flush, capacity probe, power
 change, deployment or promotion.
 
-Prerequisites: prepared offline `eval/.venv` (including `tokenizers`), pinned
-Prime/Verifiers sources and AIME25 snapshot, the pinned local sandbox image in
-`eval/.cache/sandbox-image`, host `docker` and `nvidia-smi`, and a healthy
-owned EXL3 instance serving `qwen3.8-27b` with target/draft mounted under
-`/models`. The server must accept the native client's identity sampling fields
-(`top_p` 1, `min_p` 0, frequency/presence penalty 0, repetition penalty 1) and
-reject other values.
+Prerequisites: prepared offline `eval/.venv` (including `tokenizers` and the
+`mmlu-pro` package), pinned Prime/Verifiers sources, verified AIME25, MMLU-Pro,
+I3 Logic and LiveCodeBench snapshots (`eval/scripts/data --check <taskset>`), the
+pinned local sandbox image in `eval/.cache/sandbox-image`, host `docker` and
+`nvidia-smi`, and a healthy owned EXL3 instance serving `qwen3.8-27b` with
+target/draft mounted under `/models`. The server must accept the native client's
+identity sampling fields (`top_p` 1, `min_p` 0, frequency/presence penalty 0,
+repetition penalty 1) and reject other values.
 
 ### Serving identity
 
-Before any workload and again after both, the worker captures and requires
+Before any workload and again after all of them, the worker captures and requires
 byte-identical identity (`identity-before.json`, `identity-after.json`):
 
 - Docker: full container ID, name, immutable image ID, creation and start time,
@@ -89,31 +104,49 @@ byte-identical identity (`identity-before.json`, `identity-after.json`):
 - The host tokenizer file behind the target mount, whose bytes must equal both
   the served file and its manifest pin.
 
-### Math primary
+### Native tasksets and the primary
 
-`model_call_output_tok_s` is the **math-only primary**: all three native episode
-calls' completion tokens divided by the sum of their native model-call wall
-intervals (`bench.autoresearch.model_call_observations`). These intervals cover
-request send through the fully received response, including prefill, decode and
-HTTP; they are not decode-only or GPU time. Incorrect and length-truncated but
-operationally complete graded answers stay in both numerator/denominator and
-quality report. Failed or missing calls, invalid clocks, skipped/reordered
-episodes, changed sampling/model/endpoint, an unpinned scorer, a resolved config
-differing from the offline-replayed frozen plan, or traces outside the identity
-capture window reject the whole measurement.
-
-The native producer is invoked directly as
+Each taskset `<ts>` is invoked directly as
 `uv run --project eval --no-sync eval @ eval/configs/local.toml @ <launch>
--o <group>/aime25 --no-rich --no-push --env.taskset.dataset-name <snapshot>`
-from `eval/.sources/prime-envs`, where `<launch>` is `eval/configs/tiny/aime25.toml`
-with only its sandbox image replaced by the pin. The evaluator/source/config/data
-hash closure and native seed-zero task selection are frozen before the run and
-must be unchanged afterwards. `tiny_math_reward` is the mean native weighted
-reward of the three episodes.
+-o <group>/<ts> --no-rich --no-push <data flags>`, where `<launch>` is its profile
+with only the sandbox image replaced by the pin. Offline data loading is exactly
+`eval/scripts/run`'s (`eval/README.md`): AIME25 gets
+`--env.taskset.dataset-name <snapshot>` and I3 Logic
+`--env.taskset.dataset.name <snapshot>/logic --env.taskset.dataset.subset default`,
+both from `eval/.sources/prime-envs`; LiveCodeBench reads the owned HF cache whose
+`refs/main` must name the locked revision; MMLU-Pro, which hardcodes
+`TIGER-Lab/MMLU-Pro` and its revision, runs from `<group>/local-datasets`, where
+that relative path links to the verified snapshot, and the taskset module's
+hardcoded name and revision must equal the lock entry.
 
-Replaying the historical EXL3 same-three traces through this admission path
-reproduces 23127 tokens / 233.5167772769928 s = 99.03785188233918 tok/s with
-reward 1.0 (a pre-segment comparison run, not a baseline for this protocol).
+Before any generation, every taskset's evaluator/source/config/data hash closure
+is frozen and its native seed-zero selection and resolved config are replayed
+offline with the CLI's deep merge (`<ts>.evaluation-inputs-before.json`); the
+same record is recomputed after that taskset's run and must be identical.
+Admission then replays each taskset from raw files: the resolved config equals
+the frozen plan (model, taskset, harness, sampling, budget, runtime); the log
+states exactly one `<N>x1` run; exactly the planned tasks in planned order with
+matching content hashes; every episode and trace `ok`, complete and scored by
+the pinned Verifiers commit; exactly one call per episode with the expected
+model, endpoint, wire sampling (including its budget) and a `stop`/`length`
+finish; and every trace inside the identity capture window. Any failure rejects
+the whole run.
+
+`model_call_output_tok_s` is the **primary**: the completion tokens of every
+native model call of all four tasksets divided by the sum of their native
+model-call wall intervals (`bench.autoresearch.model_call_observations`). These
+intervals cover request send through the fully received response, including
+prefill, decode and HTTP; they are not decode-only or GPU time. The primary
+therefore weights tasksets by their generated tokens. `<ts>_output_tok_s` is the
+same ratio over one taskset's calls, `<ts>_reward` the mean native weighted
+reward of its episodes and `<ts>_truncated` the number of its calls with finish
+reason `length`, for `<ts>` in `aime25`, `mmlu_pro`, `i3_logic`,
+`livecodebench`. Incorrect and length-truncated but operationally complete
+graded answers stay in numerators, denominators and rewards.
+
+Replaying the historical run-g7kafqt AIME25 traces through this admission path
+reproduces `aime25_output_tok_s` 19714 tokens / 125.18 s = 157.4852 tok/s,
+reward 1.0 and no truncation (a v1 run, not a baseline for this protocol).
 
 ### C1 whole-request secondaries
 
@@ -141,20 +174,35 @@ When every C1 row's usage carries `exl3_spec` = `{rounds, committed}` (native
 verify rounds and tokens committed by them; `rounds <= committed <=
 min(completion_tokens, 8 * rounds)`), `spec_accept_length` = total committed /
 total rounds over all 15 C1 rows is reported. It is absent when the server does
-not report the field; partial reporting rejects the run. Math traces do not
-retain this field.
+not report the field; partial reporting rejects the run. Native taskset traces do
+not retain this field.
+
+### Time budget
+
+Expected wall time is about 25 minutes, inside the 2400 s hard deadline:
+AIME25 ~150 s (measured on g7kafqt: 125 s of calls), MMLU-Pro ~310 s, I3 Logic
+~210 s and LiveCodeBench ~290 s including sandbox scoring (estimates: about
+2000/5000/9000 completion tokens per call at 160–185 tok/s plus ~4 s of Docker
+episode overhead), C1 ~340 s (measured) and ~190 s of identity captures, Nix,
+offline selection replays, input hashing (LiveCodeBench's 4.49 GB source is
+hashed and loaded before and after its run) and evaluator startups. That leaves
+roughly 900 s for longer outputs; output-bound worst cases (every call reaching
+its budget, about 2600 s of generation alone) exceed the deadline. Such a run
+is rejected, never shortened or retried.
 
 ### Admission and output
 
 Artifacts: `supervisor.json`, `benchmark.json` (frozen workload and
 `workload_sha256`), `identity-before.json`, `identity-after.json`,
-`tiny-math/{provenance,aime25}`, `c1/{plan.json,depth-D-rep-R/}`, `logs/`,
-`sources/`, `admitted.json` (all metrics, per-call/per-row records and the
-retained evidence hash closure) and `measurement.json`. Only a complete admitted
-run prints `METRIC` lines: `model_call_output_tok_s`, the three
-`c1_request_tok_s_*`, `tiny_math_reward`, optional `spec_accept_length`, and
-`elapsed_seconds` (whole command, not a per-lane clock). Any rejection writes
-`failure.json` (and `worker-failure.json` from the worker) and exits nonzero.
+`<ts>/{provenance,<ts>}` for each taskset (plus `mmlu-pro/local-datasets`),
+`c1/{plan.json,depth-D-rep-R/}`, `logs/`, `sources/`, `admitted.json` (all
+metrics, per-taskset/per-call/per-row records and the retained evidence hash
+closure) and `measurement.json`. Only a complete admitted run prints `METRIC`
+lines, in this order: `model_call_output_tok_s`; `<ts>_output_tok_s`,
+`<ts>_reward`, `<ts>_truncated` per taskset in lane order; the three
+`c1_request_tok_s_*`; optional `spec_accept_length`; and `elapsed_seconds`
+(whole command, not a per-lane clock). Any rejection writes `failure.json` (and
+`worker-failure.json` from the worker) and exits nonzero.
 
 Not measured by this lane: TTFT, committed decode throughput, power/energy and
 262144-token capacity.
@@ -195,7 +243,9 @@ deployment (see [docker.md](docker.md)) is unchanged and still serves the promot
   - 2102 grouped m16 qkv(+z) projections;
   - 8202 persistent layer tail (o/out-proj, residual, norm and MLP in one kernel).
 
-Primary `model_call_output_tok_s` of the kept runs (each run is one full lane):
+Primary `model_call_output_tok_s` of the kept runs (each run is one full lane of
+the earlier protocol `exl3-native-math3-c1-request-v1`, math-only primary; not
+comparable with the broad v2 lane above, which needs its own baseline):
 
 | Run | Image | Primary tok/s | tok/J | Note |
 |---|---|---|---|---|

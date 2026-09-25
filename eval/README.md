@@ -62,7 +62,7 @@ is part of its standard harness, not a repository-specific adapter.
 | Sandbox | Digest-pinned base and uv images in `runtime/Dockerfile`; helper-image pins in `runtime/images.lock`; actual built image ID saved in each resolved Docker launch |
 
 Versions at this Prime Envs revision: AIME24/25/26 `0.1.0`, I3 Logic `0.2.1`,
-LiveCodeBench `0.1.0`, MRCR v2 `0.1.0`, GraphWalks `0.1.0`.
+LiveCodeBench `0.1.0`, MMLU-Pro `0.1.0`, MRCR v2 `0.1.0`, GraphWalks `0.1.0`.
 
 Source checkouts under `.sources/` are obtained by `scripts/setup`, never vendored
 into Git. Existing wrong-revision or dirty checkouts fail instead of being reset.
@@ -83,7 +83,10 @@ must be reviewed together on upgrades; nothing silently follows `main`.
 or generation-pinned GCS URLs. It constructs no tasks and evaluates no answers.
 AIME supplies revision knobs. Current I3 Logic, LiveCodeBench and GraphWalks do
 not. Their standard HF `refs/main` entries are explicitly bound to the locked
-commit **only inside this repository's owned cache**. All runs use HF offline
+commit **only inside this repository's owned cache**. MMLU-Pro hardcodes both its
+Hub name `TIGER-Lab/MMLU-Pro` and revision `b189ec76…`; the lock pins that same
+revision (README plus the `test` and `validation` parquet files its default config
+declares). All runs use HF offline
 mode and verify the source files before loading them. Each invocation has a fresh derived Arrow cache; only verified raw assets are
 reused. Shared/user HF caches are not modified. A mismatching cache fails; it is never silently repaired or refreshed.
 
@@ -93,9 +96,11 @@ cannot resolve Hub metadata from raw cached files alone. Local snapshot loading
 keeps the upstream README/schema and data unchanged; the actual absolute path
 and revision are saved in the resolved config. I3 uses the raw `logic/`
 subdirectory with the native parquet builder's `default` config; no rows are
-rewritten. GraphWalks hardcodes `openai/graphwalks`, so its invocation uses a
-fresh working directory with that relative path symlinked to the verified
-snapshot. Hugging Face natively resolves local paths before Hub names. That
+rewritten. GraphWalks hardcodes `openai/graphwalks` and MMLU-Pro hardcodes
+`TIGER-Lab/MMLU-Pro`, so their invocations use a fresh working directory with
+that relative path symlinked to the verified snapshot. Hugging Face natively
+resolves local paths before Hub names (the hardcoded revision argument is then
+not consulted, which is why the lock pins exactly that revision). That
 working directory is recorded in provenance and remains outside every virtual
 environment. No cached Arrow artifacts or task banks are imported.
 
@@ -104,6 +109,7 @@ Data preparation can be scoped to one Taskset:
 ```sh
 eval/scripts/data i3-logic
 eval/scripts/data livecodebench
+eval/scripts/data mmlu-pro
 eval/scripts/data --check livecodebench
 ```
 
@@ -129,6 +135,7 @@ optional long-context data. `run` never downloads missing task data.
 | `smoke` | First 3 AIME24 tasks; no shuffle | 1 | Prove loading → local inference → upstream scoring → saved traces |
 | `quick` | Native fixed-seed shuffle: 10 each AIME24/25/26, 24 I3 Logic, 12 LiveCodeBench | 1 | 66 fixed comparison tasks; not a broad intelligence score |
 | `full` | All tasks after each upstream environment's configured filters | 20 for each AIME; 1 I3 Logic; 2 LiveCodeBench | Per-environment estimates with representative rollout counts |
+| `tiny` + `broad` | Native fixed-seed shuffle: 3 AIME25 (32768 budget); 20 MMLU-Pro (8192), 6 I3 Logic (16384), 3 LiveCodeBench (16384) | 1 | The `bash autoresearch.sh` lane tasksets ([../docs/benchmarks.md](../docs/benchmarks.md)); sampled, not qualification |
 
 Verifiers owns task shuffling (seed 0 at this revision). There is no local sampler
 or selection state. Quick comparisons reuse exactly the same datasets, order,

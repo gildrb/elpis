@@ -121,6 +121,30 @@
         }
       ]
     },
+    "mmlu-pro": {
+      "repo": "TIGER-Lab/MMLU-Pro",
+      "revision": "b189ec765aa7ed75c8acfea42df31fdae71f97be",
+      "files": [
+        {
+          "path": "README.md",
+          "size": 11723,
+          "algorithm": "git-sha1",
+          "hash": "29e49a8b4c80bb3701e56f69acd89197f0eea371"
+        },
+        {
+          "path": "data/test-00000-of-00001.parquet",
+          "size": 4144185,
+          "algorithm": "sha256",
+          "hash": "0e24a191921c2f453518a537a8b2117bd137e7714d4ef1565e9ba06c1ecb9ad8"
+        },
+        {
+          "path": "data/validation-00000-of-00001.parquet",
+          "size": 42857,
+          "algorithm": "sha256",
+          "hash": "139423c23722e480c807ac4a191409a710cfce4eba744c1d641cf88e730e2078"
+        }
+      ]
+    },
     "graphwalks": {
       "repo": "openai/graphwalks",
       "revision": "f338bb265735a56a79f4b0f5def722c9c3268ead",
