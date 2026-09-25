@@ -51,3 +51,16 @@ import ./bend/attn_chunk_laws.bend as AttnChunkLaws
 # traps never fire, the host allocation (max of the 3004 dense size and the 3003 size) passes the checks,
 # tiles stay inside one page (bend/attn_chunk_bounds.bend).
 import ./bend/attn_chunk_bounds_laws.bend as AttnChunkBoundsLaws
+# Row-invariant verify-attention partition (ext patch 3005): each query row splits its keys by its
+# own absolute position (identically in every speculative round), every key < n is read in exactly
+# one launched split, two passes compute every row once, and the row combines its own chunks in
+# order, over the Nat model bend/attn_rowinv.bend (extends bend/attn_split.bend).
+import ./bend/attn_rowinv_laws.bend as AttnRowinvLaws
+# GDN across speculative rounds (ext 0003 verify / 0004 commit replay): committed state, outputs
+# and conv window are those of one uninterrupted scan whatever the round cuts; verify-in-round
+# equals replay-then-verify at every split point, over bend/gdn_rounds.bend (on bend/gdn_replay.bend).
+import ./bend/gdn_rounds_laws.bend as GdnRoundsLaws
+# Round-level speculation invariance: with per-row outputs a function of the absolute prefix, any
+# two drafters emit the same tokens, the greedy output (bend/spec_inv.bend over the exl3_accept
+# reference and the exl3_round advance; reference bend/spec_inv_spec.bend).
+import ./bend/spec_inv_laws.bend as SpecInvLaws
