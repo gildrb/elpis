@@ -16,7 +16,7 @@
     "path": "/opt/venv/lib/python3.13/site-packages/exllamav3_ext.cpython-313-x86_64-linux-gnu.so",
     "base_sha256": "6d30690fdb76b3c4ad3fb5e69f0479707e410fc9b6194e2a5e32f4d7fe1fd8b3"
   },
-  "series_sha256": "2939a05253db7102b5757fc9612b716c681218a259603500b55e985c9cbdd516",
+  "series_sha256": "58eda162473822a59fc04abb96e85dcb34668f186535e0f2cf05e810bff4f925",
   "patches": [
     {
       "name": "0001-gdn-shared-carveout.patch",
@@ -85,6 +85,10 @@
     {
       "name": "2102-proj-m16-grouped-v2-on3003-5101.patch",
       "sha256": "c12f897d48c07ab26fbdda03f1a44e762324ede735b8bb461b2cc8f8a8a66ff3"
+    },
+    {
+      "name": "8202-layer-tail-on2102.patch",
+      "sha256": "37b23e9a2643bcdd91f3a247b4a569d37f55876ae34e3395125c7aa642fb51ff"
     }
   ],
   "files": {
@@ -134,35 +138,43 @@
     },
     "exllamav3_ext/graph.cuh": {
       "pre": "6fe8e3d3ab39d885ff8447f6f8f3397c35387619722fca0222eddcc753b6d074",
-      "post": "4ab7589140d207270f3b8caae1ec862b45d542b43c533734dcbee1b55d51901d"
+      "post": "f24b0f6a2c80308244aa3670587ba24a50214fd9a7da10132400c511722a41fd"
     },
     "exllamav3_ext/libtorch/attention.cpp": {
       "pre": "78ed122f0cf0a345755a306713ed982137b2bfbee62f6b17cf8bf4b0056427e4",
-      "post": "1f4392992691733d6480e3c2e610f5793b2bfbccaac275bdee11b26362fc7e30"
+      "post": "9e89d57eb3a6312e6d13d93ba2e19d6f9ebc29d1e90f2211d54a307ce285953b"
     },
     "exllamav3_ext/libtorch/attention.h": {
       "pre": "628741cc309a351507b09d992c09d8d2972a113afb3ff76e0a6323ed0b0ee4b4",
-      "post": "e151781e4c003e5418ac5aff64dcbbad16b003f1c43b4c2acf6731f4e790c464"
+      "post": "4264903778cb2f8d434b2f4673f7441335706768b33cd08ce6d6e8b8ac1c792d"
     },
     "exllamav3_ext/libtorch/attention_bc.h": {
       "pre": "b007768c5be8f34d8b9765213480c59867cc23784539b5fa2c97d0c235504db5",
-      "post": "2b0e8d2d9ceb815f08fab3171cfdbf689e3a9fe00e84b1b3fb86227cf94e2a24"
+      "post": "af81b6b98d4fd03f9d9069dce1e0b1dcc01ff5fd9ed26eef24899ca37f8f49a9"
     },
     "exllamav3_ext/libtorch/gated_delta_net.cpp": {
       "pre": "d8a31ef61e42ce753f7a9ee2a55c7e25a1c51e0a0a8d148d6058f9d96120dfef",
-      "post": "1918c1242a0a3f177f2c7112b9747b0a41721b736c5a907727adfbbf2673e57f"
+      "post": "3926d8138d4a0f76b70cb5adfcd92b6668f7577333afbaf28e9de5b358f7bd46"
     },
     "exllamav3_ext/libtorch/gated_delta_net.h": {
       "pre": "57e460d9e8d5097f647b59b6d20c8be5162386e11ec168ced7903471f4b4205f",
-      "post": "11921e64fcbf316258175430e4715440a993dfd37fc69d03f664e7e1133ad9d5"
+      "post": "406bbb18a9911ac33721817acc37e51a0364c58821acaec6d23df6a626bc05fc"
     },
     "exllamav3_ext/libtorch/gated_delta_net_bc.h": {
       "pre": "b281f169bd1df139919723b9e4cd8a418a788c5c21a9782ed041f8e007e923f0",
-      "post": "738c2e7e5d7008d653fbc670651034a0a9998aa8bd547e9e05d0ac93dc996e20"
+      "post": "226a5d3d1abac382e86018a17267f9e0c1cb01da903cb4faf3b9ba96639d84a3"
     },
     "exllamav3_ext/libtorch/mlp.cpp": {
       "pre": "3f5d326cabd970a9892b2b2ce69cfc5e7949a113462e5e22b572f6f77803ec85",
-      "post": "9237ab31c90ef2dfb31615f61555471ec30329ea8d8a3d06d90889160dec780e"
+      "post": "883c4b15352896a519cacb50a0551da62442b7942c0349fe456820b779117ce1"
+    },
+    "exllamav3_ext/libtorch/mlp.h": {
+      "pre": "08429a2d340766b52487691647b2df7ae9ab08f85906ee32d1f261783fc1fe98",
+      "post": "f81b545cbad584a36ca5c03f3ea34ba0e540895005ff93ea65a93e45eb786ea7"
+    },
+    "exllamav3_ext/libtorch/mlp_bc.h": {
+      "pre": "36ec0ba46beab23ae82d43d8983a2f7a08b5872d59b3c7cc30541625cee50b8d",
+      "post": "f4ce8cf0dd00211dc28cea1cf928d0ca555bd230c019b8038a16fe0ebebb5ce3"
     },
     "exllamav3_ext/norm.cu": {
       "pre": "b7b43921a19aa64cbe56786a9911c2796b5d4327818f0cae73c4cf358e6907df",
@@ -220,6 +232,26 @@
       "pre": null,
       "post": "2bf78e1d6dd07f9940ebb9d4a46e702c789929bbd67fb5373032f03ffb1ed2fd"
     },
+    "exllamav3_ext/quant/exl3_tail_m16.cu": {
+      "pre": null,
+      "post": "7f74d5a4449a8c34a581e71f5831384021e4d52649ee197d071cc96c561318de"
+    },
+    "exllamav3_ext/quant/exl3_tail_m16.cuh": {
+      "pre": null,
+      "post": "9fe194fa24641a9c87afe5145bb08d422fbca712ede23aaf3afa4fe6b9b95d53"
+    },
+    "exllamav3_ext/quant/exl3_tail_m16_kernel.cuh": {
+      "pre": null,
+      "post": "bc5f0a7d896cb8c7ccef6f3a3c97ae65db9d7a4d07403310f53ac45205381226"
+    },
+    "exllamav3_ext/quant/exl3_tail_m16_op.cpp": {
+      "pre": null,
+      "post": "58dc5c87f2473ba7d84570ac87cd8d548a081ded8ee5f70873a0360c29e48489"
+    },
+    "exllamav3_ext/quant/exl3_tail_m16_sched.h": {
+      "pre": null,
+      "post": "6d15ae0797f1af34ec4f6aa75760595cf9a82b1dfd8321bbfabd26ea0172d4fa"
+    },
     "model/model.py": {
       "pre": "013edc062e64d8fad98695491dd3fd504723752377db7e8f338c88e5afb85448",
       "post": "cba42a2e9ea05ab0dc8c848e5af0759a3307d1c05dac8e380f98c38cb923f11b"
@@ -238,19 +270,27 @@
     },
     "modules/attention_fn/bc_attn.py": {
       "pre": "63f0768f313cb7015485d4655b433020f2e9e66bb44d971a9e6c65bc306994e0",
-      "post": "98490ef1b46c696a0fae9d36b63015fe8b356dbf7c38569e2dfe1e559b0a7e7b"
+      "post": "8b686ce20dabdd733a1829c89ef23fe070718bba55340934bb8a50a0694c9e79"
     },
     "modules/attention_fn/triton_paged.py": {
       "pre": "910379b663acb08711c3be207cd3e9ed96658527cc110a6ce39c793f997836d9",
       "post": "12896d430c94639ec4157a967f1635cc4a0dcc2198294d6349a9a2749ed9623e"
     },
+    "modules/attn.py": {
+      "pre": "92075ee1f8890c014fbf9fb62fecb705dba793ac96dbd794c1d399e284034c26",
+      "post": "2e02d9dd1f4de26d262c02e95a48b57342a9139f427c88fdf1916bffe4a2632f"
+    },
     "modules/gated_delta_net.py": {
       "pre": "955f2ae25509ccf695dac4b79721115bc51d9d63a7f6f1eeb0a42671b685cf5a",
-      "post": "7541c964d13783a4ec0073fca2be1594decb290239880ea254084947632cf88b"
+      "post": "844bafa3a2918bf18c355da8056ba412f655fcc0238c8479a425c6c8c2030df1"
+    },
+    "modules/mlp.py": {
+      "pre": "ca921d38cdf607a2dd272bc4f2ddfd9db8f4da7de9df91af32262a0fef611587",
+      "post": "7fc7f276ff7ca1e00d27a2483c81a2948f7526ffeeb0dbfa6536628a87b50c6d"
     },
     "modules/transformer.py": {
       "pre": "6ea3147ffaf54568688a7fa10c385672ec06a1c21c3ab2cb30a1189b2d76bc4a",
-      "post": "558efd081bec60e114847477808f9351400855eb04c3835f01c52c9dd6b87480"
+      "post": "4c98dc8307015eca10819e063b1fc5383eebd45a0c7293775e76e99613f9cdea"
     }
   }
 }

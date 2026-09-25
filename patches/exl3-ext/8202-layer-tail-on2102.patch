@@ -1,0 +1,2195 @@
+--- a/exllamav3_ext/graph.cuh
++++ b/exllamav3_ext/graph.cuh
+@@ -95,7 +95,9 @@
+ 
+     GP_moe_bias_add_sel,
+     GP_moe_bias_add_weighted_sel,
+-    GP_moe_bias_add_weighted_weights
++    GP_moe_bias_add_weighted_weights,
++
++    GP_tail_resid
+ };
+ 
+ class Graph
+--- a/exllamav3_ext/libtorch/attention.cpp
++++ b/exllamav3_ext/libtorch/attention.cpp
+@@ -348,6 +348,8 @@
+ 
+     s.graph = std::make_unique<Graph>();
+     s.runs = 0;
++    s.graph_defer = std::make_unique<Graph>();
++    s.runs_defer = 0;
+     s.configured = true;
+ }
+ 
+@@ -439,7 +441,8 @@
+     const c10::optional<at::Tensor>& inv_freq_override,
+     int regime,
+     int64_t t_total,
+-    Graph* graph
++    Graph* graph,
++    bool defer
+ )
+ {
+     cudaStream_t stream = graph ? graph->capture_stream : at::cuda::getCurrentCUDAStream().stream();
+@@ -898,6 +901,10 @@
+     else if (gate_mode == 2 || gate_mode == 3)
+         mul_sigmoid__gr(s.o2, s.g2, graph);
+ 
++    // Layer tail (ext 8202): the MLP-side tail launch runs o_proj from o2
++    if (defer)
++        return;
++
+     // Output projection. With a padded hidden dim the GEMM writes the padded static (N of the
+     // quantized o_proj), bias included, and the exact-width columns are copied out to y
+     at::Tensor y2 = y.view({R, hidden_size});
+@@ -928,31 +935,77 @@
+     int64_t t_total
+ )
+ {
++    run_mode(bsz, q_len, x, y, cache_seqlens, block_table, position, positions, position_ids, inv_freq_override, regime, t_total, false);
++}
++
++at::Tensor BC_Attention::run_defer
++(
++    int bsz,
++    int q_len,
++    const at::Tensor& x,
++    const at::Tensor& cache_seqlens,
++    const at::Tensor& block_table,
++    int64_t position,
++    const c10::optional<at::Tensor>& positions,
++    const c10::optional<at::Tensor>& position_ids,
++    const c10::optional<at::Tensor>& inv_freq_override,
++    int regime,
++    int64_t t_total
++)
++{
++    TORCH_CHECK(hidden_size_padded == hidden_size && !o_proj->bias, "BC_Attention::run_defer: padded or biased o_proj");
++    at::Tensor unused;
++    run_mode(bsz, q_len, x, unused, cache_seqlens, block_table, position, positions, position_ids, inv_freq_override, regime, t_total, true);
++    Slot& s = slot(bsz, q_len, regime);
++    return s.o2.view({(int64_t) bsz * q_len, -1});
++}
++
++void BC_Attention::run_mode
++(
++    int bsz,
++    int q_len,
++    const at::Tensor& x,
++    at::Tensor& y,
++    const at::Tensor& cache_seqlens,
++    const at::Tensor& block_table,
++    int64_t position,
++    const c10::optional<at::Tensor>& positions,
++    const c10::optional<at::Tensor>& position_ids,
++    const c10::optional<at::Tensor>& inv_freq_override,
++    int regime,
++    int64_t t_total,
++    bool defer
++)
++{
+     py::gil_scoped_release release;
+     c10::cuda::CUDAGuard device_guard(x.device());
+     cudaStream_t stream = at::cuda::getCurrentCUDAStream().stream();
+ 
+     Slot& s = slot(bsz, q_len, regime);
+     TORCH_CHECK(s.configured, "BC_Attention: slot not configured");
+-    TORCH_CHECK(x.is_contiguous() && y.is_contiguous(), "BC_Attention: x and y must be contiguous");
++    TORCH_CHECK(x.is_contiguous() && (defer || y.is_contiguous()), "BC_Attention: x and y must be contiguous");
+     TORCH_CHECK(regime == 0 || qsa, "BC_Attention: sparse regime without QSA indexer");
++
++    // defer (layer tail, ext 8202): the same workload without o_proj, its own graph and warmup
++    Graph& gr = defer ? *s.graph_defer : *s.graph;
++    int& runs = defer ? s.runs_defer : s.runs;
+ 
+     // First run per slot executes eagerly (GEMM autotune, kernel warmup); the second run is
+     // captured, then launched below like every later run, with only the I/O pointers patched
+-    if (s.runs == 0)
++    if (runs == 0)
+     {
+         TORCH_CHECK(!graph_outer_capture(), "BC_Attention: outer capture before the slot graph is warmed up");
+-        run_gr(bsz, q_len, s, x, y, cache_seqlens, block_table, position, positions, position_ids, inv_freq_override, regime, t_total, nullptr);
+-        s.runs = 1;
++        run_gr(bsz, q_len, s, x, y, cache_seqlens, block_table, position, positions, position_ids, inv_freq_override, regime, t_total, nullptr, defer);
++        runs = 1;
+         return;
+     }
+ 
+-    if (!s.graph->ready)
+-    {
+-        s.graph->capture_begin();
+-        run_gr(bsz, q_len, s, x, y, cache_seqlens, block_table, position, positions, position_ids, inv_freq_override, regime, t_total, s.graph.get());
+-        s.graph->capture_end();
+-        s.runs = 2;
++    if (!gr.ready)
++    {
++        gr.capture_begin();
++        run_gr(bsz, q_len, s, x, y, cache_seqlens, block_table, position, positions, position_ids, inv_freq_override, regime, t_total, &gr, defer);
++        gr.capture_end();
++        runs = 2;
+     }
+ 
+     int R = bsz * q_len;
+@@ -1088,14 +1141,17 @@
+         params.emplace_back(GP_attn_num_splits, (void*) (uintptr_t) num_splits);
+         params.emplace_back(GP_attn_num_splits, (void*) (uintptr_t) num_splits);   // combine kernel
+     }
+-    void* yptr = padded ? s.yp.data_ptr() : (void*) y.data_ptr();
+-    params.emplace_back(GP_gemm_C, yptr);
+-    if (o_proj->bias)
+-    {
+-        params.emplace_back(GP_add_x, yptr);
+-        params.emplace_back(GP_add_z, yptr);
+-    }
+-    if (padded)
+-        params.emplace_back(GP_copy2d_dst, (void*) y.data_ptr());
+-    s.graph->launch(params, stream);
++    if (!defer)
++    {
++        void* yptr = padded ? s.yp.data_ptr() : (void*) y.data_ptr();
++        params.emplace_back(GP_gemm_C, yptr);
++        if (o_proj->bias)
++        {
++            params.emplace_back(GP_add_x, yptr);
++            params.emplace_back(GP_add_z, yptr);
++        }
++        if (padded)
++            params.emplace_back(GP_copy2d_dst, (void*) y.data_ptr());
++    }
++    gr.launch(params, stream);
+ }
+--- a/exllamav3_ext/libtorch/attention.h
++++ b/exllamav3_ext/libtorch/attention.h
+@@ -195,6 +195,11 @@
+         int qsa_programs = 0;
+ 
+         std::unique_ptr<Graph> graph;
++
++        // The same workload without o_proj (layer tail, ext 8202: o2 is consumed by the MLP-side
++        // tail launch); own warmup and capture
++        std::unique_ptr<Graph> graph_defer;
++        int runs_defer = 0;
+     };
+     std::vector<Slot> slots;
+ 
+@@ -344,6 +349,40 @@
+         int64_t t_total
+     );
+ 
++    // Layer tail (ext 8202): run without o_proj; returns the o_proj input, this slot's static o2
++    // viewed (bsz * q_len, num_q_heads * head_dim) half, valid until the layer's next call
++    at::Tensor run_defer
++    (
++        int bsz,
++        int q_len,
++        const at::Tensor& x,
++        const at::Tensor& cache_seqlens,
++        const at::Tensor& block_table,
++        int64_t position,
++        const c10::optional<at::Tensor>& positions,
++        const c10::optional<at::Tensor>& position_ids,
++        const c10::optional<at::Tensor>& inv_freq_override,
++        int regime,
++        int64_t t_total
++    );
++
++    void run_mode
++    (
++        int bsz,
++        int q_len,
++        const at::Tensor& x,
++        at::Tensor& y,
++        const at::Tensor& cache_seqlens,
++        const at::Tensor& block_table,
++        int64_t position,
++        const c10::optional<at::Tensor>& positions,
++        const c10::optional<at::Tensor>& position_ids,
++        const c10::optional<at::Tensor>& inv_freq_override,
++        int regime,
++        int64_t t_total,
++        bool defer
++    );
++
+     void run_gr
+     (
+         int bsz,
+@@ -359,7 +398,8 @@
+         const c10::optional<at::Tensor>& inv_freq_override,
+         int regime,
+         int64_t t_total,
+-        Graph* graph
++        Graph* graph,
++        bool defer
+     );
+ 
+ private:
+--- a/exllamav3_ext/libtorch/attention_bc.h
++++ b/exllamav3_ext/libtorch/attention_bc.h
+@@ -186,4 +186,5 @@
+     py::arg("qsa_split_len") = 0,
+     py::arg("qsa_programs") = 0
+ )
+-.def("run", &BC_Attention::run);
++.def("run", &BC_Attention::run)
++.def("run_defer", &BC_Attention::run_defer);
+--- a/exllamav3_ext/libtorch/gated_delta_net.cpp
++++ b/exllamav3_ext/libtorch/gated_delta_net.cpp
+@@ -139,6 +139,7 @@
+                 "BC_GatedDeltaNetSplit: statics must be contiguous");
+ 
+     s.graph = std::make_unique<Graph>();
++    s.graph_defer = std::make_unique<Graph>();
+     s.configured = true;
+ }
+ 
+@@ -189,6 +190,7 @@
+                 "BC_GatedDeltaNetSplit (KDA): statics must be contiguous");
+ 
+     s.graph = std::make_unique<Graph>();
++    s.graph_defer = std::make_unique<Graph>();
+     s.configured = true;
+ }
+ 
+@@ -244,7 +246,8 @@
+     const at::Tensor& slots,
+     bool history,
+     Slot& s,
+-    Graph* graph
++    Graph* graph,
++    bool defer
+ )
+ {
+     int R = (int) (x.size(0) * x.size(1));
+@@ -450,6 +453,10 @@
+         }
+     }
+ 
++    // Layer tail (ext 8202): the MLP-side tail launch runs o_proj from core_attn_out_f
++    if (defer)
++        return;
++
+     exl3_gemm_gr(s.core_attn_out_f, o_proj->trellis, y, o_proj->suh, s.o_xh, o_proj->svh, -1, o_proj->mcg, o_proj->mul1, 0, graph);
+     if (o_proj->bias)
+         add_gr(y, o_proj->bias.value(), y, graph);
+@@ -465,6 +472,36 @@
+     bool history
+ )
+ {
++    run_bszN_mode(x, y, conv_state, recurrent_state, slots, history, false);
++}
++
++at::Tensor BC_GatedDeltaNetSplit::run_bszN_defer
++(
++    const at::Tensor& x,
++    at::Tensor& conv_state,
++    at::Tensor& recurrent_state,
++    const at::Tensor& slots,
++    bool history
++)
++{
++    TORCH_CHECK(!o_proj->bias, "BC_GatedDeltaNetSplit::run_bszN_defer: o_proj with bias");
++    at::Tensor unused;
++    run_bszN_mode(x, unused, conv_state, recurrent_state, slots, history, true);
++    Slot& s = slot((int) x.size(0), (int) x.size(1), history);
++    return s.core_attn_out_f.view({x.size(0) * x.size(1), -1});
++}
++
++void BC_GatedDeltaNetSplit::run_bszN_mode
++(
++    const at::Tensor& x,
++    at::Tensor& y,
++    at::Tensor& conv_state,
++    at::Tensor& recurrent_state,
++    const at::Tensor& slots,
++    bool history,
++    bool defer
++)
++{
+     py::gil_scoped_release release;
+     c10::cuda::CUDAGuard device_guard(x.device());
+     cudaStream_t stream = at::cuda::getCurrentCUDAStream().stream();
+@@ -475,31 +512,34 @@
+                 "BC_GatedDeltaNetSplit::run_bszN: shape out of range");
+     Slot& s = slot(bsz, seqlen, history);
+     TORCH_CHECK(s.configured, "BC_GatedDeltaNetSplit::run_bszN: slot not configured");
+-
+-    if (s.graph->disabled || (!s.graph->ready && !s.graph->ready_to_record))
+-    {
+-        run_bszN_gr(x, y, conv_state, recurrent_state, slots, history, s, nullptr);
+-        s.graph->ready_to_record = true;
+-        s.graph_state_size = (int) conv_state.size(2);
+-        s.graph_hist_stride = (int) recurrent_state.size(1);
++    Graph& gr = defer ? *s.graph_defer : *s.graph;
++    int& state_size = defer ? s.graph_defer_state_size : s.graph_state_size;
++    int& hist_stride = defer ? s.graph_defer_hist_stride : s.graph_hist_stride;
++
++    if (gr.disabled || (!gr.ready && !gr.ready_to_record))
++    {
++        run_bszN_gr(x, y, conv_state, recurrent_state, slots, history, s, nullptr, defer);
++        gr.ready_to_record = true;
++        state_size = (int) conv_state.size(2);
++        hist_stride = (int) recurrent_state.size(1);
+         return;
+     }
+ 
+     // The captured graph bakes in the state-buffer geometry (scalar kernel args can't be patched),
+-    // so a cache with different dimensions falls back to the eager path. The snapshot is per slot:
+-    // another slot's eager run against a second cache must not re-arm this slot's replay
+-    if ((int) conv_state.size(2) != s.graph_state_size ||
+-        (int) recurrent_state.size(1) != s.graph_hist_stride)
+-    {
+-        run_bszN_gr(x, y, conv_state, recurrent_state, slots, history, s, nullptr);
++    // so a cache with different dimensions falls back to the eager path. The snapshot is per slot
++    // and graph: another slot's eager run against a second cache must not re-arm this replay
++    if ((int) conv_state.size(2) != state_size ||
++        (int) recurrent_state.size(1) != hist_stride)
++    {
++        run_bszN_gr(x, y, conv_state, recurrent_state, slots, history, s, nullptr, defer);
+         return;
+     }
+ 
+-    if (!s.graph->ready)
+-    {
+-        s.graph->capture_begin();
+-        run_bszN_gr(x, y, conv_state, recurrent_state, slots, history, s, s.graph.get());
+-        s.graph->capture_end();
++    if (!gr.ready)
++    {
++        gr.capture_begin();
++        run_bszN_gr(x, y, conv_state, recurrent_state, slots, history, s, &gr, defer);
++        gr.capture_end();
+     }
+ 
+     std::vector<PPTR> args;
+@@ -513,8 +553,7 @@
+             PPTR(GP_conv1d_state,   (void*) conv_state.data_ptr()),
+             PPTR(GP_conv1d_slots,   (void*) slots.data_ptr()),
+             PPTR(GP_gdn_rule_state, (void*) recurrent_state.data_ptr()),
+-            PPTR(GP_gdn_rule_slots, (void*) slots.data_ptr()),
+-            PPTR(GP_gemm_C,         (void*) y.data_ptr())           // o_proj output
++            PPTR(GP_gdn_rule_slots, (void*) slots.data_ptr())
+         };
+     else if (qkvz_ptrs_trellis.has_value() && (int) (x.size(0) * x.size(1)) <= 32 &&
+              qkvz_path(*this, (int) (x.size(0) * x.size(1))) != M16G_SINGLES)
+@@ -525,8 +564,7 @@
+             PPTR(GP_conv1d_state,   (void*) conv_state.data_ptr()),
+             PPTR(GP_conv1d_slots,   (void*) slots.data_ptr()),
+             PPTR(GP_gdn_rule_state, (void*) recurrent_state.data_ptr()),
+-            PPTR(GP_gdn_rule_slots, (void*) slots.data_ptr()),
+-            PPTR(GP_gemm_C,         (void*) y.data_ptr())           // o_proj output
++            PPTR(GP_gdn_rule_slots, (void*) slots.data_ptr())
+         };
+     else
+         args = std::vector<PPTR>
+@@ -537,10 +575,11 @@
+             PPTR(GP_conv1d_state,   (void*) conv_state.data_ptr()),
+             PPTR(GP_conv1d_slots,   (void*) slots.data_ptr()),
+             PPTR(GP_gdn_rule_state, (void*) recurrent_state.data_ptr()),
+-            PPTR(GP_gdn_rule_slots, (void*) slots.data_ptr()),
+-            PPTR(GP_gemm_C,         (void*) y.data_ptr())           // o_proj output
++            PPTR(GP_gdn_rule_slots, (void*) slots.data_ptr())
+         };
+-    s.graph->launch(args, stream);
++    if (!defer)
++        args.emplace_back(GP_gemm_C, (void*) y.data_ptr());   // o_proj output
++    gr.launch(args, stream);
+ }
+ 
+ bool BC_Mamba2::needs_configure(int bsz, int seqlen, bool history)
+--- a/exllamav3_ext/libtorch/gated_delta_net.h
++++ b/exllamav3_ext/libtorch/gated_delta_net.h
+@@ -200,6 +200,13 @@
+         int graph_hist_stride = -1;
+ 
+         std::unique_ptr<Graph> graph;
++
++        // The same workload without o_proj (layer tail, ext 8202: the o_proj input
++        // core_attn_out_f is consumed by the MLP-side tail launch); own warmup, capture and
++        // state-geometry snapshot
++        std::unique_ptr<Graph> graph_defer;
++        int graph_defer_state_size = -1;
++        int graph_defer_hist_stride = -1;
+     };
+     std::vector<Slot> slots;        // history == false (only seqlen == 1 ever populated)
+     std::vector<Slot> slots_hist;   // history == true
+@@ -338,6 +345,7 @@
+         at::Tensor o_xh
+     );
+ 
++    // defer: stop after the gated norm (no o_proj); y is not written
+     void run_bszN_gr
+     (
+         const at::Tensor& x,
+@@ -347,13 +355,36 @@
+         const at::Tensor& slots,
+         bool history,
+         Slot& s,
+-        Graph* graph
+-    );
+-
+-    void run_bszN
++        Graph* graph,
++        bool defer
++    );
++
++    void run_bszN_mode
+     (
+         const at::Tensor& x,
+         at::Tensor& y,
++        at::Tensor& conv_state,
++        at::Tensor& recurrent_state,
++        const at::Tensor& slots,
++        bool history,
++        bool defer
++    );
++
++    void run_bszN
++    (
++        const at::Tensor& x,
++        at::Tensor& y,
++        at::Tensor& conv_state,
++        at::Tensor& recurrent_state,
++        const at::Tensor& slots,
++        bool history
++    );
++
++    // Layer tail (ext 8202): run_bszN without o_proj; returns the o_proj input, this slot's static
++    // core_attn_out_f viewed (bsz * seqlen, v_dim) half, valid until the layer's next call
++    at::Tensor run_bszN_defer
++    (
++        const at::Tensor& x,
+         at::Tensor& conv_state,
+         at::Tensor& recurrent_state,
+         const at::Tensor& slots,
+--- a/exllamav3_ext/libtorch/gated_delta_net_bc.h
++++ b/exllamav3_ext/libtorch/gated_delta_net_bc.h
+@@ -165,6 +165,7 @@
+     py::arg("o_xh")
+ )
+ .def("run_bszN", &BC_GatedDeltaNetSplit::run_bszN)
++.def("run_bszN_defer", &BC_GatedDeltaNetSplit::run_bszN_defer)
+ .def("set_replay_verify", &BC_GatedDeltaNetSplit::set_replay_verify, py::arg("enable"))
+ .def("set_qkvz_bundle", &BC_GatedDeltaNetSplit::set_qkvz_bundle,
+     py::arg("ptrs_trellis"),
+--- a/exllamav3_ext/libtorch/mlp.cpp
++++ b/exllamav3_ext/libtorch/mlp.cpp
+@@ -8,6 +8,7 @@
+ #include "../quant/exl3_gemm.cuh"
+ #include "../quant/exl3_gemm_m16.cuh"
+ #include "../quant/exl3_mlp_m16.cuh"
++#include "../quant/exl3_tail_m16.cuh"
+ #include "../activation.cuh"
+ #include "../add.cuh"
+ 
+@@ -183,6 +184,125 @@
+     }
+ }
+ 
++bool BC_GatedMLP::set_tail
++(
++    std::shared_ptr<BC_LinearEXL3> o_proj,
++    at::Tensor norm_w,
++    float norm_eps,
++    float norm_bias,
++    float norm_scale,
++    at::Tensor yo,
++    at::Tensor xn,
++    at::Tensor xh_o
++)
++{
++    // Relinking drops the captured tail graphs (they bake the linked weights and statics)
++    tail_o.reset();
++    for (auto& gt : graph_tail) gt.reset();
++
++    // The 8201 fused-MLP conditions (run_bszN_gr), an o_proj without bias, and statics shaped
++    // (MAX_BSZN, width) for the hidden and o input widths
++    if (gu_ptrs_trellis || !gate || !up || !down || !o_proj) return false;
++    if (!act_silu || gate->bias || up->bias || down->bias || o_proj->bias) return false;
++    if (!gate->mul1 || gate->mcg || !up->mul1 || up->mcg || !down->mul1 || down->mcg || !o_proj->mul1 || o_proj->mcg) return false;
++    if (!exl3_tail_m16_supported(1, o_proj->trellis, gate->trellis, up->trellis, down->trellis)) return false;
++    const int64_t hidden = down->trellis.size(1) * 16;
++    const int64_t o_in = o_proj->trellis.size(0) * 16;
++    if (!(norm_w.scalar_type() == at::kHalf || norm_w.scalar_type() == at::kBFloat16) || !norm_w.is_contiguous() || norm_w.numel() != hidden) return false;
++    if (yo.scalar_type() != at::kFloat || !yo.is_contiguous() || yo.numel() != MAX_BSZN * hidden) return false;
++    if (xn.scalar_type() != at::kHalf || !xn.is_contiguous() || xn.numel() != MAX_BSZN * hidden) return false;
++    if (xh_o.scalar_type() != at::kHalf || !xh_o.is_contiguous() || xh_o.numel() != MAX_BSZN * o_in) return false;
++
++    tail_o = o_proj;
++    tail_norm_w = norm_w;
++    tail_eps = norm_eps;
++    tail_bias = norm_bias;
++    tail_scale = norm_scale;
++    tail_yo = yo.view({MAX_BSZN, hidden});
++    tail_xn = xn.view({MAX_BSZN, hidden});
++    tail_xh_o = xh_o.view({MAX_BSZN, o_in});
++    for (auto& gt : graph_tail) gt = std::make_unique<Graph>();
++    return true;
++}
++
++bool BC_GatedMLP::tail_supported(int num_tokens)
++{
++    return tail_o && exl3_gemm_m16_enabled() &&
++        exl3_tail_m16_supported(num_tokens, tail_o->trellis, gate->trellis, up->trellis, down->trellis);
++}
++
++void BC_GatedMLP::run_tail_gr
++(
++    const at::Tensor& ao,
++    at::Tensor& x,
++    at::Tensor& d,
++    int num_tokens,
++    Graph* graph
++)
++{
++    // Same g / u / a / xh buffers as the 8201 path of run_bszN_gr
++    at::Tensor& guh_n_ref = guh_cache[num_tokens - 1];
++    if (!guh_n_ref.defined())
++        guh_n_ref = at::empty({2, num_tokens, guh.size(2)}, guh.options());
++    at::Tensor& gu_n_ref = gu_cache[num_tokens - 1];
++    if (!gu_n_ref.defined())
++        gu_n_ref = at::empty({2, num_tokens, gu.size(2)}, gu.options());
++    at::Tensor g2 = gu_n_ref.select(0, 0);
++    at::Tensor u2 = gu_n_ref.select(0, 1);
++    at::Tensor gate_xh = guh_n_ref.select(0, 0);
++    at::Tensor up_xh = guh_n_ref.select(0, 1);
++    at::Tensor a_n = a.slice(1, 0, num_tokens);
++    at::Tensor down_xh_n = down_xh.slice(1, 0, num_tokens);
++    at::Tensor yo_n = tail_yo.narrow(0, 0, num_tokens);
++    at::Tensor xn_n = tail_xn.narrow(0, 0, num_tokens);
++    at::Tensor xh_o_n = tail_xh_o.narrow(0, 0, num_tokens);
++
++    exl3_tail_m16_gr(ao, tail_o->trellis, tail_o->suh, tail_o->svh, x,
++                     tail_norm_w, tail_eps, tail_bias, tail_scale, yo_n, xn_n, xh_o_n,
++                     gate->trellis, gate->suh, gate->svh, up->trellis, up->suh, up->svh,
++                     down->trellis, down->suh, down->svh, g2, u2, a_n, gate_xh, up_xh, down_xh_n, d,
++                     act_limit, graph, {});
++}
++
++void BC_GatedMLP::run_tail
++(
++    const at::Tensor& ao,
++    at::Tensor& x,
++    at::Tensor& d
++)
++{
++    int num_tokens = (int) (x.numel() / x.size(-1));
++    TORCH_CHECK(tail_o && num_tokens >= 1 && num_tokens <= MAX_BSZN, "run_tail: no tail linked or bsz out of supported range");
++    TORCH_CHECK(ao.numel() / ao.size(-1) == num_tokens && d.numel() == x.numel(), "run_tail: a, x and d row counts differ");
++
++    c10::cuda::CUDAGuard device_guard(x.device());
++    cudaStream_t stream = at::cuda::getCurrentCUDAStream().stream();
++
++    Graph& g = *graph_tail[num_tokens - 1];
++
++    if (g.disabled || (!g.ready && !g.ready_to_record))
++    {
++        TORCH_CHECK(g.disabled || !graph_outer_capture(), "BC_GatedMLP: outer capture before the tail graph is warmed up");
++        run_tail_gr(ao, x, d, num_tokens, nullptr);
++        g.ready_to_record = true;
++    }
++    else
++    {
++        if (!g.ready)
++        {
++            g.capture_begin();
++            run_tail_gr(ao, x, d, num_tokens, &g);
++            g.capture_end();
++        }
++
++        std::vector<PPTR> args;
++        args.emplace_back(GP_gemm_A, (void*) ao.data_ptr());
++        args.emplace_back(GP_tail_resid, (void*) x.data_ptr());
++        args.emplace_back(GP_gemm_C, (void*) d.data_ptr());
++        g.launch(args, stream);
++    }
++}
++
+ void BC_MLP::run_bsz1_gr
+ (
+     const at::Tensor& x,
+--- a/exllamav3_ext/libtorch/mlp.h
++++ b/exllamav3_ext/libtorch/mlp.h
+@@ -106,6 +106,51 @@
+         const at::Tensor& x,
+         at::Tensor& d
+     );
++
++    // Layer tail (ext 8202, exl3_tail_m16.cuh): the preceding attention/GDN o_proj, the residual add
++    // x += o_proj(a), this MLP's input RMSNorm and the MLP in one launch per call. set_tail links
++    // the o_proj and the norm (once per layer; returns false and links nothing when the shapes or
++    // flags are unsupported), tail_supported(m) is the per-call check, run_tail replays
++    // graph_tail[m - 1] (sites: a, x, d; everything else is static)
++    std::shared_ptr<BC_LinearEXL3> tail_o;
++    at::Tensor tail_norm_w;
++    float tail_eps = 0.0f;
++    float tail_bias = 0.0f;
++    float tail_scale = 1.0f;
++    at::Tensor tail_yo;              // (MAX_BSZN, hidden) float, o_proj output
++    at::Tensor tail_xn;              // (MAX_BSZN, hidden) half, norm output / MLP input
++    at::Tensor tail_xh_o;            // (MAX_BSZN, o in_features) half, o input transform
++    std::unique_ptr<Graph> graph_tail[MAX_BSZN];
++
++    bool set_tail
++    (
++        std::shared_ptr<BC_LinearEXL3> o_proj,
++        at::Tensor norm_w,
++        float norm_eps,
++        float norm_bias,
++        float norm_scale,
++        at::Tensor yo,
++        at::Tensor xn,
++        at::Tensor xh_o
++    );
++
++    bool tail_supported(int num_tokens);
++
++    void run_tail_gr
++    (
++        const at::Tensor& a,
++        at::Tensor& x,
++        at::Tensor& d,
++        int num_tokens,
++        Graph* graph
++    );
++
++    void run_tail
++    (
++        const at::Tensor& a,
++        at::Tensor& x,
++        at::Tensor& d
++    );
+ };
+ 
+ 
+--- a/exllamav3_ext/libtorch/mlp_bc.h
++++ b/exllamav3_ext/libtorch/mlp_bc.h
+@@ -37,7 +37,19 @@
+     py::arg("down"),
+     py::arg("act_limit")
+ )
+-.def("run_bszN", &BC_GatedMLP::run_bszN);
++.def("run_bszN", &BC_GatedMLP::run_bszN)
++.def("set_tail", &BC_GatedMLP::set_tail,
++    py::arg("o_proj"),
++    py::arg("norm_w"),
++    py::arg("norm_eps"),
++    py::arg("norm_bias"),
++    py::arg("norm_scale"),
++    py::arg("yo"),
++    py::arg("xn"),
++    py::arg("xh_o")
++)
++.def("tail_supported", &BC_GatedMLP::tail_supported)
++.def("run_tail", &BC_GatedMLP::run_tail);
+ 
+ py::class_<BC_MLP, std::shared_ptr<BC_MLP>>(m, "BC_MLP").def
+ (
+--- /dev/null
++++ b/exllamav3_ext/quant/exl3_tail_m16.cu
+@@ -0,0 +1,280 @@
++#include <cuda_fp16.h>
++#include "exl3_tail_m16.cuh"
++#include "exl3_mlp_m16.cuh"
++#include "exl3_gemm_m16.cuh"
++
++#include <c10/cuda/CUDAGuard.h>
++#include <ATen/cuda/CUDAContext.h>
++#include "../util.h"
++#include "../util.cuh"
++#include "exl3_tail_m16_kernel.cuh"
++#include "exl3_devctx.cuh"
++#include <cstdlib>
++#include <mutex>
++
++namespace {
++
++std::mutex g_mtx;
++
++// Per device: the m16 split-K workspace (shared with exl3_gemm_m16 and the fused MLP; launches are
++// stream-ordered) and one allocation holding this kernel's self-resetting counters (8201's layout),
++// the per-row sums of squares and both schedule tables.
++struct TailDev
++{
++    float* ws;
++    unsigned int* cnt;
++    float* ssq;
++    const unsigned short* sched;     // 8201 block | pair | wait tables
++    const unsigned short* tsched;    // tail block table
++};
++TailDev g_dev[MAX_DEVICES] = {};
++
++constexpr size_t SCHED_WORDS = (size_t) EXL3_MLP_SCHED_G * EXL3_MLP_SCHED_BF + (size_t) EXL3_MLP_SCHED_PAIRS * EXL3_MLP_SCHED_PFLD + EXL3_MLP_SCHED_NWAIT;
++constexpr size_t TSCHED_WORDS = (size_t) EXL3_TAIL_SCHED_G * EXL3_TAIL_SCHED_BF;
++constexpr size_t WS1_FLOATS = (size_t) 2 * EXL3_MLP_SCHED_PAIRS * EXL3_MLP_SCHED_MC1 * EXL3_M16_SLOT_FLOATS;
++constexpr size_t WS2_FLOATS = (size_t) (EXL3_MLP_SCHED_N2 / EXL3_M16_GW) * EXL3_MLP_SCHED_MC2 * EXL3_M16_SLOT_FLOATS;
++constexpr size_t WS0_FLOATS = (size_t) EXL3_TAIL_SCHED_NG0 * EXL3_TAIL_SCHED_MC0 * EXL3_M16_SLOT_FLOATS;
++constexpr size_t SSQ_FLOATS = (size_t) EXL3_TAIL_M16_ROWS * EXL3_TAIL_SCHED_NCH;
++
++TailDev get_dev(int device, cudaStream_t stream)
++{
++    std::lock_guard<std::mutex> lock(g_mtx);
++    TailDev& d = g_dev[device];
++    if (!d.ws)
++    {
++        cudaStreamCaptureStatus st;
++        cuda_check(cudaStreamIsCapturing(stream, &st));
++        TORCH_CHECK(st == cudaStreamCaptureStatusNone, "exl3_tail_m16: first call must not be under graph capture");
++        float* ws = exl3_gemm_m16_ws(device, stream);
++        TORCH_CHECK((WS1_FLOATS + WS2_FLOATS + WS0_FLOATS) * sizeof(float) <= exl3_gemm_m16_ws_bytes(), "exl3_tail_m16: workspace too small");
++        uint8_t* buf;
++        const size_t cnt_bytes = EXL3_MLP_M16_NCNT * sizeof(unsigned int);
++        const size_t ssq_bytes = SSQ_FLOATS * sizeof(float);
++        cuda_check(cudaMalloc(&buf, cnt_bytes + ssq_bytes + (SCHED_WORDS + TSCHED_WORDS) * sizeof(unsigned short)));
++        cuda_check(cudaMemset(buf, 0, cnt_bytes + ssq_bytes));
++        unsigned short* s = (unsigned short*) (buf + cnt_bytes + ssq_bytes);
++        cuda_check(cudaMemcpy(s, exl3_mlp_sched_block, sizeof(exl3_mlp_sched_block), cudaMemcpyHostToDevice));
++        s += EXL3_MLP_SCHED_G * EXL3_MLP_SCHED_BF;
++        cuda_check(cudaMemcpy(s, exl3_mlp_sched_pair, sizeof(exl3_mlp_sched_pair), cudaMemcpyHostToDevice));
++        s += EXL3_MLP_SCHED_PAIRS * EXL3_MLP_SCHED_PFLD;
++        cuda_check(cudaMemcpy(s, exl3_mlp_sched_wait, sizeof(exl3_mlp_sched_wait), cudaMemcpyHostToDevice));
++        s += EXL3_MLP_SCHED_NWAIT;
++        cuda_check(cudaMemcpy(s, exl3_tail_sched_block, sizeof(exl3_tail_sched_block), cudaMemcpyHostToDevice));
++        d.cnt = (unsigned int*) buf;
++        d.ssq = (float*) (buf + cnt_bytes);
++        d.sched = (const unsigned short*) (buf + cnt_bytes + ssq_bytes);
++        d.tsched = d.sched + SCHED_WORDS;
++        d.ws = ws;
++    }
++    return d;
++}
++
++struct Launch
++{
++    void* kernel;
++    int smem;
++    int blocks_per_sm;
++};
++
++Launch get_launch(int device)
++{
++    static Launch cache[MAX_DEVICES] = {};
++    std::lock_guard<std::mutex> lock(g_mtx);
++    Launch& l = cache[device];
++    if (!l.kernel)
++    {
++        void* k = (void*) exl3_tail_m16_kernel<0>;
++        int sm = Exl3M16Cfg<1>::SMEM;
++        cuda_check(cudaFuncSetAttribute(k, cudaFuncAttributeMaxDynamicSharedMemorySize, sm));
++        cuda_check(cudaFuncSetAttribute(k, cudaFuncAttributePreferredSharedMemoryCarveout, (int) cudaSharedmemCarveoutMaxShared));
++        int occ = 0;
++        cuda_check(cudaOccupancyMaxActiveBlocksPerMultiprocessor(&occ, k, EXL3_M16_THREADS, sm));
++        l.kernel = k;
++        l.smem = sm;
++        l.blocks_per_sm = occ < 2 ? occ : 2;
++    }
++    return l;
++}
++
++bool trellis_is(const at::Tensor& t, int k, int n)
++{
++    return t.dim() == 3 && t.scalar_type() == at::kShort && t.size(0) * 16 == k && t.size(1) * 16 == n && t.size(2) == 4 * 16;
++}
++
++}  // namespace
++
++int exl3_tail_m16_l2pf(int set)
++{
++    static int value = []
++    {
++        const char* env = std::getenv("EXL3_TAIL_M16_L2PF");
++        return env ? std::atoi(env) : 0;
++    }();
++    if (set >= 0) value = set;
++    return value;
++}
++
++bool exl3_tail_m16_supported
++(
++    int size_m,
++    const at::Tensor& o_trellis,
++    const at::Tensor& gate_trellis,
++    const at::Tensor& up_trellis,
++    const at::Tensor& down_trellis
++)
++{
++    static const bool enabled = []
++    {
++        const char* env = std::getenv("EXL3_LAYER_TAIL");
++        return !(env && env[0] == '0');
++    }();
++    if (!enabled || size_m < 1 || size_m > EXL3_TAIL_M16_ROWS) return false;
++    if (!trellis_is(o_trellis, EXL3_TAIL_SCHED_K0, EXL3_TAIL_SCHED_N0) ||
++        !trellis_is(gate_trellis, EXL3_MLP_SCHED_K1, EXL3_MLP_SCHED_N1) ||
++        !trellis_is(up_trellis, EXL3_MLP_SCHED_K1, EXL3_MLP_SCHED_N1) ||
++        !trellis_is(down_trellis, EXL3_MLP_SCHED_K2, EXL3_MLP_SCHED_N2)) return false;
++    int device;
++    cudaGetDevice(&device);
++    Launch l = get_launch(device);
++    int num_sms = DevCtx::instance().get_num_sms(device);
++    return l.blocks_per_sm == 2 && num_sms * 2 == EXL3_TAIL_SCHED_G;
++}
++
++int exl3_tail_m16_gr
++(
++    const at::Tensor& a,
++    const at::Tensor& o_trellis, const at::Tensor& o_suh, const at::Tensor& o_svh,
++    at::Tensor& x,
++    const at::Tensor& norm_w, float norm_eps, float norm_bias, float norm_scale,
++    at::Tensor& yo, at::Tensor& xn, at::Tensor& xh_o,
++    const at::Tensor& gate_trellis, const at::Tensor& gate_suh, const at::Tensor& gate_svh,
++    const at::Tensor& up_trellis, const at::Tensor& up_suh, const at::Tensor& up_svh,
++    const at::Tensor& down_trellis, const at::Tensor& down_suh, const at::Tensor& down_svh,
++    at::Tensor& g, at::Tensor& u, at::Tensor& a2,
++    at::Tensor& xh_g, at::Tensor& xh_u, at::Tensor& xh_d,
++    at::Tensor& d,
++    float act_limit,
++    Graph* graph,
++    const c10::optional<at::Tensor>& prof
++)
++{
++    const at::cuda::OptionalCUDAGuard device_guard(a.device());
++    cudaStream_t stream = graph ? graph->capture_stream : at::cuda::getCurrentCUDAStream().stream();
++
++    constexpr int K0 = EXL3_TAIL_SCHED_K0;
++    constexpr int N0 = EXL3_TAIL_SCHED_N0;
++    constexpr int N1 = EXL3_MLP_SCHED_N1;
++    TORCH_CHECK_DTYPE(a, kHalf);
++    TORCH_CHECK(a.is_contiguous() && a.size(-1) == K0, "exl3_tail_m16: a must be contiguous (..., ", K0, ")");
++    const int size_m = (int) (a.numel() / K0);
++    TORCH_CHECK(exl3_tail_m16_supported(size_m, o_trellis, gate_trellis, up_trellis, down_trellis), "exl3_tail_m16: unsupported shape or device");
++    TORCH_CHECK(o_trellis.is_contiguous() && gate_trellis.is_contiguous() && up_trellis.is_contiguous() && down_trellis.is_contiguous(),
++        "exl3_tail_m16: trellis must be contiguous");
++
++    auto buf = [&] (const at::Tensor& t, at::ScalarType dt, int64_t numel, const char* name)
++    {
++        TORCH_CHECK(t.scalar_type() == dt && t.is_contiguous() && t.numel() == numel,
++            "exl3_tail_m16: ", name, " must be contiguous ", dt, " with ", numel, " elements");
++    };
++    buf(o_suh, at::kHalf, K0, "o suh");
++    buf(o_svh, at::kHalf, N0, "o svh");
++    buf(gate_suh, at::kHalf, N0, "gate suh");
++    buf(up_suh, at::kHalf, N0, "up suh");
++    buf(down_suh, at::kHalf, N1, "down suh");
++    buf(gate_svh, at::kHalf, N1, "gate svh");
++    buf(up_svh, at::kHalf, N1, "up svh");
++    buf(down_svh, at::kHalf, N0, "down svh");
++    buf(x, at::kFloat, (int64_t) size_m * N0, "x");
++    buf(yo, at::kFloat, (int64_t) size_m * N0, "yo");
++    buf(d, at::kFloat, (int64_t) size_m * N0, "d");
++    buf(xn, at::kHalf, (int64_t) size_m * N0, "xn");
++    buf(xh_o, at::kHalf, (int64_t) size_m * K0, "xh_o");
++    buf(g, at::kHalf, (int64_t) size_m * N1, "g");
++    buf(u, at::kHalf, (int64_t) size_m * N1, "u");
++    buf(a2, at::kHalf, (int64_t) size_m * N1, "a2");
++    buf(xh_g, at::kHalf, (int64_t) size_m * N0, "xh_g");
++    buf(xh_u, at::kHalf, (int64_t) size_m * N0, "xh_u");
++    buf(xh_d, at::kHalf, (int64_t) size_m * N1, "xh_d");
++    const bool nw_bf16 = norm_w.scalar_type() == at::kBFloat16;
++    TORCH_CHECK((nw_bf16 || norm_w.scalar_type() == at::kHalf) && norm_w.is_contiguous() && norm_w.numel() == N0,
++        "exl3_tail_m16: norm weight must be contiguous half or bfloat16 with ", N0, " elements");
++    {
++        const void* ptrs[] = { a.data_ptr(), x.data_ptr(), yo.data_ptr(), d.data_ptr(), xn.data_ptr(), xh_o.data_ptr(),
++                               g.data_ptr(), u.data_ptr(), a2.data_ptr(), xh_g.data_ptr(), xh_u.data_ptr(), xh_d.data_ptr() };
++        const int np = sizeof(ptrs) / sizeof(ptrs[0]);
++        for (int i = 0; i < np; ++i)
++            for (int j = i + 1; j < np; ++j)
++                TORCH_CHECK(ptrs[i] != ptrs[j], "exl3_tail_m16: input, residual and output buffers must not alias");
++    }
++
++    int device;
++    cudaGetDevice(&device);
++    TailDev dev = get_dev(device, stream);
++    Launch l = get_launch(device);
++    const int G = EXL3_TAIL_SCHED_G;
++
++    Exl3TailM16Args args = {};
++    args.Bo = (const uint16_t*) o_trellis.data_ptr();
++    args.suh_o = (const half*) o_suh.data_ptr();
++    args.svh_o = (const half*) o_svh.data_ptr();
++    args.xh_o = (half*) xh_o.data_ptr();
++    args.yo = (float*) yo.data_ptr();
++    args.xn = (half*) xn.data_ptr();
++    args.nw = norm_w.data_ptr();
++    args.nw_bf16 = nw_bf16 ? 1 : 0;
++    args.eps = norm_eps;
++    args.nbias = norm_bias;
++    args.nscale = norm_scale;
++    args.ws0 = dev.ws + WS1_FLOATS + WS2_FLOATS;
++    args.ssq = dev.ssq;
++    args.tsched = dev.tsched;
++    args.g = (half*) g.data_ptr();
++    args.u = (half*) u.data_ptr();
++    args.l2pf0 = exl3_tail_m16_l2pf(-1);
++
++    Exl3MlpM16Args& m = args.mlp;
++    m.Bg = (const uint16_t*) gate_trellis.data_ptr();
++    m.Bu = (const uint16_t*) up_trellis.data_ptr();
++    m.Bd = (const uint16_t*) down_trellis.data_ptr();
++    m.suh_g = (const half*) gate_suh.data_ptr();
++    m.suh_u = (const half*) up_suh.data_ptr();
++    m.suh_d = (const half*) down_suh.data_ptr();
++    m.xh_g = (half*) xh_g.data_ptr();
++    m.xh_u = (half*) xh_u.data_ptr();
++    m.xh_d = (half*) xh_d.data_ptr();
++    m.svh_g = (const half*) gate_svh.data_ptr();
++    m.svh_u = (const half*) up_svh.data_ptr();
++    m.svh_d = (const half*) down_svh.data_ptr();
++    m.a = (half*) a2.data_ptr();
++    m.ws = dev.ws;
++    m.ws2 = dev.ws + WS1_FLOATS;
++    m.cnt = dev.cnt;
++    m.sched = dev.sched;
++    m.prof = nullptr;
++    if (prof)
++    {
++        TORCH_CHECK(prof->dtype() == at::kLong && prof->is_contiguous() && prof->numel() >= (int64_t) G * EXL3_TAIL_M16_PROF_WORDS,
++            "exl3_tail_m16: prof must be contiguous int64 with ", G * EXL3_TAIL_M16_PROF_WORDS, " elements");
++        m.prof = (unsigned long long*) prof->data_ptr();
++    }
++    m.size_m = size_m;
++    m.act_limit = act_limit;
++    m.l2pf = exl3_mlp_m16_l2pf(-1);
++
++    const half* A_ptr = (const half*) a.data_ptr();
++    float* X_ptr = (float*) x.data_ptr();
++    float* D_ptr = (float*) d.data_ptr();
++    void* kernel_args[] = { (void*) &A_ptr, (void*) &X_ptr, (void*) &D_ptr, (void*) &args };
++
++    cuda_check(cudaLaunchCooperativeKernel(l.kernel, dim3(G), dim3(EXL3_M16_THREADS), kernel_args, l.smem, stream));
++
++    if (graph)
++    {
++        graph->record_param(l.kernel, GP_gemm_A, 0);
++        graph->record_param(l.kernel, GP_tail_resid, 1);
++        graph->record_param(l.kernel, GP_gemm_C, 2);
++        graph->record_param(l.kernel, GP_end, 0);
++    }
++    cuda_check(cudaPeekAtLastError());
++    return G;
++}
+--- /dev/null
++++ b/exllamav3_ext/quant/exl3_tail_m16.cuh
+@@ -0,0 +1,47 @@
++#pragma once
++
++#include <ATen/Tensor.h>
++#include "../graph.cuh"
++
++// Persistent layer tail for 1..8 token rows (exl3_tail_m16_kernel.cuh, ext 8202): the attention/GDN
++// output projection (6144 -> 5120, 4 bpw mul1), the attention residual add, the post-attention
++// RMSNorm and ext 8201's fused MLP (5120 -> 17408 -> 5120, SiLU) in one cooperative launch, following
++// the Bend-emitted schedules exl3_tail_m16_sched.h and exl3_mlp_m16_sched.h. Supported: those shapes,
++// 4 bpw mul1 trellises, m 1..8, and a grid of exactly the schedule's G blocks (2 per SM) on the
++// current device. EXL3_LAYER_TAIL=0 disables it (callers keep the separate o_proj / norm / MLP).
++
++// L2 prefetch depth across the o_proj -> gate/up transition (phase-1 tiles per warp past the ring):
++// returns the value used by later launches; set >= 0 changes it (benchmark knob, default
++// EXL3_TAIL_M16_L2PF or 0). The down-phase prefetch keeps 8201's knob (exl3_mlp_m16_l2pf).
++int exl3_tail_m16_l2pf(int set);
++
++bool exl3_tail_m16_supported
++(
++    int size_m,
++    const at::Tensor& o_trellis,
++    const at::Tensor& gate_trellis,
++    const at::Tensor& up_trellis,
++    const at::Tensor& down_trellis
++);
++
++// yo = o_proj(a) (fp32); x += yo (fp32, in place); xn = half(RMSNorm(x) * (norm_w + norm_bias) *
++// norm_scale); then exactly ext 8201's MLP on xn: g, u, a2 = silu(g) * u, the three input transforms
++// xh_g / xh_u / xh_d and d = down(a2) (fp32). xh_o receives the o input transform.
++// Graph sites: GP_gemm_A (a), GP_tail_resid (x), GP_gemm_C (d). Returns the grid size.
++int exl3_tail_m16_gr
++(
++    const at::Tensor& a,
++    const at::Tensor& o_trellis, const at::Tensor& o_suh, const at::Tensor& o_svh,
++    at::Tensor& x,
++    const at::Tensor& norm_w, float norm_eps, float norm_bias, float norm_scale,
++    at::Tensor& yo, at::Tensor& xn, at::Tensor& xh_o,
++    const at::Tensor& gate_trellis, const at::Tensor& gate_suh, const at::Tensor& gate_svh,
++    const at::Tensor& up_trellis, const at::Tensor& up_suh, const at::Tensor& up_svh,
++    const at::Tensor& down_trellis, const at::Tensor& down_suh, const at::Tensor& down_svh,
++    at::Tensor& g, at::Tensor& u, at::Tensor& a2,
++    at::Tensor& xh_g, at::Tensor& xh_u, at::Tensor& xh_d,
++    at::Tensor& d,
++    float act_limit,
++    Graph* graph,
++    const c10::optional<at::Tensor>& prof
++);
+--- /dev/null
++++ b/exllamav3_ext/quant/exl3_tail_m16_kernel.cuh
+@@ -0,0 +1,675 @@
++#pragma once
++
++// Persistent layer tail for 1..8 token rows (ext 8202): the attention/GDN output projection
++// (6144 -> 5120, 4 bpw), the attention residual add, the post-attention RMSNorm and ext 8201's fused
++// MLP in ONE cooperative launch. Host side: exl3_tail_m16.cu. Schedules: exl3_tail_m16_sched.h
++// (phase 0 + ring offsets, emitted by bend/TAIL_M16_SCHED_TABLE.bend, laws
++// bend/tail_m16_sched_laws.bend) and 8201's exl3_mlp_m16_sched.h (phases 1/2, unchanged). The kernel
++// reads both from device memory and derives no schedule of its own.
++//
++// - Phase 0 (o_proj) is patch 2001 v2's single-matrix GEMM: input transform of `a` (had_hf with the
++//   o suh) + grid barrier S, partition [s0, s0 + n0) of the 10 x 384 (group, k-tile) iterations,
++//   same hot loop / fold / split-K slots (group, b - first contributor), then grid barrier A.
++// - F0: warp w of block b owns finish job x = b + G * w < 40 m, x = (group g, row r, 128-column
++//   chunk ch): slots summed in slot order, output Hadamard with svh (had_ff) -> yo, then the
++//   residual add x_new = yo + x in fp32 (rms_norm RES_IN's op), stored to x, and the chunk's sum of
++//   squares (fma chain, xor butterfly) -> ssq[r][4 g + ch]. Grid barrier B.
++// - N: warp (b, w) owns norm job x = b + G * w < 40 m, x = (row r, chunk c): rmf from the 40
++//   partials of row r (xor-butterfly tree, same on every lane), xn = half(x_new * (w + bias) * rmf)
++//   (norm.cu's apply4 order), then 8201's gate and up input transforms of xn. Grid barrier C, which
++//   takes the place of 8201's start barrier.
++// - Phases 1/2 and the finish are ext 8201's kernel body unchanged (counters, pair finishes, wait
++//   lists, final grid barrier D and down finish).
++// - One warp-private weight ring stream of n0 + n1 + n2 tiles (tile i in slot i % PF): the cursor
++//   runs PF - 1 tiles ahead across both phase boundaries, so each phase starts with a full ring.
++// - Deadlock-freedom: every block executes barriers S, A, B, C, D in that order; all counter waits
++//   and signals lie between C and D (8201's stratification). All blocks co-resident (cooperative).
++
++#include <cuda_bf16.h>
++#include "exl3_mlp_m16_kernel.cuh"
++#include "exl3_tail_m16_sched.h"
++
++#define EXL3_TAIL_M16_PROF_WORDS 16
++#define EXL3_TAIL_M16_ROWS 8
++
++struct Exl3TailM16Args
++{
++    const uint16_t* Bo;              // o_proj trellis (6144 -> 5120)
++    const half* suh_o;
++    const half* svh_o;
++    half* xh_o;                      // (m, K0) o input transform
++    float* yo;                       // (m, N0) o_proj output, fp32
++    half* xn;                        // (m, N0) RMSNorm output = MLP input
++    const void* nw;                  // norm weight (N0), half or bf16
++    int nw_bf16;
++    float eps;
++    float nbias;                     // constant_bias added to the weight
++    float nscale;                    // constant_scale folded into rmf
++    float* ws0;                      // phase-0 slots
++    float* ssq;                      // (8, NCH) per-row, per-chunk sums of squares
++    const unsigned short* tsched;    // exl3_tail_m16_sched.h block table
++    half* g;                         // 8201's g / u outputs
++    half* u;
++    int l2pf0;                       // phase-1 tiles per warp prefetched to L2 across F0 / N (0 = off)
++    Exl3MlpM16Args mlp;              // 8201's arguments (phases 1/2); prof/size_m/act_limit/l2pf used
++};
++
++template <int dummy>
++__global__ __launch_bounds__(EXL3_M16_THREADS, 2)
++void exl3_tail_m16_kernel(const half* __restrict__ Ao, float* X, float* D, Exl3TailM16Args p)
++{
++    constexpr int MT = 1;
++    using Cfg = Exl3M16Cfg<MT>;
++    constexpr int PF = Cfg::PF;
++    constexpr int XR = Cfg::XR;
++    constexpr int W_STAGE = Cfg::W_STAGE;
++    constexpr int X_ITER = Cfg::X_ITER;
++    constexpr int ROWS = MT * 8;
++    constexpr int GW = EXL3_M16_GW;
++    static_assert(PF == EXL3_MLP_SCHED_PF && PF == EXL3_TAIL_SCHED_PF, "schedule ring depth");
++    static_assert(EXL3_TAIL_SCHED_G == EXL3_MLP_SCHED_G, "schedule grids");
++
++    constexpr int K0 = EXL3_TAIL_SCHED_K0;
++    constexpr int N0 = EXL3_TAIL_SCHED_N0;
++    constexpr int K1 = EXL3_MLP_SCHED_K1;
++    constexpr int N1 = EXL3_MLP_SCHED_N1;
++    constexpr int K2 = EXL3_MLP_SCHED_K2;
++    constexpr int N2 = EXL3_MLP_SCHED_N2;
++    constexpr int NP = EXL3_MLP_SCHED_PAIRS;
++    constexpr int NCH = EXL3_TAIL_SCHED_NCH;
++    constexpr int KT0 = K0 / 16;
++    constexpr int NG0 = N0 / GW;
++    constexpr int KT1 = K1 / 16;
++    constexpr int NG1 = N1 / GW;
++    constexpr int KT2 = K2 / 16;
++    constexpr int NG2 = N2 / GW;
++    constexpr int T0 = NG0 * KT0;
++    constexpr int T1 = 2 * NG1 * KT1;
++    constexpr int T2 = NG2 * KT2;
++    constexpr size_t ROW0 = (size_t) (N0 / 16) * 128;
++    constexpr size_t ROW1 = (size_t) (N1 / 16) * 128;
++    constexpr size_t ROW2 = (size_t) (N2 / 16) * 128;
++    static_assert(NP == NG1 && K2 == N1 && N2 == K1 && N0 == K1, "layer tail shapes");
++    static_assert(KT0 == EXL3_TAIL_SCHED_KT0 && NG0 == EXL3_TAIL_SCHED_NG0 && T0 == EXL3_TAIL_SCHED_T0, "phase-0 schedule");
++    static_assert(NCH * 128 == N0 && NCH == 4 * NG0, "norm chunks");
++
++    extern __shared__ __align__(16) uint8_t sm[];
++
++    const Exl3MlpM16Args& q = p.mlp;
++    const bool prof = q.prof != nullptr;
++    auto stamp = [&] (int i)
++    {
++        if (prof && threadIdx.x == 0)
++            q.prof[(size_t) blockIdx.x * EXL3_TAIL_M16_PROF_WORDS + i] = exl3_m16_gtime();
++    };
++    stamp(0);
++
++    const int warp = threadIdx.x >> 5;
++    const int lane = threadIdx.x & 31;
++    const int size_m = q.size_m;
++    const int G = gridDim.x;
++    const int b = blockIdx.x;
++
++    // Schedule records of this block: phase 0 + ring offsets (tail table), phases 1/2 (8201 table)
++    const unsigned short* trec = p.tsched + b * EXL3_TAIL_SCHED_BF;
++    const int s0 = trec[0];
++    const int n0 = trec[1];
++    const int ring1 = trec[2];
++    const int ring2 = trec[3];
++    const unsigned short* rec = q.sched + b * EXL3_MLP_SCHED_BF;
++    const int s1 = rec[0];
++    const int n1 = rec[1];
++    const int v = rec[2];
++    const int s2 = rec[3];
++    const int n2 = rec[4];
++    const int fin_pair = rec[6];
++    const int fin_rank = rec[7];
++    const int fin_cnt = rec[8];
++    const int wait_off = rec[9];
++    const int wait_cnt = rec[10];
++    const unsigned short* pair_tab = q.sched + EXL3_MLP_SCHED_G * EXL3_MLP_SCHED_BF;
++    const unsigned short* wait_tab = pair_tab + NP * EXL3_MLP_SCHED_PFLD;
++    const int n01 = n0 + n1;
++    const int n_tot = n01 + n2;
++
++    uint8_t* ring = sm + warp * PF * W_STAGE;
++    uint8_t* xbuf = sm + Cfg::RING;
++
++    // Weight issue cursor over the ring stream: tiles [0, n0) = phase-0 iterations s0 + i,
++    // [n0, n01) = phase-1 iterations s1 + i - n0, [n01, n_tot) = phase-2 iterations s2 + i - n01.
++    // iss_rem = tiles left in the current contiguous run (one group of one phase)
++    int iss_j = 0;
++    int iss_rem = 0;
++    size_t iss_row = ROW0;
++    const uint8_t* iss_ptr = nullptr;
++    auto iss_seek = [&] ()
++    {
++        if (iss_j < n0)
++        {
++            int it = s0 + iss_j;
++            int g = it / KT0;
++            int kt = it - g * KT0;
++            iss_ptr = (const uint8_t*) (p.Bo + ((size_t) g * (GW / 16) + warp * EXL3_M16_TILES_W) * 64) + lane * 16 + (size_t) kt * ROW0;
++            iss_rem = min(KT0 - kt, n0 - iss_j);
++            iss_row = ROW0;
++        }
++        else if (iss_j < n01)
++        {
++            int it = s1 + (iss_j - n0);
++            int g = it / KT1;
++            int kt = it - g * KT1;
++            int mat = g >= NG1 ? 1 : 0;
++            int ng = g - mat * NG1;
++            const uint16_t* B = mat ? q.Bu : q.Bg;
++            iss_ptr = (const uint8_t*) (B + ((size_t) ng * (GW / 16) + warp * EXL3_M16_TILES_W) * 64) + lane * 16 + (size_t) kt * ROW1;
++            iss_rem = min(KT1 - kt, n01 - iss_j);
++            iss_row = ROW1;
++        }
++        else
++        {
++            int it = s2 + (iss_j - n01);
++            int g = it / KT2;
++            int kt = it - g * KT2;
++            iss_ptr = (const uint8_t*) (q.Bd + ((size_t) g * (GW / 16) + warp * EXL3_M16_TILES_W) * 64) + lane * 16 + (size_t) kt * ROW2;
++            iss_rem = min(KT2 - kt, n_tot - iss_j);
++            iss_row = ROW2;
++        }
++    };
++    auto issue_w = [&] (int slot)
++    {
++        cp_async_stream(ring + slot * W_STAGE + lane * 16, iss_ptr);
++        iss_j++;
++        if (--iss_rem == 0)
++        {
++            if (iss_j < n_tot) iss_seek();
++        }
++        else iss_ptr += iss_row;
++    };
++    if (n_tot > 0) iss_seek();
++
++    // Activation chunk c of a phase = phase-relative iterations [c * XR, c * XR + XR); rows past
++    // size_m replicate the last row (MMA columns are independent: no row reads another)
++    auto issue_x_chunk = [&] (int c, auto ph)
++    {
++        constexpr int PH = decltype(ph)::value;
++        const int s = PH == 0 ? s0 : PH == 1 ? s1 : s2;
++        const int n = PH == 0 ? n0 : PH == 1 ? n1 : n2;
++        uint8_t* dst = xbuf + (c & 1) * XR * X_ITER;
++        for (int qq = threadIdx.x; qq < XR * 2 * ROWS; qq += EXL3_M16_THREADS)
++        {
++            int jj = qq / (2 * ROWS);
++            int r = qq - jj * (2 * ROWS);
++            int j = c * XR + jj;
++            if (j < n)
++            {
++                int it = s + j;
++                int row = min(r % ROWS, size_m - 1);
++                int kh = r / ROWS;
++                if constexpr (PH == 0)
++                {
++                    int g = it / KT0;
++                    int kt = it - g * KT0;
++                    cp_async(dst + jj * X_ITER + r * 16, p.xh_o + (size_t) row * K0 + kt * 16 + kh * 8);
++                }
++                else if constexpr (PH == 1)
++                {
++                    int g = it / KT1;
++                    int kt = it - g * KT1;
++                    const half* xh = g >= NG1 ? q.xh_u : q.xh_g;
++                    cp_async(dst + jj * X_ITER + r * 16, xh + (size_t) row * K1 + kt * 16 + kh * 8);
++                }
++                else
++                {
++                    int g = it / KT2;
++                    int kt = it - g * KT2;
++                    cp_async(dst + jj * X_ITER + r * 16, q.xh_d + (size_t) row * K2 + kt * 16 + kh * 8);
++                }
++            }
++        }
++    };
++
++    // Prologue: first PF - 1 ring tiles (o_proj weights, independent of the input transform)
++    #pragma unroll
++    for (int d = 0; d < PF - 1; ++d)
++    {
++        if (iss_j < n_tot) issue_w(d);
++        cp_async_fence();
++    }
++
++    // o_proj input scales and Hadamard transform (v2, one matrix), then grid barrier S
++    {
++        int total_warps = size_m * K0 / 128;
++        int warps_grid = G * EXL3_M16_WARPS;
++        for (int w = warp + EXL3_M16_WARPS * b; w < total_warps; w += warps_grid)
++        {
++            had_hf_r_128_inner<true, false>
++            (
++                Ao + w * 128,
++                p.xh_o + w * 128,
++                p.suh_o + (w * 128) % K0,
++                0.088388347648f  // 1/sqrt(128)
++            );
++        }
++        exl3_mlp_grid_sync(q.cnt + EXL3_MLP_GBAR);
++    }
++    stamp(1);
++
++    issue_x_chunk(0, std::integral_constant<int, 0>{});
++    cp_async_fence();
++    cp_async_wait<0>();
++    __syncthreads();
++
++    int ldsm_off;
++    {
++        int i = MT == 1 ? (lane >> 3) & 1 : lane >> 3;
++        ldsm_off = ((i & 1) * ROWS + (i >> 1) * 8 + (lane & 7)) * 16;
++    }
++    const uint32_t xbuf_sa = static_cast<uint32_t>(__cvta_generic_to_shared(xbuf)) + ldsm_off;
++
++    FragC_h hacc[EXL3_M16_TILES_W][MT];
++    FragC acc[EXL3_M16_TILES_W][MT];
++    const half2 hzero = __half2half2(__ushort_as_half(0));
++    #pragma unroll
++    for (int t = 0; t < EXL3_M16_TILES_W; ++t)
++        #pragma unroll
++        for (int mt = 0; mt < MT; ++mt)
++        {
++            hacc[t][mt][0] = hzero;
++            hacc[t][mt][1] = hzero;
++            #pragma unroll
++            for (int c = 0; c < 4; ++c) acc[t][mt][c] = 0.0f;
++        }
++
++    auto fold = [&] ()
++    {
++        #pragma unroll
++        for (int t = 0; t < EXL3_M16_TILES_W; ++t)
++            #pragma unroll
++            for (int mt = 0; mt < MT; ++mt)
++            {
++                acc[t][mt][0] += __low2float(hacc[t][mt][0]);
++                acc[t][mt][1] += __high2float(hacc[t][mt][0]);
++                acc[t][mt][2] += __low2float(hacc[t][mt][1]);
++                acc[t][mt][3] += __high2float(hacc[t][mt][1]);
++                hacc[t][mt][0] = hzero;
++                hacc[t][mt][1] = hzero;
++            }
++    };
++
++    // v2 flush of group g into slot (g, slice - first contributor); phase 1 then publishes it
++    auto flush = [&] (int g, auto ph)
++    {
++        constexpr int PH = decltype(ph)::value;
++        const int cidx = PH == 0 ? b - exl3_m16_owner(g * KT0, T0, G) :
++                         PH == 1 ? b - exl3_m16_owner(g * KT1, T1, G) : v - exl3_m16_owner(g * KT2, T2, G);
++        float* ws = PH == 0 ? p.ws0 + (size_t) g * EXL3_TAIL_SCHED_MC0 * EXL3_M16_SLOT_FLOATS :
++                    PH == 1 ? q.ws + (size_t) g * EXL3_MLP_SCHED_MC1 * EXL3_M16_SLOT_FLOATS
++                            : q.ws2 + (size_t) g * EXL3_MLP_SCHED_MC2 * EXL3_M16_SLOT_FLOATS;
++        float* slot = ws + (size_t) cidx * EXL3_M16_SLOT_FLOATS + warp * 64 + (lane >> 2);
++        #pragma unroll
++        for (int t = 0; t < EXL3_M16_TILES_W; ++t)
++            #pragma unroll
++            for (int mt = 0; mt < MT; ++mt)
++                #pragma unroll
++                for (int c = 0; c < 4; ++c)
++                {
++                    int row = mt * 8 + 2 * (lane & 3) + (c & 1);
++                    if (row < size_m) __stcg(slot + row * GW + t * 16 + (c >> 1) * 8, acc[t][mt][c]);
++                    acc[t][mt][c] = 0.0f;
++                }
++        if constexpr (PH == 1)
++        {
++            __threadfence();
++            __syncwarp();
++            if (lane == 0) atomicAdd(q.cnt + EXL3_MLP_CNT1 + g, 1u);
++        }
++    };
++
++    // v2 main loop (rolled) over one phase's slice; the ring slots continue across phases
++    int cur_slot = 0;
++    int iss_slot = PF - 1;
++    auto run_phase = [&] (auto ph)
++    {
++        constexpr int PH = decltype(ph)::value;
++        constexpr int KT = PH == 0 ? KT0 : PH == 1 ? KT1 : KT2;
++        const int s = PH == 0 ? s0 : PH == 1 ? s1 : s2;
++        const int n = PH == 0 ? n0 : PH == 1 ? n1 : n2;
++        const int e = s + n;
++        int j = 0;
++        for (int g_cur = s / KT; j < n; ++g_cur)
++        {
++            const int seg_end = min(e, (g_cur + 1) * KT) - s;
++
++            #pragma unroll 1
++            for (; j < seg_end; ++j)
++            {
++                if ((j & (XR - 1)) == 0)
++                {
++                    if (j > 0) __syncthreads();
++                    issue_x_chunk(j / XR + 1, ph);
++                }
++                if (iss_j < n_tot) issue_w(iss_slot);
++                iss_slot = iss_slot == PF - 1 ? 0 : iss_slot + 1;
++                cp_async_fence();
++                cp_async_wait<PF - 1>();
++                __syncwarp();
++
++                {
++                    const uint8_t* st = ring + cur_slot * W_STAGE;
++                    uint32_t bx[MT][2];
++                    {
++                        uint32_t sa = xbuf_sa + (((j / XR) & 1) * XR + (j & (XR - 1))) * X_ITER;
++                        asm volatile ("ldmatrix.sync.aligned.m8n8.x2.shared.b16 {%0,%1}, [%2];\n"
++                            : "=r"(bx[0][0]), "=r"(bx[0][1]) : "r"(sa));
++                    }
++
++                    #pragma unroll
++                    for (int t = 0; t < EXL3_M16_TILES_W; ++t)
++                    {
++                        FragB f0, f1;
++                        dq8_aligned_4bits<2>((const uint32_t*) (st + t * 128), lane * 8, f0, f1);
++                        FragA a;
++                        a[0] = f0[0];
++                        a[1] = f1[0];
++                        a[2] = f0[1];
++                        a[3] = f1[1];
++                        #pragma unroll
++                        for (int mt = 0; mt < MT; ++mt)
++                        {
++                            FragB bb;
++                            bb[0] = *reinterpret_cast<half2*>(&bx[mt][0]);
++                            bb[1] = *reinterpret_cast<half2*>(&bx[mt][1]);
++                            ptx_mma_m16n8k16(a, bb, hacc[t][mt]);
++                        }
++                    }
++                }
++                __syncwarp();
++                cur_slot = cur_slot == PF - 1 ? 0 : cur_slot + 1;
++
++                if ((j & (Cfg::FOLD - 1)) == Cfg::FOLD - 1) fold();
++            }
++
++            fold();
++            flush(g_cur, ph);
++        }
++    };
++
++    // L2 prefetch of the next `depth` ring-stream tiles past the ring (tiles [iss_j, stop)), one
++    // instruction per 128-byte line (lanes 0, 8, 16, 24 of the warp's 512-byte stage)
++    auto l2_prefetch = [&] (int depth, int stop)
++    {
++        if ((lane & 7) != 0) return;
++        for (int t = iss_j, t_end = min(iss_j + depth, stop); t < t_end; ++t)
++        {
++            const uint8_t* ptr;
++            if (t < n01)
++            {
++                int it = s1 + (t - n0);
++                int g = it / KT1;
++                int kt = it - g * KT1;
++                int mat = g >= NG1 ? 1 : 0;
++                int ng = g - mat * NG1;
++                const uint16_t* B = mat ? q.Bu : q.Bg;
++                ptr = (const uint8_t*) (B + ((size_t) ng * (GW / 16) + warp * EXL3_M16_TILES_W) * 64) + lane * 16 + (size_t) kt * ROW1;
++            }
++            else
++            {
++                int it = s2 + (t - n01);
++                int g = it / KT2;
++                int kt = it - g * KT2;
++                ptr = (const uint8_t*) (q.Bd + ((size_t) g * (GW / 16) + warp * EXL3_M16_TILES_W) * 64) + lane * 16 + (size_t) kt * ROW2;
++            }
++            asm volatile ("prefetch.global.L2 [%0];\n" :: "l"(ptr));
++        }
++    };
++
++    // ---- Phase 0: o_proj
++    run_phase(std::integral_constant<int, 0>{});
++    stamp(2);
++    if (iss_j >= n0) l2_prefetch(p.l2pf0, n01);
++    exl3_mlp_grid_sync(q.cnt + EXL3_MLP_GBAR);
++    stamp(3);
++
++    // ---- F0: o_proj finish + residual add + per-chunk sums of squares. Job x = (g, r, ch) of
++    // 8201's down-finish order, owned by warp x / G of block x % G
++    {
++        const int jobs = NG0 * size_m * 4;
++        const int x = b + G * warp;
++        if (x < jobs)
++        {
++            const int g = x / (size_m * 4);
++            const int rem = x - g * size_m * 4;
++            const int r = rem >> 2;
++            const int ch = rem & 3;
++            const int nc = exl3_m16_owner((g + 1) * KT0 - 1, T0, G) - exl3_m16_owner(g * KT0, T0, G) + 1;
++            float* sl0 = p.ws0 + (size_t) g * EXL3_TAIL_SCHED_MC0 * EXL3_M16_SLOT_FLOATS + r * GW + ch * 128;
++            float4 acc4 = __ldcg(((const float4*) sl0) + lane);
++            for (int c = 1; c < nc; ++c)
++            {
++                float4 w4 = __ldcg(((const float4*) (sl0 + (size_t) c * EXL3_M16_SLOT_FLOATS)) + lane);
++                acc4.x += w4.x; acc4.y += w4.y; acc4.z += w4.z; acc4.w += w4.w;
++            }
++            ((float4*) sl0)[lane] = acc4;
++            __syncwarp();
++
++            const int col0 = g * GW + ch * 128;
++            float* yo = p.yo + (size_t) r * N0 + col0;
++            had_ff_r_128_inner<false, true>(sl0, yo, p.svh_o + col0, 0.088388347648f);
++
++            // This lane's 4 outputs (4 lane .. + 3, stored by this lane), + residual (rms_norm RES_IN:
++            // x4 = sublayer output, x4 += r4, written back to the residual)
++            float4 y4 = ((const float4*) yo)[lane];
++            float4* xp = ((float4*) (X + (size_t) r * N0 + col0)) + lane;
++            float4 r4 = __ldcg(xp);
++            y4.x += r4.x;
++            y4.y += r4.y;
++            y4.z += r4.z;
++            y4.w += r4.w;
++            *xp = y4;
++            float ss = 0.0f;
++            ss = fma(y4.x, y4.x, ss);
++            ss = fma(y4.y, y4.y, ss);
++            ss = fma(y4.z, y4.z, ss);
++            ss = fma(y4.w, y4.w, ss);
++            #pragma unroll
++            for (int o = 16; o > 0; o >>= 1) ss += __shfl_xor_sync(0xffffffff, ss, o);
++            if (lane == 0) __stcg(p.ssq + r * NCH + g * 4 + ch, ss);
++        }
++    }
++    exl3_mlp_grid_sync(q.cnt + EXL3_MLP_GBAR);
++    stamp(4);
++
++    // ---- N: RMSNorm of row r, chunk c, then 8201's gate/up input transforms. Job x = r * NCH + c,
++    // owned by warp x / G of block x % G
++    {
++        const int jobs = size_m * NCH;
++        const int x = b + G * warp;
++        if (x < jobs)
++        {
++            const int r = x / NCH;
++            const int c = x - r * NCH;
++            const int col0 = c * 128;
++            float sum = __ldcg(p.ssq + r * NCH + lane);
++            if (lane + 32 < NCH) sum += __ldcg(p.ssq + r * NCH + lane + 32);
++            #pragma unroll
++            for (int o = 16; o > 0; o >>= 1) sum += __shfl_xor_sync(0xffffffff, sum, o);
++            const float rmf = rsqrtf(sum / (float) N0 + p.eps) * p.nscale;
++
++            float4 x4 = __ldcg(((const float4*) (X + (size_t) r * N0 + col0)) + lane);
++            float4 w4;
++            if (p.nw_bf16)
++            {
++                const __nv_bfloat162* wp = ((const __nv_bfloat162*) p.nw) + (col0 >> 1) + lane * 2;
++                __nv_bfloat162 w01 = wp[0];
++                __nv_bfloat162 w23 = wp[1];
++                w4.x = __bfloat162float(__low2bfloat16(w01));
++                w4.y = __bfloat162float(__high2bfloat16(w01));
++                w4.z = __bfloat162float(__low2bfloat16(w23));
++                w4.w = __bfloat162float(__high2bfloat16(w23));
++            }
++            else
++            {
++                const half2* wp = ((const half2*) p.nw) + (col0 >> 1) + lane * 2;
++                half2 w01 = wp[0];
++                half2 w23 = wp[1];
++                w4.x = __low2float(w01);
++                w4.y = __high2float(w01);
++                w4.z = __low2float(w23);
++                w4.w = __high2float(w23);
++            }
++            if (p.nbias != 0.0f)
++            {
++                w4.x += p.nbias;
++                w4.y += p.nbias;
++                w4.z += p.nbias;
++                w4.w += p.nbias;
++            }
++            x4.x = x4.x * w4.x * rmf;
++            x4.y = x4.y * w4.y * rmf;
++            x4.z = x4.z * w4.z * rmf;
++            x4.w = x4.w * w4.w * rmf;
++            half* xn = p.xn + (size_t) r * N0 + col0;
++            half2* xo = ((half2*) xn) + lane * 2;
++            xo[0] = __halves2half2(__float2half_rn(x4.x), __float2half_rn(x4.y));
++            xo[1] = __halves2half2(__float2half_rn(x4.z), __float2half_rn(x4.w));
++            __syncwarp();
++            had_hf_r_128_inner<true, false>(xn, q.xh_g + (size_t) r * K1 + col0, q.suh_g + col0, 0.088388347648f);
++            had_hf_r_128_inner<true, false>(xn, q.xh_u + (size_t) r * K1 + col0, q.suh_u + col0, 0.088388347648f);
++        }
++    }
++    exl3_mlp_grid_sync(q.cnt + EXL3_MLP_GBAR);
++    stamp(5);
++
++    // ---- Phase 1: gate + up (8201 from its post-barrier chunk-0 load on); the ring holds this
++    // slice's first PF - 1 gate/up tiles since phase 0
++    cur_slot = ring1;
++    issue_x_chunk(0, std::integral_constant<int, 1>{});
++    cp_async_fence();
++    cp_async_wait<0>();
++    __syncthreads();
++
++    run_phase(std::integral_constant<int, 1>{});
++    stamp(6);
++
++    // Optional (8201's knob): L2 prefetch of the next l2pf down tiles past the ring
++    l2_prefetch(q.l2pf, n_tot);
++
++    // ---- Finish of pair fin_pair by this block's warps (8201, unchanged)
++    {
++        const int P = fin_pair;
++        const unsigned short* pr = pair_tab + P * EXL3_MLP_SCHED_PFLD;
++        if (threadIdx.x == 0)
++        {
++            exl3_mlp_wait(q.cnt + EXL3_MLP_CNT1 + P, pr[0]);
++            exl3_mlp_wait(q.cnt + EXL3_MLP_CNT1 + NG1 + P, pr[1]);
++            exl3_mlp_pass(q.cnt + EXL3_MLP_PASS1 + P, EXL3_M16_WARPS, pr[2], q.cnt + EXL3_MLP_CNT1 + P, q.cnt + EXL3_MLP_CNT1 + NG1 + P);
++        }
++        __syncthreads();
++
++        const int F = EXL3_M16_WARPS * fin_cnt;
++        const int nc_g = exl3_m16_owner((P + 1) * KT1 - 1, T1, G) - exl3_m16_owner(P * KT1, T1, G) + 1;
++        const int nc_u = exl3_m16_owner((NG1 + P + 1) * KT1 - 1, T1, G) - exl3_m16_owner((NG1 + P) * KT1, T1, G) + 1;
++        for (int x = fin_rank * EXL3_M16_WARPS + warp; x < 4 * size_m; x += F)
++        {
++            const int r = x >> 2;
++            const int ch = x & 3;
++            const int col0 = P * GW + ch * 128;
++            #pragma unroll
++            for (int mat = 0; mat < 2; ++mat)
++            {
++                const int g = mat * NG1 + P;
++                const int nc = mat ? nc_u : nc_g;
++                float* sl0 = q.ws + (size_t) g * EXL3_MLP_SCHED_MC1 * EXL3_M16_SLOT_FLOATS + r * GW + ch * 128;
++                float4 acc4 = __ldcg(((const float4*) sl0) + lane);
++                for (int c = 1; c < nc; ++c)
++                {
++                    float4 w4 = __ldcg(((const float4*) (sl0 + (size_t) c * EXL3_M16_SLOT_FLOATS)) + lane);
++                    acc4.x += w4.x; acc4.y += w4.y; acc4.z += w4.z; acc4.w += w4.w;
++                }
++                ((float4*) sl0)[lane] = acc4;
++                __syncwarp();
++                had_fh_r_128_inner<false, true>
++                (
++                    sl0,
++                    (mat ? p.u : p.g) + (size_t) r * N1 + col0,
++                    (mat ? q.svh_u : q.svh_g) + col0,
++                    0.088388347648f  // 1/sqrt(128)
++                );
++            }
++            {
++                const size_t o = (size_t) r * N1 + col0 + lane * 4;
++                half2* gp = (half2*) (p.g + o);
++                half2* up = (half2*) (p.u + o);
++                half2* ap = (half2*) (q.a + o);
++                ap[0] = exl3_mlp_act_mul_h2(gp[0], up[0], q.act_limit);
++                ap[1] = exl3_mlp_act_mul_h2(gp[1], up[1], q.act_limit);
++            }
++            __syncwarp();
++            had_hf_r_128_inner<true, false>
++            (
++                q.a + (size_t) r * K2 + col0,
++                q.xh_d + (size_t) r * K2 + col0,
++                q.suh_d + col0,
++                0.088388347648f  // 1/sqrt(128)
++            );
++            __syncwarp();
++        }
++        __threadfence();
++        __syncwarp();
++        if (lane == 0) atomicAdd(q.cnt + EXL3_MLP_CNT2 + P, 1u);
++    }
++    stamp(7);
++
++    // ---- Phase 2: down (8201, unchanged)
++    if (threadIdx.x == 0)
++    {
++        for (int i = 0; i < wait_cnt; ++i)
++        {
++            const int P = wait_tab[wait_off + i];
++            const unsigned short* pr = pair_tab + P * EXL3_MLP_SCHED_PFLD;
++            exl3_mlp_wait(q.cnt + EXL3_MLP_CNT2 + P, pr[3]);
++            exl3_mlp_pass(q.cnt + EXL3_MLP_PASS2 + P, 1u, pr[4], q.cnt + EXL3_MLP_CNT2 + P, nullptr);
++        }
++    }
++    __syncthreads();
++    stamp(8);
++    cur_slot = ring2;
++    issue_x_chunk(0, std::integral_constant<int, 2>{});
++    cp_async_fence();
++    cp_async_wait<0>();
++    __syncthreads();
++
++    run_phase(std::integral_constant<int, 2>{});
++    cp_async_wait<0>();
++    stamp(9);
++
++    exl3_mlp_grid_sync(q.cnt + EXL3_MLP_GBAR);
++    stamp(10);
++
++    // v2 down finish (fp32 d)
++    {
++        constexpr int CH = GW / 128;
++        const int jobs = NG2 * size_m * CH;
++        for (int w = warp + EXL3_M16_WARPS * b; w < jobs; w += EXL3_M16_WARPS * G)
++        {
++            int g = w / (size_m * CH);
++            int rem = w - g * size_m * CH;
++            int r = rem / CH;
++            int ch = rem - r * CH;
++            int nc = exl3_m16_owner((g + 1) * KT2 - 1, T2, G) - exl3_m16_owner(g * KT2, T2, G) + 1;
++            float* sl0 = q.ws2 + (size_t) g * EXL3_MLP_SCHED_MC2 * EXL3_M16_SLOT_FLOATS + r * GW + ch * 128;
++            float4 acc4 = __ldcg(((const float4*) sl0) + lane);
++            for (int c = 1; c < nc; ++c)
++            {
++                float4 w4 = __ldcg(((const float4*) (sl0 + (size_t) c * EXL3_M16_SLOT_FLOATS)) + lane);
++                acc4.x += w4.x; acc4.y += w4.y; acc4.z += w4.z; acc4.w += w4.w;
++            }
++            ((float4*) sl0)[lane] = acc4;
++            __syncwarp();
++
++            const int col0 = g * GW + ch * 128;
++            had_ff_r_128_inner<false, true>(sl0, D + (size_t) r * N2 + col0, q.svh_d + col0, 0.088388347648f);
++        }
++    }
++    stamp(11);
++}
+--- /dev/null
++++ b/exllamav3_ext/quant/exl3_tail_m16_op.cpp
+@@ -0,0 +1,51 @@
++#include <torch/library.h>
++#include <ATen/Tensor.h>
++#include "exl3_tail_m16.cuh"
++
++// Eager entry points of the layer tail (exl3_tail_m16.cu) for isolated A/B and benchmarking, as
++// torch ops so bindings.cpp stays untouched. Same launcher as BC_GatedMLP::run_tail, no graph sites.
++//   torch.ops.exl3_tail_m16.supported(m, o_trellis, gate_trellis, up_trellis, down_trellis) -> bool
++//   torch.ops.exl3_tail_m16.tail(a, o trellis/suh/svh, x, norm_w, eps, bias, scale, yo, xn, xh_o,
++//                                gate trellis/suh/svh, up ..., down ..., g, u, a2, xh_g, xh_u, xh_d, d,
++//                                act_limit, prof?) -> grid size
++//   torch.ops.exl3_tail_m16.l2pf(set) -> current o -> gate/up L2 prefetch depth (set < 0 only reads)
++
++static bool exl3_tail_m16_supported_op(int64_t m, const at::Tensor& ot, const at::Tensor& gt, const at::Tensor& ut, const at::Tensor& dt)
++{
++    return exl3_tail_m16_supported((int) m, ot, gt, ut, dt);
++}
++
++static int64_t exl3_tail_m16_op
++(
++    const at::Tensor& a,
++    const at::Tensor& ot, const at::Tensor& osuh, const at::Tensor& osvh,
++    const at::Tensor& x,
++    const at::Tensor& norm_w, double eps, double bias, double scale,
++    const at::Tensor& yo, const at::Tensor& xn, const at::Tensor& xh_o,
++    const at::Tensor& gt, const at::Tensor& gsuh, const at::Tensor& gsvh,
++    const at::Tensor& ut, const at::Tensor& usuh, const at::Tensor& usvh,
++    const at::Tensor& dt, const at::Tensor& dsuh, const at::Tensor& dsvh,
++    const at::Tensor& g, const at::Tensor& u, const at::Tensor& a2,
++    const at::Tensor& xh_g, const at::Tensor& xh_u, const at::Tensor& xh_d,
++    const at::Tensor& d,
++    double act_limit,
++    const c10::optional<at::Tensor>& prof
++)
++{
++    at::Tensor x_ = x, yo_ = yo, xn_ = xn, xo_ = xh_o, g_ = g, u_ = u, a2_ = a2, xg = xh_g, xu = xh_u, xd = xh_d, d_ = d;
++    return exl3_tail_m16_gr(a, ot, osuh, osvh, x_, norm_w, (float) eps, (float) bias, (float) scale, yo_, xn_, xo_,
++                            gt, gsuh, gsvh, ut, usuh, usvh, dt, dsuh, dsvh, g_, u_, a2_, xg, xu, xd, d_,
++                            (float) act_limit, nullptr, prof);
++}
++
++static int64_t exl3_tail_m16_l2pf_op(int64_t set)
++{
++    return exl3_tail_m16_l2pf((int) set);
++}
++
++TORCH_LIBRARY(exl3_tail_m16, m)
++{
++    m.def("l2pf", &exl3_tail_m16_l2pf_op);
++    m.def("supported", &exl3_tail_m16_supported_op);
++    m.def("tail", &exl3_tail_m16_op);
++}
+--- /dev/null
++++ b/exllamav3_ext/quant/exl3_tail_m16_sched.h
+@@ -0,0 +1,177 @@
++// Generated by bend/TAIL_M16_SCHED_TABLE.bend (ext 8202 layer tail schedule); do not edit.
++#define EXL3_TAIL_SCHED_G 164
++#define EXL3_TAIL_SCHED_PF 8
++#define EXL3_TAIL_SCHED_K0 6144
++#define EXL3_TAIL_SCHED_N0 5120
++#define EXL3_TAIL_SCHED_NG0 10
++#define EXL3_TAIL_SCHED_KT0 384
++#define EXL3_TAIL_SCHED_T0 3840
++#define EXL3_TAIL_SCHED_MC0 18
++#define EXL3_TAIL_SCHED_NCH 40
++#define EXL3_TAIL_SCHED_BF 4
++static const unsigned short exl3_tail_sched_block[164 * 4] = {
++0,23,7,3,
++23,23,7,4,
++46,24,0,5,
++70,23,7,3,
++93,24,0,5,
++117,23,7,4,
++140,23,7,3,
++163,24,0,5,
++187,23,7,4,
++210,24,0,4,
++234,23,7,4,
++257,23,7,4,
++280,24,0,4,
++304,23,7,4,
++327,24,0,5,
++351,23,7,3,
++374,24,0,5,
++398,23,7,4,
++421,23,7,3,
++444,24,0,5,
++468,23,7,4,
++491,24,0,5,
++515,23,7,3,
++538,23,7,4,
++561,24,0,5,
++585,23,7,3,
++608,24,0,5,
++632,23,7,4,
++655,24,0,4,
++679,23,7,4,
++702,23,7,4,
++725,24,0,4,
++749,23,7,4,
++772,24,0,5,
++796,23,7,3,
++819,23,7,4,
++842,24,0,5,
++866,23,7,3,
++889,24,0,5,
++913,23,7,4,
++936,24,0,5,
++960,23,7,3,
++983,23,7,4,
++1006,24,0,5,
++1030,23,7,3,
++1053,24,0,5,
++1077,23,7,4,
++1100,23,7,3,
++1123,24,0,5,
++1147,23,7,4,
++1170,24,0,4,
++1194,23,7,4,
++1217,23,7,4,
++1240,24,0,4,
++1264,23,7,4,
++1287,24,0,5,
++1311,23,7,3,
++1334,24,0,5,
++1358,23,7,4,
++1381,23,7,3,
++1404,24,0,5,
++1428,23,7,4,
++1451,24,0,5,
++1475,23,7,3,
++1498,23,7,4,
++1521,24,0,5,
++1545,23,7,3,
++1568,24,0,5,
++1592,23,7,4,
++1615,24,0,4,
++1639,23,7,4,
++1662,23,7,4,
++1685,24,0,4,
++1709,23,7,4,
++1732,24,0,5,
++1756,23,7,3,
++1779,23,7,4,
++1802,24,0,5,
++1826,23,7,3,
++1849,24,0,5,
++1873,23,7,4,
++1896,24,0,5,
++1920,23,7,3,
++1943,23,7,4,
++1966,24,0,5,
++1990,23,7,3,
++2013,24,0,5,
++2037,23,7,4,
++2060,23,7,3,
++2083,24,0,5,
++2107,23,7,4,
++2130,24,0,4,
++2154,23,7,4,
++2177,23,7,4,
++2200,24,0,4,
++2224,23,7,4,
++2247,24,0,5,
++2271,23,7,3,
++2294,24,0,5,
++2318,23,7,4,
++2341,23,7,3,
++2364,24,0,5,
++2388,23,7,4,
++2411,24,0,5,
++2435,23,7,3,
++2458,23,7,4,
++2481,24,0,5,
++2505,23,7,3,
++2528,24,0,5,
++2552,23,7,4,
++2575,24,0,4,
++2599,23,7,4,
++2622,23,7,4,
++2645,24,0,4,
++2669,23,7,4,
++2692,24,0,5,
++2716,23,7,3,
++2739,23,7,4,
++2762,24,0,5,
++2786,23,7,3,
++2809,24,0,5,
++2833,23,7,4,
++2856,24,0,5,
++2880,23,7,3,
++2903,23,7,4,
++2926,24,0,5,
++2950,23,7,3,
++2973,24,0,5,
++2997,23,7,4,
++3020,23,7,3,
++3043,24,0,5,
++3067,23,7,4,
++3090,24,0,4,
++3114,23,7,4,
++3137,23,7,4,
++3160,24,0,4,
++3184,23,7,4,
++3207,24,0,5,
++3231,23,7,3,
++3254,24,0,5,
++3278,23,7,4,
++3301,23,7,3,
++3324,24,0,5,
++3348,23,7,4,
++3371,24,0,5,
++3395,23,7,3,
++3418,23,7,4,
++3441,24,0,5,
++3465,23,7,3,
++3488,24,0,5,
++3512,23,7,4,
++3535,24,0,4,
++3559,23,7,4,
++3582,23,7,4,
++3605,24,0,4,
++3629,23,7,4,
++3652,24,0,5,
++3676,23,7,3,
++3699,23,7,4,
++3722,24,0,5,
++3746,23,7,3,
++3769,24,0,5,
++3793,23,7,4,
++3816,24,0,5,
++};
+--- a/modules/attention_fn/bc_attn.py
++++ b/modules/attention_fn/bc_attn.py
+@@ -183,6 +183,12 @@
+         xh = g_tensor_cache.get(self.device, (2 * MAX_R * w,), torch.half, "bca_xh")
+ 
+         self.o_dtype = module.o_proj.inner.default_out_dtype
++        # Layer tail (ext 8202): the o_proj can be left to the enclosing block's MLP-side tail
++        # launch (step(defer = True) returns the o_proj input) when it is unpadded and bias-free
++        self.o_deferrable = (
++            self.hidden_padded == self.hidden_size and
++            getattr(module.o_proj.inner, "bias", None) is None
++        )
+         self.use_k_as_v = getattr(module, "use_k_as_v", False)
+ 
+         # 0 = none, 1 = headwise (one gate per head, always an unquantized fp16 projection, run
+@@ -638,7 +644,13 @@
+         inv_freq: torch.Tensor | None,
+         causal: bool = True,
+         host_seqlens: torch.Tensor | None = None,
++        defer: bool = False,
+     ) -> torch.Tensor | None:
++        """
++        One graph replay of the slot (bsz, q_len). Returns the block output (bsz, q_len, hidden),
++        or with defer (o_deferrable only) the o_proj input (bsz * q_len, heads * head_dim) half,
++        a slot static valid until the next call; None when the call must take the python path
++        """
+         bsz, q_len, _ = x.shape
+ 
+         # QSA regime: dense below the sparse threshold (top-k cannot exclude anything there, so
+@@ -667,6 +679,10 @@
+         if self.slot_widths.get((bsz, q_len, regime), ...) != skey:
+             self._configure(bsz, q_len, causal, regime)
+             self.slot_widths[(bsz, q_len, regime)] = skey
++        if defer:
++            assert self.o_deferrable
++            return self.bc.run_defer(bsz, q_len, x, cache_seqlens, block_table, position, positions,
++                                     position_ids, inv_freq, regime, t_total)
+         y = torch.empty((bsz, q_len, self.hidden_size), dtype = self.o_dtype, device = x.device)
+         self.bc.run(bsz, q_len, x, y, cache_seqlens, block_table, position, positions,
+                     position_ids, inv_freq, regime, t_total)
+--- a/modules/attn.py
++++ b/modules/attn.py
+@@ -612,6 +612,9 @@
+                     x = self.decode_flash_attn_nc(x, bsz, seqlen, params)
+                 case _:
+                     raise ValueError(f"Unknown attn_mode: {attn_mode}")
++            # Layer tail (ext 8202): x is the o_proj input, the enclosing block runs o_proj
++            if params.get("o_proj_deferred"):
++                return x
+             if self.tp_reduce:
+                 params["backend"].all_reduce(x)
+ 
+@@ -955,10 +958,15 @@
+             bca = self.bc_attn[key] = (build_bc_attn(self, layer) or False)
+         if bca is False:
+             return None
+-        return bca.step(
++        # Layer tail (ext 8202): leave o_proj to the enclosing block's tail launch when it asked
++        defer = bool(params.get("defer_o_proj")) and bca.o_deferrable and not self.tp_reduce
++        o = bca.step(
+             x, cache_seqlens, block_table, position, positions, position_ids, inv_freq,
+-            causal = params.get("causal", True), host_seqlens = host_seqlens
++            causal = params.get("causal", True), host_seqlens = host_seqlens, defer = defer
+         )
++        if defer and o is not None:
++            params["o_proj_deferred"] = True
++        return o
+ 
+ 
+     def cache_layer_type(self, default, kwargs: dict):
+--- a/modules/gated_delta_net.py
++++ b/modules/gated_delta_net.py
+@@ -1153,8 +1153,15 @@
+                     self._bc_configure_slot_kda(bsz, seqlen, save_history)
+                 else:
+                     self._bc_configure_slot(bsz, seqlen, save_history)
+-            y = torch.empty_like(x, dtype = self.out_dtype or torch.half)
+-            self.bc.run_bszN(x, y, conv_state, recurrent_state, recurrent_slots, save_history)
++            # Layer tail (ext 8202): the enclosing block asked to run o_proj itself, fused with the
++            # residual add, the post-attention norm and the MLP; return the o_proj input instead
++            defer = bool(params.get("defer_o_proj")) and not self.tp_reduce
++            if defer:
++                y = self.bc.run_bszN_defer(x, conv_state, recurrent_state, recurrent_slots, save_history)
++                params["o_proj_deferred"] = True
++            else:
++                y = torch.empty_like(x, dtype = self.out_dtype or torch.half)
++                self.bc.run_bszN(x, y, conv_state, recurrent_state, recurrent_slots, save_history)
+             if save_history and self.replay_verify:
+                 # History-free verify: row 0 still holds the pre-verify state of every slot, the
+                 # accepted tokens are committed from this layer's statics at rewind
+@@ -1162,6 +1169,8 @@
+                 for row, r in enumerate(rsg):
+                     rsl.pending[r.slot] = (conv_out, g, beta, row, seqlen)
+                 self.replay_owners.add(rsl)
++            if defer:
++                return y
+             if self.tp_reduce:
+                 params["backend"].all_reduce(y)
+             return to2(y, out_dtype, self.out_dtype)
+--- a/modules/mlp.py
++++ b/modules/mlp.py
+@@ -717,6 +717,37 @@
+         self.load_local(self.device, 0)
+ 
+ 
++    def link_tail(self, o_proj: Linear, norm) -> bool:
++        """
++        Layer tail (ext 8202): link the preceding attention's o_proj and this MLP's input RMSNorm
++        into the graphed path (BC_GatedMLP.set_tail), so forward_tail can run o_proj, the residual
++        add, the norm and this MLP as one launch. False (nothing linked) when unsupported
++        """
++        bc = self.bc
++        if (
++            bc is None or self.num_slices != 1 or self.tp_reduce or self.out_dtype != torch.float or
++            o_proj.quant_type != "exl3" or o_proj.inner.bc is None or norm.weight is None
++        ):
++            return False
++        dev = self.device
++        yo = g_tensor_cache.get(dev, (MAX_BSZN, self.hidden_size), torch.float, "tail_yo")
++        xn = g_tensor_cache.get(dev, (MAX_BSZN, self.hidden_size), torch.half, "tail_xn")
++        xh_o = g_tensor_cache.get(dev, (MAX_BSZN, o_proj.in_features), torch.half, "tail_xh_o")
++        return bc.set_tail(o_proj.inner.bc, norm.weight.data, norm.rms_norm_eps, norm.constant_bias,
++                           norm.constant_scale, yo, xn, xh_o)
++
++
++    def forward_tail(self, a: torch.Tensor, x: torch.Tensor) -> torch.Tensor:
++        """
++        Layer tail (ext 8202), after link_tail: a = the o_proj input (rows, o in_features) half,
++        x = the residual (bsz, q_len, hidden) fp32, updated in place: x += o_proj(a); returns
++        this MLP's output for the input norm(x), (bsz, q_len, hidden) fp32
++        """
++        d = torch.empty_like(x)
++        self.bc.run_tail(a, x, d)
++        return d
++
++
+     @override
+     def forward(
+         self,
+--- a/modules/transformer.py
++++ b/modules/transformer.py
+@@ -77,6 +77,11 @@
+         # block can fold this block's closing residual add into its input norm
+         self.resid_next = None
+ 
++        # Layer tail (ext 8202): the (MLP BC object, o_proj BC object, norm weight) linked by
++        # GatedMLP.link_tail and whether linking succeeded; relinked when any of them changes
++        self.tail_link = None
++        self.tail_ok = False
++
+     def can_take_residual(self) -> bool:
+         """
+         True if this block's input norm can absorb the previous block's pending residual add
+@@ -106,6 +111,36 @@
+             nxt.attn_norm.can_fuse_residual(x, y)
+         )
+ 
++    def _layer_tail(self, x, params) -> bool:
++        """
++        True if this call runs the layer tail (ext 8202): the attention module leaves its o_proj
++        out (it may still decline, see forward) and one launch (GatedMLP.forward_tail) runs
++        o_proj, the residual add x += o_proj(a), the post-attention RMSNorm and the MLP. Plain
++        blocks only (no hyperconnections, post-norms or residual scalars), not prefill, fp32
++        residual, verify/decode row counts (BC_GatedMLP.tail_supported). State export needs no
++        exclusion: the block then closes with x += y in place before exporting, as without tail
++        """
++        if (
++            params.get("prefill") or "defer_o_proj" in params or
++            self.attn_hc is not None or self.attn_post_norm is not None or self.attn_resid_scalar is not None or
++            self.mlp_hc is not None or self.mlp_post_norm is not None or self.mlp_resid_scalar is not None or
++            type(self.mlp) is not GatedMLP or type(self.mlp_norm) is not RMSNorm or
++            x.dtype != torch.float or not x.is_contiguous() or x.dim() != 3
++        ):
++            return False
++        o_proj = getattr(self.attn, "o_proj", None)
++        norm = self.mlp_norm
++        mbc = self.mlp.bc
++        if (
++            not isinstance(o_proj, Linear) or o_proj.quant_type != "exl3" or mbc is None or
++            norm.span_heads or norm.groups != 1 or norm.unweighted or norm.weight is None
++        ):
++            return False
++        link = (mbc, o_proj.inner.bc, norm.weight)
++        if self.tail_link is None or any(a is not b for a, b in zip(link, self.tail_link)):
++            self.tail_link = link
++            self.tail_ok = self.mlp.link_tail(o_proj, norm)
++        return self.tail_ok and mbc.tail_supported(x.shape[0] * x.shape[1])
+ 
+     @override
+     def optimizer_targets(self):
+@@ -147,6 +182,8 @@
+         self.layer_scalar_t = None
+         self.attn_resid_scalar = None
+         self.mlp_resid_scalar = None
++        self.tail_link = None
++        self.tail_ok = False
+ 
+     def get_tensors(self):
+         t = {}
+@@ -184,6 +221,7 @@
+         if pending is not None:
+             assert pending[0] is x, "pending residual add does not belong to this block's input"
+ 
++        tail = False
+         if self.attn:
+             if self.attn_hc:
+                 hc_post, hc_comb, y = self.attn_hc.mix(x, params)
+@@ -197,21 +235,41 @@
+                     y = self.attn_norm.forward(x, params, out_dtype = torch.half)
+             else:
+                 y = x.half()
+-            y = self.attn.forward(y, params)
+-            if params.get("prefill") and not export_state:
+-                return x
+-            if self.attn_resid_scalar is not None:
+-                y *= self.attn_resid_scalar
+-            if self.attn_hc:
+-                x = self.attn_hc.apply_(x, y, hc_post, hc_comb, params)
+-            elif self.attn_post_norm:
+-                self.attn_post_norm.forward(y, params, residual = x)
+-            elif self.mlp is not None and self.mlp_norm is not None and self.mlp_norm.can_fuse_residual(x, y):
+-                y_resid = y
++            if self._layer_tail(x, params):
++                # Layer tail (ext 8202): ask the attention module to leave its o_proj out. It returns
++                # the o_proj input and sets o_proj_deferred, or declines and returns its output
++                params["defer_o_proj"] = True
++                try:
++                    y = self.attn.forward(y, params)
++                finally:
++                    del params["defer_o_proj"]
++                tail = params.pop("o_proj_deferred", False)
+             else:
+-                x += y
+-
+-        if self.mlp:
++                y = self.attn.forward(y, params)
++            if tail:
++                # One launch: x += o_proj(y) (fp32, in place), post-attention RMSNorm, MLP; the MLP
++                # output then closes the block as the regular path does (7001 deferral or x += y)
++                params["residual"] = x
++                y = self.mlp.forward_tail(y, x)
++                if self._defer_mlp_residual(x, y, params, export_state, out_dtype):
++                    params["pending_mlp_residual"] = (x, y)
++                else:
++                    x += y
++            else:
++                if params.get("prefill") and not export_state:
++                    return x
++                if self.attn_resid_scalar is not None:
++                    y *= self.attn_resid_scalar
++                if self.attn_hc:
++                    x = self.attn_hc.apply_(x, y, hc_post, hc_comb, params)
++                elif self.attn_post_norm:
++                    self.attn_post_norm.forward(y, params, residual = x)
++                elif self.mlp is not None and self.mlp_norm is not None and self.mlp_norm.can_fuse_residual(x, y):
++                    y_resid = y
++                else:
++                    x += y
++
++        if self.mlp and not tail:
+             if self.mlp_hc:
+                 hc_post, hc_comb, y = self.mlp_hc.mix(x, params)
+                 y = y.half()
