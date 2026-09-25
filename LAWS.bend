@@ -64,3 +64,8 @@ import ./bend/gdn_rounds_laws.bend as GdnRoundsLaws
 # two drafters emit the same tokens, the greedy output (bend/spec_inv.bend over the exl3_accept
 # reference and the exl3_round advance; reference bend/spec_inv_spec.bend).
 import ./bend/spec_inv_laws.bend as SpecInvLaws
+# ext 3006 verify attention: strided absolute 64-token tiles, one partial slot per split CTA (bend/attn_stride.bend):
+# exactly-once causal coverage, one store per live slot, row invariance, exact combine skip.
+import ./bend/attn_stride_laws.bend as AttnStrideLaws
+# ext 3006 buffers: stores / reads inside the checked sizes, host allocation fits, tiles in one page and in the table, traps never fire.
+import ./bend/attn_stride_bounds_laws.bend as AttnStrideBoundsLaws

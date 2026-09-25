@@ -20,3 +20,5 @@ import ./bend/attn_chunk_bounds_proof.bend as AttnChunkBoundsProof
 import ./bend/attn_rowinv_proof.bend as AttnRowinvProof
 import ./bend/gdn_rounds_proof.bend as GdnRoundsProof
 import ./bend/spec_inv_proof.bend as SpecInvProof
+import ./bend/attn_stride_proof.bend as AttnStrideProof
+import ./bend/attn_stride_bounds_proof.bend as AttnStrideBoundsProof

@@ -312,3 +312,39 @@ Launch every script that owns a GPU window through `detach.sh`. A caller that is
 killed mid-window leaves the guardian dead, and its library then refuses recovery.
 In that case restore by hand, as the guardian would: stop the candidate, start
 container `b5e51bc1…`, and require an authenticated `GET /v1/models` of 200.
+
+## 5. Segment 5: broad lane (protocol `exl3-native-broad-c1-request-v2`, 350 W)
+
+| Run | Image | Primary tok/s | tok/J | aime25 / mmlu-pro / i3-logic / lcb tok/s | Rewards | Note |
+|---|---|---|---|---|---|---|
+| #54 | g7kafqt | 137.39 | 0.426 | 158.34 / 132.07 / 151.37 / 117.15 | 3/3, 12/20, 2/6, 1/3 | baseline |
+| #55 | c3006 | 139.54 | 0.431 | 152.83 / 129.65 / 155.51 / 118.14 | 3/3, 13/20, 2/6, 1/3 | 3006 (numerics change) |
+
+3006 replaces 3003's fixed 512-token chunks in the verify attention split with
+strided absolute 64-token tiles and one partial slot per split CTA
+(`bend/attn_stride*.bend`).
+
+**Judging numerics-changing keeps on this lane.** A numerics change alters the greedy
+text, and with it the call lengths and depths of every taskset. On #55, aime25 wrote 60 %
+more tokens than on #54, so per-taskset tok/s moves with the text mix and not only with
+step time. The taskset traces carry no round counts. Step time therefore comes from the
+C1 rows by regression: per depth, fit wall = intercept + rounds × step over both runs'
+five rows, with one shared intercept (prefill plus per-token work, since every row
+commits 1024 tokens) and one slope per image. #54 → #55: 27.55 → 26.82 ms at 1K
+(−2.6 % ± 0.3), 26.30 → 26.34 ms at 8K (+0.2 % ± 0.1), 31.18 → 30.32 ms at 32K
+(−2.8 % ± 0.4). These match 3006's component harness (−0.59, −0.08, −0.97 ms per round).
+
+**Differentials.** `bend/attn_chunk_diff.py` quotes 3003's chunk loop, which 3006
+removes, so it applies only to trees before 3006. The attn_chunk laws stay in the gate as
+the model of the removed partition, as attn_split did when 3003 replaced it.
+`bend/attn_stride_diff.py` is the differential for the current tree.
+
+**Measured and dropped in this segment:**
+- 5102, the GDN commit replay folded into the next verify. Bit-exact, but the GDN part of
+  a round grew 0.5-0.75 ms (a 3 MB state write per layer inside a latency-bound 48-SM
+  kernel), against 0.49 ms of replay removed.
+- 2103, the m16g projection without grid barriers. Bit-exact but slower: 79 against
+  70 µs per GDN launch. The weight stream alone already takes 70 µs: the same blocks
+  stream up to 25 % slower than the median in every launch and layer, so the slowest
+  blocks set the end of each streaming phase. Whether this follows the SM or the address
+  slice is still being measured.

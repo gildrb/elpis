@@ -16,7 +16,7 @@
     "path": "/opt/venv/lib/python3.13/site-packages/exllamav3_ext.cpython-313-x86_64-linux-gnu.so",
     "base_sha256": "6d30690fdb76b3c4ad3fb5e69f0479707e410fc9b6194e2a5e32f4d7fe1fd8b3"
   },
-  "series_sha256": "58eda162473822a59fc04abb96e85dcb34668f186535e0f2cf05e810bff4f925",
+  "series_sha256": "15937c0acbb75eb60e416c1e5779b814c35f1780e3b35551cf3d951aeba4d237",
   "patches": [
     {
       "name": "0001-gdn-shared-carveout.patch",
@@ -89,6 +89,10 @@
     {
       "name": "8202-layer-tail-on2102.patch",
       "sha256": "37b23e9a2643bcdd91f3a247b4a569d37f55876ae34e3395125c7aa642fb51ff"
+    },
+    {
+      "name": "3006-attn-verify-stride.patch",
+      "sha256": "171f9c2ae5df21f173391604367d355aa47c548fe8fc4b7a5513092457e72d0e"
     }
   ],
   "files": {
@@ -98,19 +102,19 @@
     },
     "exllamav3_ext/attn_verify.cu": {
       "pre": null,
-      "post": "6a262c6d196296f6df321890757eda88137bdf37cae5972c5b914425a47ab052"
+      "post": "bb7c00e7233602f25a237f27bba10411be761262f277e362651d21c2b36eacdb"
     },
     "exllamav3_ext/attn_verify.cuh": {
       "pre": null,
-      "post": "ac09e04f76ba1d63e94de89c4bcc8662e9bae5b25cd4cb966e020779e7547d07"
+      "post": "2167e145cf1814e2272c99b732a26958cf87fbd2aeb1d4e61604de898241707d"
     },
     "exllamav3_ext/attn_verify_gr.cu": {
       "pre": null,
-      "post": "727290a7a36bb6be185bd41fde86759cd453dcbce0ca3d9efc2df1b5800d8f84"
+      "post": "64ff8c3a5601a43ace50edb9ed57c8a7611bae4afb2d7d363aef57e7a5e737bf"
     },
     "exllamav3_ext/attn_verify_gr.cuh": {
       "pre": null,
-      "post": "0fd1ef06149d3742b72fd732f8ad4b1e6b9c47209cc2761eaa102aa452ce56ea"
+      "post": "0b73b7aae0f80c07e7fb26f9fdc9f2865cd90c71707777b33d6dc2c7a76f34b9"
     },
     "exllamav3_ext/bindings.cpp": {
       "pre": "381d867b845335b15106f86aa79e284c9d6b7d316703dd555d8a86a13ed2b465",
@@ -142,15 +146,15 @@
     },
     "exllamav3_ext/libtorch/attention.cpp": {
       "pre": "78ed122f0cf0a345755a306713ed982137b2bfbee62f6b17cf8bf4b0056427e4",
-      "post": "9e89d57eb3a6312e6d13d93ba2e19d6f9ebc29d1e90f2211d54a307ce285953b"
+      "post": "aec41f9e3642c2df3a6535574a1a879c8b0f7628821aad35082e55145c9f4f18"
     },
     "exllamav3_ext/libtorch/attention.h": {
       "pre": "628741cc309a351507b09d992c09d8d2972a113afb3ff76e0a6323ed0b0ee4b4",
-      "post": "4264903778cb2f8d434b2f4673f7441335706768b33cd08ce6d6e8b8ac1c792d"
+      "post": "5e4accef77948417381d74f32fbb83d83dea1e0d7855fa760035decebb37db69"
     },
     "exllamav3_ext/libtorch/attention_bc.h": {
       "pre": "b007768c5be8f34d8b9765213480c59867cc23784539b5fa2c97d0c235504db5",
-      "post": "af81b6b98d4fd03f9d9069dce1e0b1dcc01ff5fd9ed26eef24899ca37f8f49a9"
+      "post": "fe26c3f654df696c3992955696002fca0896bc558d484d9d2dd0073d174430b0"
     },
     "exllamav3_ext/libtorch/gated_delta_net.cpp": {
       "pre": "d8a31ef61e42ce753f7a9ee2a55c7e25a1c51e0a0a8d148d6058f9d96120dfef",
@@ -270,7 +274,7 @@
     },
     "modules/attention_fn/bc_attn.py": {
       "pre": "63f0768f313cb7015485d4655b433020f2e9e66bb44d971a9e6c65bc306994e0",
-      "post": "8b686ce20dabdd733a1829c89ef23fe070718bba55340934bb8a50a0694c9e79"
+      "post": "a61d0f70ad1ecfc141e240b41face22d53aff4d8ea5238fd9d875c679fe68df1"
     },
     "modules/attention_fn/triton_paged.py": {
       "pre": "910379b663acb08711c3be207cd3e9ed96658527cc110a6ce39c793f997836d9",
