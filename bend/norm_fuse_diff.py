@@ -36,7 +36,7 @@ import tempfile
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
-BEND = "/nix/store/m9k1kkzys7w54gf95ij16y808rag6alc-bend-2.0.27/bin/bend"
+BEND = "/nix/store/38r13iri36f1bpbvwy8kpi1fc058j07z-bend-2.0.28/bin/bend"
 TABLE = "bend/NORM_FUSE_TABLE.bend"
 DEFAULT_PRISTINE = "/tmp/litos-exl3-baseline-1/exllamav3/exllamav3"
 LOCK = ["flock", "-s", "/tmp/litos-gpu.lock", "nice", "-n", "19"]

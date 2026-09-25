@@ -4,7 +4,7 @@
   nix develop --offline --no-write-lock-file -c \\
     python3 bend/exl3_build.py --output build/bend-exl3
 
-Uses the flake-pinned bend 2.0.27 and clang 19.1.7 from the dev shell PATH.
+Uses the flake-pinned bend 2.0.28 and clang 19.1.7 from the dev shell PATH.
 Steps, each fail-closed: proof gate of bend/exl3_accept_proof.bend; C
 emission of the production program (bend/EXL3_ACCEPT.bend) and the reference
 checker (bend/EXL3_ACCEPT_SPEC.bend); both compiled and run, their tables
@@ -31,7 +31,7 @@ import tempfile
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
-BEND_VERSION = "bend 2.0.27\n"
+BEND_VERSION = "bend 2.0.28\n"
 CLANG_VERSION = "clang version 19.1.7"
 PROOF = "bend/exl3_accept_proof.bend"
 PRODUCTION = "bend/EXL3_ACCEPT.bend"
@@ -196,7 +196,7 @@ def main(arguments: list[str]) -> int:
     clang = resolve("clang")
     bend_environment = {**os.environ, "BEND_NO_TELEMETRY": "1"}
     if run([str(bend), "version"], REPO, bend_environment) != BEND_VERSION:
-        raise fail("requires exactly bend 2.0.27")
+        raise fail("requires exactly bend 2.0.28")
     clang_version = run([str(clang), "--version"], REPO, compile_environment(clang, {}))
     if not clang_version.startswith(CLANG_VERSION + "\n"):
         raise fail("requires exactly clang 19.1.7")

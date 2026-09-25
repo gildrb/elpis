@@ -3,7 +3,7 @@
 
   python3 exl3_bend_accept.py DIRECTORY     # full admission, exit 0 on success
 
-The directory holds libexl3_accept.so (unchanged Bend 2.0.27 emitted C of
+The directory holds libexl3_accept.so (unchanged Bend 2.0.28 emitted C of
 bend/EXL3_ACCEPT.bend plus bend/exl3_accept_glue.c), the canonical table
 printed by the Bend reference program bend/EXL3_ACCEPT_SPEC.bend, this file and
 identity.json. admit() verifies every file hash and the identity digest, loads
