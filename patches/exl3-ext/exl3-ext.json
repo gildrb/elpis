@@ -16,7 +16,7 @@
     "path": "/opt/venv/lib/python3.13/site-packages/exllamav3_ext.cpython-313-x86_64-linux-gnu.so",
     "base_sha256": "6d30690fdb76b3c4ad3fb5e69f0479707e410fc9b6194e2a5e32f4d7fe1fd8b3"
   },
-  "series_sha256": "e1f6c507fd9469697a730de479676d452db63c1e54d03af466a4cb4b22658c92",
+  "series_sha256": "2939a05253db7102b5757fc9612b716c681218a259603500b55e985c9cbdd516",
   "patches": [
     {
       "name": "0001-gdn-shared-carveout.patch",
@@ -81,6 +81,10 @@
     {
       "name": "5101-gdn-conv-rule-norm.patch",
       "sha256": "b649829047eb544e831134991eae5ea8598bd009266b81f0c85bb70f4d361ba5"
+    },
+    {
+      "name": "2102-proj-m16-grouped-v2-on3003-5101.patch",
+      "sha256": "c12f897d48c07ab26fbdda03f1a44e762324ede735b8bb461b2cc8f8a8a66ff3"
     }
   ],
   "files": {
@@ -134,7 +138,7 @@
     },
     "exllamav3_ext/libtorch/attention.cpp": {
       "pre": "78ed122f0cf0a345755a306713ed982137b2bfbee62f6b17cf8bf4b0056427e4",
-      "post": "2ab6db947085bc81c4c4ad258616cc72443b4bcec92341644812377b25843803"
+      "post": "1f4392992691733d6480e3c2e610f5793b2bfbccaac275bdee11b26362fc7e30"
     },
     "exllamav3_ext/libtorch/attention.h": {
       "pre": "628741cc309a351507b09d992c09d8d2972a113afb3ff76e0a6323ed0b0ee4b4",
@@ -146,7 +150,7 @@
     },
     "exllamav3_ext/libtorch/gated_delta_net.cpp": {
       "pre": "d8a31ef61e42ce753f7a9ee2a55c7e25a1c51e0a0a8d148d6058f9d96120dfef",
-      "post": "f7487ea0e075017ecc5af903a5c8b7323983da5675bb65d6ab62f3ccb1dd1e21"
+      "post": "1918c1242a0a3f177f2c7112b9747b0a41721b736c5a907727adfbbf2673e57f"
     },
     "exllamav3_ext/libtorch/gated_delta_net.h": {
       "pre": "57e460d9e8d5097f647b59b6d20c8be5162386e11ec168ced7903471f4b4205f",
@@ -179,6 +183,22 @@
     "exllamav3_ext/quant/exl3_gemm_m16_op.cpp": {
       "pre": null,
       "post": "f7b9f4f2a970af9997a1af107dfa0c17383cc08b0690e35cabb97f96093fc3b8"
+    },
+    "exllamav3_ext/quant/exl3_gemm_m16g.cu": {
+      "pre": null,
+      "post": "1fa3e00f6a287c6f9ac56edf2f3be59ea33fc69292f9c9a93ea4d739405f87e8"
+    },
+    "exllamav3_ext/quant/exl3_gemm_m16g.cuh": {
+      "pre": null,
+      "post": "dfa3c9551efdbcb1a84b2ab2625a69412aa421639c3ac33eff14cfcc2f25420b"
+    },
+    "exllamav3_ext/quant/exl3_gemm_m16g_kernel.cuh": {
+      "pre": null,
+      "post": "3a4ca9a9da1c19ddb6ad58a3cd7dbb62b34c0858c4967d1096fa68e5467ef71f"
+    },
+    "exllamav3_ext/quant/exl3_gemm_m16g_op.cpp": {
+      "pre": null,
+      "post": "05deddb90a9095223295b069daaac9e75da457d88f54240a0e1a4fbadcbae0be"
     },
     "exllamav3_ext/quant/exl3_mlp_m16.cu": {
       "pre": null,

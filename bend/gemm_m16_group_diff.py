@@ -38,7 +38,9 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parent.parent
 BEND = "/nix/store/m9k1kkzys7w54gf95ij16y808rag6alc-bend-2.0.27/bin/bend"
 TABLE = "bend/GEMM_M16_GROUP_TABLE.bend"
-PATCH_SHA = "50f75e69ba3901e1a0c1111e1534d361493e7ee291151092ef7b45eed26f51fd"
+# The shipped 2102: 2102-proj-m16-grouped-v2-on3003-5101.patch (hunk positions rebased onto 3003 +
+# 5101; its new kernel/host files are byte-identical to 2102 v2 50f75e69...)
+PATCH_SHA = "c12f897d48c07ab26fbdda03f1a44e762324ede735b8bb461b2cc8f8a8a66ff3"
 LOCK = ["flock", "-s", "/tmp/litos-gpu.lock", "nice", "-n", "19"]
 
 MUTATIONS = {
@@ -506,7 +508,7 @@ def main(argv: list[str]) -> None:
     V1 = new_files(p2001)["exllamav3_ext/quant/exl3_gemm_m16_kernel.cuh"]
     check_lines("K", K_txt, K_LINES)
     check_lines("H", H_txt, H_LINES)
-    print(f"patch sha256 {sha} ({'pinned' if sha == PATCH_SHA else 'NOT the pinned 50f75e69...'}); "
+    print(f"patch sha256 {sha} ({'pinned' if sha == PATCH_SHA else 'NOT the pinned c12f897d...'}); "
           f"quoted lines verified: K {len(K_LINES)}, H {len(H_LINES)}")
     if mutate:
         a, b = MUTATIONS[mutate]
