@@ -2,9 +2,12 @@
 
 **Status:** the serving stack is EXL3 with native DFlash2 speculative decoding
 (greedy, one sequence, native context 262144, CQ3 cache) on one RTX 3090. The
-frozen lane below is protocol `exl3-native-broad-c1-request-v2`, a **new
-comparison segment that needs a fresh baseline**. Its primary pools four native
-tasksets, so it is not comparable with `exl3-native-math3-c1-request-v1`
+frozen lane below is protocol `exl3-native-broad-c1-request-v3`, a **new
+comparison segment that needs a fresh baseline**. v3 is v2 with mmlu-pro cut from
+20 to 10 tasks and i3-logic from 6 to 4 (the first tasks of the same native
+shuffles), measured at the 250 W operating point: v2 took 1935-2084 s at 350 W
+and does not fit its 2400 s deadline at 250 W. Its primary pools four native
+tasksets, so it is not comparable with v2, `exl3-native-math3-c1-request-v1`
 (math-only primary) or any earlier segment. Only its `aime25_*` metrics keep the
 v1 math definition (same producer, tasks, config and budget); they are a
 whole-stack comparison only. No lane here is full quality, capacity or promotion
@@ -35,8 +38,8 @@ order:
 | Order | Workload | Frozen selection and settings |
 | --- | --- | --- |
 | 1 | `aime25` | `eval/configs/tiny/aime25.toml` unchanged: 3 native seed-zero shuffled tasks, 32768 output-token budget |
-| 2 | `mmlu-pro` | `eval/configs/broad/mmlu-pro.toml`: 20 tasks, zero-shot, 8192 budget; boxed-letter math-verify scoring |
-| 3 | `i3-logic` | `eval/configs/broad/i3-logic.toml`: 6 tasks, 16384 budget |
+| 2 | `mmlu-pro` | `eval/configs/broad/mmlu-pro.toml`: 10 tasks, zero-shot, 8192 budget; boxed-letter math-verify scoring |
+| 3 | `i3-logic` | `eval/configs/broad/i3-logic.toml`: 4 tasks, 16384 budget |
 | 4 | `livecodebench` | `eval/configs/broad/livecodebench.toml`: 3 tasks, 16384 budget, official v6 date filter (2024-08-01 through 2025-05-01, as `quick`); hidden tests in the sandbox |
 | 5 | C1 depth matrix | Raw-content depths 1024/8192/32768 (±2 tokens), five repetitions each in depth-then-repetition order, 1024 output-token budget, greedy, `top_p` 1, `n` 1, normal EOS, non-streaming |
 
@@ -99,7 +102,7 @@ byte-identical identity (`identity-before.json`, `identity-after.json`):
 - Authenticated `/health` and `/v1/models` (`max_model_len` 262144 is the
   reported limit, not a capacity test).
 - Host `nvidia-smi`: exactly one `NVIDIA GeForce RTX 3090`, power limit and
-  enforced limit 350 W (declared operating point; never changed here), UUID,
+  enforced limit 250 W (declared operating point; never changed here), UUID,
   bus, driver and memory.
 - The host tokenizer file behind the target mount, whose bytes must equal both
   the served file and its manifest pin.
@@ -209,9 +212,12 @@ Not measured by this lane: TTFT, committed decode throughput, power/energy and
 
 ## 3. Power
 
-The declared operating point is 350 W, the RTX 3090's default limit, set by the
-host NixOS power policy and checked but never changed by the lane. Segments
-measured at the earlier 280 W cap are not comparable with 350 W results.
+The declared operating point is 250 W, chosen for a quiet and efficient card
+(2026-09-25: 350 W was too loud). The host applies it at every boot through a
+drop-in of `nvidia-quiet-power-limit.service` in
+`/usr/local/lib/systemd/system/nvidia-quiet-power-limit.service.d/`; the lane
+checks it but never changes it. Segments measured at 280 W or 350 W are not
+comparable with 250 W results.
 Sweep other caps only with explicit maintenance ownership, recording and
 restoring the original cap; containers must not modify host power or fans.
 Measure actual watts, clocks, temperature and throttle reasons over a stated

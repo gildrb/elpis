@@ -1,10 +1,11 @@
 # Broad autoresearch lane (bench/exl3.py TASKSETS, protocol
-# exl3-native-broad-c1-request-v2): sampled logic only, not full qualification.
-# Pinned Verifiers shuffle uses native seed 0 before selecting these 6 tasks.
+# exl3-native-broad-c1-request-v3): sampled logic only, not full qualification.
+# Pinned Verifiers shuffle uses native seed 0 before selecting these 4 tasks: the first
+# 4 of v2's 6, so the lane fits its 2400 s deadline at the 250 W operating point.
 # 16384-token per-call budget (sampling.max_tokens; env.agent.max_output_tokens is the
 # matching soft episode cap) keeps the lane under its deadline. Truncations are
 # reported per run (i3_logic_truncated), never hidden.
-num_tasks = 6
+num_tasks = 4
 num_rollouts = 1
 max_concurrent = 1
 shuffle = true

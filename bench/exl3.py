@@ -45,7 +45,7 @@ BEND_DIRECTORY = "bend-exl3"
 BEND_IDENTITY = f"/opt/qwen/{BEND_DIRECTORY}/identity.json"
 BEND_SCHEMA = "eta-exl3-bend-accept/1"
 GPU_NAME = "NVIDIA GeForce RTX 3090"
-POWER_LIMIT_WATTS = 350.0
+POWER_LIMIT_WATTS = 250.0
 DRAFT_PROPOSALS = 7
 MANIFEST = ROOT / "prepare/exl3-manifest.json"
 VERIFIERS_REVISION = "ef47b2e96284a00bdcfc1012b9624b0c41ee6a0e"
@@ -534,7 +534,7 @@ def _gpu() -> dict[str, object]:
         name == GPU_NAME
         and float(limit) == POWER_LIMIT_WATTS
         and float(enforced) == POWER_LIMIT_WATTS,
-        "Measurement requires the declared RTX 3090 at 350 W; policy is never changed here",
+        "Measurement requires the declared RTX 3090 at 250 W; policy is never changed here",
     )
     return {
         "uuid": uuid,
@@ -788,7 +788,10 @@ class NativeTaskset:
     """Module whose hardcoded DATASET_NAME/DATASET_REVISION must equal the lock."""
 
 
-# Frozen order of protocol exl3-native-broad-c1-request-v2; C1 runs afterwards.
+# Frozen order of protocol exl3-native-broad-c1-request-v3; C1 runs afterwards.
+# v3 = v2 with mmlu-pro 20 -> 10 and i3-logic 6 -> 4 tasks (the first tasks of the same
+# native shuffles): v2 took 1935-2084 s at 350 W and does not fit its 2400 s deadline at
+# the 250 W operating point.
 TASKSETS = (
     NativeTaskset(
         "aime25", "aime25", "configs/tiny/aime25.toml", 3, 32768, "dataset_name"
@@ -797,13 +800,13 @@ TASKSETS = (
         "mmlu-pro",
         "mmlu_pro",
         "configs/broad/mmlu-pro.toml",
-        20,
+        10,
         8192,
         "relative_directory",
         "mmlu_pro.taskset",
     ),
     NativeTaskset(
-        "i3-logic", "i3_logic", "configs/broad/i3-logic.toml", 6, 16384, "i3_subset"
+        "i3-logic", "i3_logic", "configs/broad/i3-logic.toml", 4, 16384, "i3_subset"
     ),
     NativeTaskset(
         "livecodebench",

@@ -1,5 +1,5 @@
 # Broad autoresearch lane (bench/exl3.py TASKSETS, protocol
-# exl3-native-broad-c1-request-v2): sampled coding only, not full qualification.
+# exl3-native-broad-c1-request-v3): sampled coding only, not full qualification.
 # Official v6 date filter exactly as ../quick/livecodebench.toml; pinned Verifiers
 # shuffle uses native seed 0 before selecting these 3 tasks. Hidden tests run in
 # the locked sandbox image.
