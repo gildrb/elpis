@@ -40,10 +40,10 @@ TARGET_MOUNT = "/models/qwen38-27b-exl3"
 DRAFT_MOUNT = "/models/dflash2-exl3"
 SERVER = "serve/exl3_server.py"
 PATCHES = "/opt/qwen/exl3-patches.json"
-PATCHES_LABEL = "io.litos.exl3.patches-sha256"
+PATCHES_LABEL = "io.eta.exl3.patches-sha256"
 BEND_DIRECTORY = "bend-exl3"
 BEND_IDENTITY = f"/opt/qwen/{BEND_DIRECTORY}/identity.json"
-BEND_SCHEMA = "litos-exl3-bend-accept/1"
+BEND_SCHEMA = "eta-exl3-bend-accept/1"
 GPU_NAME = "NVIDIA GeForce RTX 3090"
 POWER_LIMIT_WATTS = 350.0
 DRAFT_PROPOSALS = 7
@@ -667,7 +667,7 @@ def capture(container: str, client: Client) -> dict[str, object]:
     return {
         "container": instance,
         "image": image,
-        "variant": labels.get("io.litos.exl3.variant"),
+        "variant": labels.get("io.eta.exl3.variant"),
         "server_sha256": tree[SERVER],
         "opt_qwen_files": tree,
         "model_preparation_files": probe.get("model_preparation"),

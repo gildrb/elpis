@@ -230,7 +230,7 @@
 --- /dev/null
 +++ b/architecture/dflash2_head_blocks.py
 @@ -0,0 +1,85 @@
-+# Block table of the DFlash2 draft-private pruned LM head (litos patch 4001-draft-pruned-head).
++# Block table of the DFlash2 draft-private pruned LM head (eta patch 4001-draft-pruned-head).
 +#
 +# The draft proposes only from DRAFT_HEAD_BLOCKS_N whole 128-id blocks of the target vocabulary: the
 +# first DRAFT_HEAD_BLOCKS_N entries of DRAFT_HEAD_BLOCK_ORDER. EXL3 rotates the head's outputs in

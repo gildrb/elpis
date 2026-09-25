@@ -26,7 +26,7 @@ target-only, different-KV or alternate-engine fallback.
    rootful Docker, set the state owner's numeric `UID:GID`; do not weaken state
    permissions to work around an ownership mismatch.
 5. The intended Docker daemon must already contain local tag
-   `qwen-litos:exl3-native-comparison` with exact image ID
+   `qwen-eta:exl3-native-comparison` with exact image ID
    `sha256:b35314f48c7684b4c9cf3d59f4c21395316aa1fc0925db782f460005aa2602ff`.
    Its recorded RepoDigest is not a downloadable registry manifest. A direct
    digest `FROM` attempted registry resolution and failed; there is no registry

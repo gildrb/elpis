@@ -52,7 +52,7 @@ svc['container_name'] = a.name
 svc['image'] = a.image
 svc['entrypoint'] = ['python3', '/maintenance-control/launch-gate.py', '--window', a.window,
                      '--candidate-name', a.name, '--candidate-image', a.image, '--'] + cmd
-doc = {'name': 'litos-' + a.name, 'services': {'c': svc}}
+doc = {'name': 'eta-' + a.name, 'services': {'c': svc}}
 if nets:
     doc['networks'] = nets
 out = Path('/tmp/cand') / f'{a.name}.json'

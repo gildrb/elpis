@@ -117,8 +117,8 @@
   ],
   "files": {
     "architecture/dflash.py": {
-      "pre": "c9ae7d7950936687168c89ae8441bf547118f740da8962ea48844402dde2250f",
-      "post": "204d0bf27c4cf22ac04c202ce59529ae382de57a6cc2fb98cc27e300f8635157"
+      "pre": "a5c8ee679f8abc8ba464ad2fef71a74a9c502e3b4320b391b982428967999eaf",
+      "post": "6187d7a48c4bf7694fe0e9e9289e6806479a177f0a1133f7fd84ee7acbadad3e"
     },
     "architecture/dflash2.py": {
       "pre": "03f93098649173a3f023a584e68d2db6124480508354aebd2cc56e5855bf7ee7",

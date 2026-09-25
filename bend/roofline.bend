@@ -8,7 +8,7 @@
 # layer of a kind is byte-identical there, so one constant per tensor kind.
 # EXL3 linear = trellis + suh + svh (mul1 is a 4-byte kernel scalar).
 # Traffic facts (file:line) are from the pristine engine
-# /tmp/litos-exl3-baseline-1/exllamav3/exllamav3 plus patches/exl3{,-ext}:
+# /tmp/eta-exl3-baseline-1/exllamav3/exllamav3 plus patches/exl3{,-ext}:
 #  - CQ3 KV (cache/quant.py:32-41, q_cache_kernels.cuh:9-23): per token per
 #    layer K and V each 1024*3/8 words + 1024/32 fp16 scales = 448 B.
 #  - Full attention reads all d + 8 tokens (3002 L181-227, lo = 0) after the

@@ -11,7 +11,7 @@ Bend acceptance identity and engine patch manifest recorded when the image bakes
 them (explicit null when absent). A new comparison segment: not comparable to
 exl3-native-math3-c1-request-v1 or earlier segments; it needs a fresh baseline.
 Required private operator descriptor (no inferred inputs or environment fallback):
-  /run/user/1000/litos-autoresearch-operator.json
+  /run/user/1000/eta-autoresearch-operator.json
 Exactly these JSON keys (replace placeholders; schema_version is integer 1):
   {"schema_version":1,"container_id":"<full 64-hex candidate ID>",
    "api_key_file":"/private/api-key",

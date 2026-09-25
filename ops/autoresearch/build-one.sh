@@ -6,14 +6,14 @@
 set -euo pipefail
 export DOCKER_HOST=unix:///run/user/1000/docker.sock
 NAME=$1; EXT_ADD=$2; EXL3_DIR=${3:--}
-R=/home/gilrodrigues/Repos/litos; X=$R/patches/exl3-ext; P=$R/patches/exl3
+R=/home/gilrodrigues/Repos/eta; X=$R/patches/exl3-ext; P=$R/patches/exl3
 cd "$R"
 # Hold the compile lock shared for the whole build: waits for timing windows (which take it
 # exclusively) and keeps them from starting mid-build; non-timing windows don't take it.
-exec 7>/tmp/litos-gpu.lock
+exec 7>/tmp/eta-gpu.lock
 flock -s 7
 # One build at a time: builds edit the repo's series files.
-exec 6>/tmp/litos-build.lock
+exec 6>/tmp/eta-build.lock
 flock -x 6
 added=()
 replaced=()
@@ -45,7 +45,7 @@ if [[ $EXL3_DIR != - ]]; then
   for f in "$EXL3_DIR"/*.patch; do place "$f" "$P/$(basename "$f")"; done
   cp -- "$EXL3_DIR/series" "$P/series"; cp -- "$EXL3_DIR/exl3-patches.json" "$P/exl3-patches.json"
 fi
-python3 -I -B "$X/ext.py" pin /tmp/litos-exl3-baseline-1/exllamav3/exllamav3
+python3 -I -B "$X/ext.py" pin /tmp/eta-exl3-baseline-1/exllamav3/exllamav3
 mkdir -p "/tmp/variants/$NAME/ext" "/tmp/variants/$NAME/exl3"
 cp -- "$X/series" "$X/exl3-ext.json" "/tmp/variants/$NAME/ext/"
 cp -- "$P/series" "$P/exl3-patches.json" "/tmp/variants/$NAME/exl3/"

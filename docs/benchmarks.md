@@ -51,7 +51,7 @@ difference rejects the run.
 ### Operator contract
 
 Main installs a fresh private descriptor at
-`/run/user/1000/litos-autoresearch-operator.json` (uid 1000, mode 0600, regular
+`/run/user/1000/eta-autoresearch-operator.json` (uid 1000, mode 0600, regular
 file, no symlink) with exactly `schema_version` 1, the full 64-hex
 `container_id`, canonical absolute `api_key_file` (0400/0600),
 `maintenance_directory` of an already armed guardian window, and a not yet
@@ -89,11 +89,11 @@ byte-identical identity (`identity-before.json`, `identity-after.json`):
   each file up to 64 MiB, checked against `prepare/exl3-manifest.json`; weights
   are rehashed by the image's own startup inventory).
 - Engine patch manifest `/opt/qwen/exl3-patches.json`: when present, its bytes
-  must match image label `io.litos.exl3.patches-sha256` and every listed
+  must match image label `io.eta.exl3.patches-sha256` and every listed
   installed file must rehash to its recorded post-patch SHA256. When absent the
   record is explicit `null` and the label must be absent.
 - Bend acceptance identity `/opt/qwen/bend-exl3/identity.json`: when present,
-  schema `litos-exl3-bend-accept/1`, `identity_sha256` must recompute over the
+  schema `eta-exl3-bend-accept/1`, `identity_sha256` must recompute over the
   document's other keys and every listed artifact must match its baked bytes.
   When absent the record is explicit `null`.
 - Authenticated `/health` and `/v1/models` (`max_model_len` 262144 is the

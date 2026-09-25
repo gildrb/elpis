@@ -12,7 +12,7 @@
  
  # TODO: Support DFlash models trained in Speculators (includes lm_head for speculator with limited vocabulary?)
  
-+# DFlash2 draft attention mask (litos patch 0005-draft-block-mask). The reference drafter
++# DFlash2 draft attention mask (eta patch 0005-draft-block-mask). The reference drafter
 +# (z-lab dflash/model.py, _attention_mask) lets key k be seen by query q iff q - k < W and, for a
 +# non-causal checkpoint (config is_causal false), k - q < W; a causal one (is_causal true, or
 +# absent on a sliding_attention layer) adds k <= q. The paged kernels keep key n for query q iff

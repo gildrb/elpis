@@ -36,7 +36,7 @@ import tempfile
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
-REPO = Path("/home/gilrodrigues/Repos/litos")
+REPO = Path("/home/gilrodrigues/Repos/eta")
 TREE_DEFAULT = Path("/tmp/kernel-work/WpartBend2/tree")
 PATCH = REPO / "patches/exl3-ext/2105-proj-m16g-weighted-on9003b.patch"
 BEND = "/nix/store/38r13iri36f1bpbvwy8kpi1fc058j07z-bend-2.0.28/bin/bend"
@@ -45,7 +45,7 @@ IMPL = "gemm_m16_wpart.bend"
 # the Bend sources compile from the dev dir (repo bend/*.bend + links to ours) when present
 BEND_CWD = HERE.parent / "dev" if (HERE.parent / "dev" / TABLE).exists() else HERE
 LOCK = ["/tmp/cpu-lock.sh"] if Path("/tmp/cpu-lock.sh").exists() else \
-    ["flock", "-s", "/tmp/litos-gpu.lock", "nice", "-n", "19"]
+    ["flock", "-s", "/tmp/eta-gpu.lock", "nice", "-n", "19"]
 
 H_PATH = "exllamav3_ext/quant/exl3_gemm_m16g.cu"
 K_PATH = "exllamav3_ext/quant/exl3_gemm_m16g_kernel.cuh"

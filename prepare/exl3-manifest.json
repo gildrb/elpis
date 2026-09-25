@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "status": "Byte identity only; not capacity, performance or quality qualification.",
-  "base_image_tag": "qwen-litos:exl3-native-comparison",
+  "base_image_tag": "qwen-eta:exl3-native-comparison",
   "base_image_id": "sha256:b35314f48c7684b4c9cf3d59f4c21395316aa1fc0925db782f460005aa2602ff",
   "engine_revision": "355c6ee10fbd25b79070316a81ea0708cc18155a",
   "research_revision": "75d4ec5a4829d39d515fc442ee8ee4664246797c",

@@ -25,7 +25,7 @@ import sys
 from collections.abc import Callable, Sequence
 from pathlib import Path
 
-SCHEMA = "litos-exl3-bend-accept/1"
+SCHEMA = "eta-exl3-bend-accept/1"
 TABLE_NAME = "exl3_accept_table.txt"
 LIBRARY_NAME = "libexl3_accept.so"
 LOADER_NAME = "exl3_bend_accept.py"
@@ -115,7 +115,7 @@ class Acceptor:
 
     def __init__(self, library: Path) -> None:
         handle = ctypes.CDLL(str(library), mode=ctypes.RTLD_LOCAL)
-        function = handle.litos_exl3_accept
+        function = handle.eta_exl3_accept
         function.argtypes = [ctypes.POINTER(ctypes.c_int64)]
         function.restype = ctypes.c_int32
         self._handle = handle

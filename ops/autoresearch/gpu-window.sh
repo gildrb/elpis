@@ -15,19 +15,19 @@ LOG=/tmp/guardian-$WIN.log
 # Two locks: the window lock serializes GPU windows; the compile lock (agents/builds take it
 # shared) is taken exclusively only by timing windows, so CPU compiles proceed during
 # non-timing windows (parity/repro/memcheck, or GPU_WINDOW_NONTIMING=1).
-exec 8>/tmp/litos-gpu-window.lock
+exec 8>/tmp/eta-gpu-window.lock
 flock -x 8
 rm -f /tmp/gpu-window.ready /tmp/gpu-window.release
 case $WIN in parity-window-*|repro-window-*) NONTIMING=1 ;; *) NONTIMING=${GPU_WINDOW_NONTIMING:-0} ;; esac
 if [[ $NONTIMING == 1 ]]; then
   echo "window lock held (non-timing) $(date +%T)"
 else
-  exec 9>/tmp/litos-gpu.lock
+  exec 9>/tmp/eta-gpu.lock
   # Priority flag: CPU jobs check it before taking the shared lock, so a waiting timing
   # window is not starved by a stream of overlapping shared holders.
-  touch /tmp/litos-gpu.pending
+  touch /tmp/eta-gpu.pending
   flock -x 9
-  rm -f /tmp/litos-gpu.pending
+  rm -f /tmp/eta-gpu.pending
   echo "lock held $(date +%T)"
 fi
 python3 "$S/recovery.py" --baseline-id b5e51bc1f6ac85b1b2af8db3612ff300190145397bb48b31e4cb7bf0f2d30f28 \
@@ -64,7 +64,7 @@ cid, win, out = sys.argv[1:4]
 d = {"schema_version": 1, "container_id": cid,
      "api_key_file": "/mnt/ssd/storage/ai/qwen3.8-27b/api-key",
      "maintenance_directory": win, "output_directory": out}
-p = '/run/user/1000/litos-autoresearch-operator.json'; t = p + '.tmp'
+p = '/run/user/1000/eta-autoresearch-operator.json'; t = p + '.tmp'
 if os.path.lexists(p): os.unlink(p)
 fd = os.open(t, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
 os.write(fd, json.dumps(d).encode()); os.close(fd); os.rename(t, p)

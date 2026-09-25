@@ -80,10 +80,10 @@ KEYWORDS = frozenset(
 )
 LOCAL = re.compile(r"_[A-Za-z0-9_]*_(?:0|[1-9][0-9]*)|r(?:0|[1-9][0-9]*)")
 UNIT = (
-    "#define main litos_exl3_original_main\n"
+    "#define main eta_exl3_original_main\n"
     '#include "exl3_accept.c"\n'
     "#undef main\n"
-    "#define LITOS_EXL3_LEAF {leaf}\n"
+    "#define ETA_EXL3_LEAF {leaf}\n"
     '#include "exl3_accept_glue.c"\n'
 )
 
@@ -270,7 +270,7 @@ def main(arguments: list[str]) -> int:
             path.name: digest(path.read_bytes()) for path in sorted(staging.iterdir())
         }
         identity: dict[str, object] = {
-            "schema": "litos-exl3-bend-accept/1",
+            "schema": "eta-exl3-bend-accept/1",
             "bend_version": BEND_VERSION.strip(),
             "toolchain": {
                 "bend": str(bend.resolve()),
