@@ -16,7 +16,7 @@
     "path": "/opt/venv/lib/python3.13/site-packages/exllamav3_ext.cpython-313-x86_64-linux-gnu.so",
     "base_sha256": "6d30690fdb76b3c4ad3fb5e69f0479707e410fc9b6194e2a5e32f4d7fe1fd8b3"
   },
-  "series_sha256": "004e29043c5f7a7fc436ce70fc07cac09f5ee88300e41896bafa1695484ac34b",
+  "series_sha256": "e1f6c507fd9469697a730de479676d452db63c1e54d03af466a4cb4b22658c92",
   "patches": [
     {
       "name": "0001-gdn-shared-carveout.patch",
@@ -77,6 +77,10 @@
     {
       "name": "3003-attn-verify-cuda.patch",
       "sha256": "1d1fbcad1c0080dde8c72e4ff2b10c4b06d61a861fd973569db28b523d54d175"
+    },
+    {
+      "name": "5101-gdn-conv-rule-norm.patch",
+      "sha256": "b649829047eb544e831134991eae5ea8598bd009266b81f0c85bb70f4d361ba5"
     }
   ],
   "files": {
@@ -114,11 +118,11 @@
     },
     "exllamav3_ext/gdn.cu": {
       "pre": "a06effe57ac621eea19d908796b4848135f675438d5b3eedbd3c4e67d336eaf0",
-      "post": "9c7981d3e309839d54ec5cfce5d9093cddcee16c665a2c2fbe29072ad071759f"
+      "post": "d0beb818c910e1a3d2b2ed4379160bdc1e35a89de191c0b49977081c406d3eed"
     },
     "exllamav3_ext/gdn.cuh": {
       "pre": "c64e35c29d7ebc40b7b10b64d4015dff7a5ab1409865f7ebf8cd38a903ab05fd",
-      "post": "3816d088a1ced5a6893f1a4b80a05bdadd19f29d8686875f508fd96b9bc7d05f"
+      "post": "3f3a4105cabd538a20af47229cf179b136d2e0b9eccb3396adf808a57a6d1bbc"
     },
     "exllamav3_ext/graph.cu": {
       "pre": "8e57b2f599df4df9ac7cdd06dd7e175d511e5780b59e9b6f3570c3476f0a7901",
@@ -142,11 +146,11 @@
     },
     "exllamav3_ext/libtorch/gated_delta_net.cpp": {
       "pre": "d8a31ef61e42ce753f7a9ee2a55c7e25a1c51e0a0a8d148d6058f9d96120dfef",
-      "post": "166b2ed3208834464be64d1120fa649fd2af14910eb0114dd13c70c34e12b3f5"
+      "post": "f7487ea0e075017ecc5af903a5c8b7323983da5675bb65d6ab62f3ccb1dd1e21"
     },
     "exllamav3_ext/libtorch/gated_delta_net.h": {
       "pre": "57e460d9e8d5097f647b59b6d20c8be5162386e11ec168ced7903471f4b4205f",
-      "post": "743b674ce1ce24ae2c6a2818e8cbb6fdd322d28717b315c31a9a057c538a07ed"
+      "post": "11921e64fcbf316258175430e4715440a993dfd37fc69d03f664e7e1133ad9d5"
     },
     "exllamav3_ext/libtorch/gated_delta_net_bc.h": {
       "pre": "b281f169bd1df139919723b9e4cd8a418a788c5c21a9782ed041f8e007e923f0",
