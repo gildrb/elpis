@@ -77,3 +77,8 @@ import ./bend/mlp_m16_defer_laws.bend as MlpM16DeferLaws
 # head jobs once, q / gate / k halves from the deinterleave sources to rope's destinations exactly once, RoPE pairs equal to rope_kernel's and partitioning,
 # K/V chunks tiling the heads and refining quant_cache_paged_kernel (source halves, base, words, page slot).
 import ./bend/attn_pre_laws.bend as AttnPreLaws
+# ext 5106 b/a GEMV split over k (gdn_conv_rule_norm_kernel KS 1/2, bend/gdn_ba_ksplit.bend): every half2 element of
+# every task handled once by one (warp, lane, i); fixed per-task order (lane chain, shfl tree, warps 0..15) independent of S
+# and of the other rows; the reduction reads completed partials after the barrier; S > 8 or k > 5120 falls back to KS 0.
+# Supersedes gdn_fast's task_exactly_once for the served b/a path (that law still describes the KS 0 fallback).
+import ./bend/gdn_ba_ksplit_laws.bend as GdnBaKsplitLaws

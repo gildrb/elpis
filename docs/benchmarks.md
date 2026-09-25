@@ -362,10 +362,16 @@ pass on the #56 tree. Still unproven for the served code:
 - 2105's weighted partition. `gemm_m16_group` models the uniform v2 partition, which 2105
   reproduces bit for bit only at equal weights (the draft rows); the target rows run at
   (100, 91).
-- 5106's K-split GEMV. `gdn_fast`'s `task_exactly_once` models 5101's one-warp-per-task
-  GEMV.
 - A differential for 9003b's draft shapes. It exists, but quotes 2102's kernel source and
   must be ported to 2105's.
+
+5106's K-split GEMV is covered since: `bend/gdn_ba_ksplit*` proves that every half2
+element of every b/a task is multiplied once, by one (warp, lane, iteration). The per-task
+sum order (lane chain, shuffle tree, warps 0-15, bias) is fixed and independent of the
+number of rows. The reduction reads only partials completed before the barrier, and more
+than 8 rows or K > 5120 falls back to 5101's one-warp-per-task GEMV (still described by
+`gdn_fast`'s `task_exactly_once`). `bend/gdn_ba_ksplit_diff.py` quotes the served kernel
+lines and matches the Bend table byte for byte (801 lines).
 
 **Differentials.** `bend/attn_chunk_diff.py` quotes 3003's chunk loop, which 3006
 removes, so it applies only to trees before 3006. The attn_chunk laws stay in the gate as
