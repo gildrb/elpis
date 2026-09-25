@@ -16,7 +16,7 @@
     "path": "/opt/venv/lib/python3.13/site-packages/exllamav3_ext.cpython-313-x86_64-linux-gnu.so",
     "base_sha256": "6d30690fdb76b3c4ad3fb5e69f0479707e410fc9b6194e2a5e32f4d7fe1fd8b3"
   },
-  "series_sha256": "f5f6eb4286eede402ff77c63a123cfa75e2706940292311edea5ff9cb297f163",
+  "series_sha256": "cd58faebdb4122978fa1b2cbdc7d1aab3b790f7847513413e333a9601d0999f2",
   "patches": [
     {
       "name": "0001-gdn-shared-carveout.patch",
@@ -65,16 +65,28 @@
     {
       "name": "3005-attn-row-invariant-split.patch",
       "sha256": "98f69ed7a3e31893b99ab43c3ce7af2854d8128915628aef65b5b827d8547280"
+    },
+    {
+      "name": "9002-draft-q4-head.patch",
+      "sha256": "9b2554187cdfbdc82b987fb00a1e7dfb3e7a0da33491550c35d112796cb893eb"
     }
   ],
   "files": {
     "architecture/dflash2.py": {
       "pre": "03f93098649173a3f023a584e68d2db6124480508354aebd2cc56e5855bf7ee7",
-      "post": "b3aaa77b327feb57c837cf5133ba6e4ea2472a8a27342459804238617b0f4260"
+      "post": "16a2982724b070b7328a652e4127fda0da3e3836228234bc864f6190b8657fa2"
     },
     "exllamav3_ext/bindings.cpp": {
       "pre": "381d867b845335b15106f86aa79e284c9d6b7d316703dd555d8a86a13ed2b465",
-      "post": "14c389468f9189c12edc5309cd3523b5275d75852b210360078be1c1205afb07"
+      "post": "ef1974d7a8071e761ef17676983a8567c39fc333b35aaa29c34dd95349b58869"
+    },
+    "exllamav3_ext/dflash2_head.cu": {
+      "pre": null,
+      "post": "20832450356eb1f1882ac023298163b7db87ccda2173f2578965b678d6bb0a76"
+    },
+    "exllamav3_ext/dflash2_head.cuh": {
+      "pre": null,
+      "post": "229fd18b4a2cb5797d4b315e2f5c763b8dc212feb8b0ae602ad22aa38fe9472f"
     },
     "exllamav3_ext/gdn.cu": {
       "pre": "a06effe57ac621eea19d908796b4848135f675438d5b3eedbd3c4e67d336eaf0",
@@ -139,6 +151,14 @@
     "model/model_ls.py": {
       "pre": "b66c561c68d83b635d36606cc59df223c1b8259ffb39983d2b169ac69cebd915",
       "post": "1fb0f910a3da229be6415c04dc4fa3d6ea1d372148edb44cb2e8069351467b2a"
+    },
+    "modules/arch_specific/dflash2.py": {
+      "pre": "8aa64c4099864b0c91022bf06fa84838d98a30956fb03a212a92edc95475d70b",
+      "post": "f75071ef306384091fccc6ff6d491b15096712f2706c2953b25391fcdfe98c88"
+    },
+    "modules/arch_specific/dflash2_q4_head.py": {
+      "pre": null,
+      "post": "516d87adca746e0411a2f53be84e17c9ac7223e5da9c80c717ac406c0efc4cda"
     },
     "modules/attention_fn/bc_attn.py": {
       "pre": "63f0768f313cb7015485d4655b433020f2e9e66bb44d971a9e6c65bc306994e0",

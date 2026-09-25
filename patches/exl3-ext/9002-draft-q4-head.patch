@@ -1,0 +1,782 @@
+--- a/architecture/dflash2.py
++++ b/architecture/dflash2.py
+@@ -10,6 +10,7 @@
+ from ..modules import RMSNorm, Attention, GatedMLP
+ from ..modules.arch_specific.dflash import DFlashInputLayer
+ from ..modules.arch_specific.dflash2 import DFlash2Block, DFlash2DynConv, DFlash2Selector
++from ..modules.arch_specific.dflash2_q4_head import Q4DraftHead
+ from ..modules.attn import prepare_for_attn
+ from .dflash import DFlashConfig, dflash_update_kv_from_target
+ from ..util.tensor import get_for_device
+@@ -352,6 +353,7 @@
+         })
+ 
+         self.attached_model = None
++        self.q4_head = None
+         self.draft_graphs = _DraftGraphs()
+ 
+         self.draft_verifier_params.update({
+@@ -383,6 +385,16 @@
+             raise ValueError("DFlash2 target_layer_ids contains a layer outside the target model")
+         self.attached_model = weakref.ref(target)
+         self.input_layer.attached_model = weakref.ref(target)
++        # Draft-only int4 copy of the target head with the selector's top-k fused into its GEMM (0.66 GB
++        # read per round instead of the 6-bit head's 0.95 GB plus a logits round trip). Built here, after
++        # both models and caches are loaded, so a failure surfaces before serving. Heads the kernel does not
++        # take (Q4DraftHead.supported) keep proposing through the shared target head
++        self.q4_head = None
++        lm_inner = getattr(target.modules[target.logit_layer_idx], "inner", None)
++        scale = float(self.config.output_multiplier)
++        softcap = float(self.config.final_logit_softcapping or 0.0)
++        if Q4DraftHead.supported(lm_inner, target.config.vocab_size, self.config.selector_top_k, scale, softcap):
++            self.q4_head = Q4DraftHead(lm_inner, target.config.vocab_size, self.config.selector_top_k, scale, softcap)
+ 
+ 
+     @override
+@@ -414,6 +426,7 @@
+     @override
+     def unload(self):
+         self.draft_graphs.clear()
++        self.q4_head = None
+         super().unload()
+ 
+ 
+@@ -432,20 +445,32 @@
+         state: torch.Tensor,
+         params: dict
+     ) -> torch.Tensor:
+-        """Target lm_head over all block rows, then the selector walk over
+-        rows 1.. (rows predict their own position; row 0 is the anchor).
++        """Draft logits over the block rows, then the selector walk over rows 1.. (rows predict their
++        own position; row 0 is the anchor). The logits' top-k comes from the int4 draft head's fused
++        GEMM (q4_head) for one sequence of <= 8 rows, else from the target lm_head over all rows.
+         Returns (bsz, block) ids [anchor, path...]; the generator crops the
+         anchor. The selector is greedy; sampling remains lossless because the
+         target verifier still samples normally and accepts only exact matches."""
+         target = self.attached_model()
+-        lm = target.modules[target.logit_layer_idx]
+-        logits = lm.prepare_for_device(state.half(), params)
+-        logits = lm.forward(logits, params)
+-
+         dev = self.selector.device
+         # The generator stages the block ids in pinned memory: upload without a host sync
+         anchor = get_for_device(params, "dflash2_anchor_ids", dev)[:, -1]
+         export_conf = params.get("export_draft_conf", False)
++        q4 = self.q4_head
++        if q4 is not None and state.shape[0] == 1 and 1 < state.shape[1] <= 8:
++            # Rows 1.. only (row 0 is the anchor); top-16 straight from the int4 head's GEMM epilogue
++            unary, cands = q4.topk(state, 1)
++            out, confidence = self.selector.walk_cands(
++                to_device(state[:, 1:], dev), to_device(unary, dev), to_device(cands, dev), anchor,
++                return_confidence = export_conf,
++            )
++            if export_conf:
++                params["draft_conf"] = confidence
++            return out
++        lm = target.modules[target.logit_layer_idx]
++        logits = lm.prepare_for_device(state.half(), params)
++        logits = lm.forward(logits, params)
++
+         # [anchor, path...] and [0, score...] straight from the selector, in the block layout
+         # the generator consumes. The head's padded width, the output multiplier and the
+         # softcap (Gemma-class targets) are handled inside the selector's top-k. The state
+--- a/exllamav3_ext/bindings.cpp
++++ b/exllamav3_ext/bindings.cpp
+@@ -17,6 +17,7 @@
+ #include "gdn.cuh"
+ #include "add.cuh"
+ #include "dflash2.cuh"
++#include "dflash2_head.cuh"
+ 
+ #include "quant/quantize.cuh"
+ #include "quant/pack.cuh"
+@@ -245,6 +246,7 @@
+     m.def("dflash2_dynconv", &dflash2_dynconv, "dflash2_dynconv");
+     m.def("dflash2_selector_walk", &dflash2_selector_walk, "dflash2_selector_walk");
+     m.def("dflash2_topk", &dflash2_topk, "dflash2_topk");
++    m.def("dflash2_q4_head_topk", &dflash2_q4_head_topk, "dflash2_q4_head_topk");
+     m.def("cache_rotate", &cache_rotate, "cache_rotate");
+     m.def("dspark_write_rows", &dspark_write_rows, "dspark_write_rows");
+     m.def("paged_kv_cache_update", &paged_kv_cache_update, "paged_kv_cache_update");
+--- /dev/null
++++ b/exllamav3_ext/dflash2_head.cu
+@@ -0,0 +1,443 @@
++#include <cuda_fp16.h>
++#include "dflash2_head.cuh"
++#include <ATen/ATen.h>
++#include <c10/cuda/CUDAGuard.h>
++#include <ATen/cuda/CUDAContext.h>
++#include <climits>
++#include "util.h"
++#include "util.cuh"
++
++// Draft-only int4 LM head for the DFlash2 draft at M <= 8 token rows, with the selector's top-16 fused
++// into the GEMM. Tensor-core swap-AB form: the weight tile is the 16 x 16 A operand of mma.m16n8k16, the
++// (<= 8) token rows are the n = 8 B operand, so every weight byte is read from DRAM exactly once and
++// multiplied into all rows. Weights are repacked at attach time into per-lane fragment order: one
++// coalesced 16-byte load per lane feeds its four A fragments with no shuffles.
++//
++// A fragment (lane = 4 g + q): pair 0 = rows g, cols 2q..2q+1; pair 1 = rows g+8, same cols;
++// pair 2 = rows g, cols 2q+8..2q+9; pair 3 = rows g+8, cols 2q+8..2q+9. C fragment: c0, c1 = row g,
++// tokens 2q, 2q+1; c2, c3 = row g+8, tokens 2q, 2q+1. Rows are output features (vocab ids), columns k.
++
++__device__ __forceinline__ uint4 ldg_stream(const uint4* p)
++{
++    uint4 r;
++    asm volatile ("ld.global.nc.L1::no_allocate.v4.u32 {%0, %1, %2, %3}, [%4];"
++                  : "=r"(r.x), "=r"(r.y), "=r"(r.z), "=r"(r.w) : "l"(p));
++    return r;
++}
++
++__device__ __forceinline__ void mma_16816(float (&c)[4], uint32_t a0, uint32_t a1, uint32_t a2, uint32_t a3,
++                                          uint32_t b0, uint32_t b1)
++{
++    asm volatile ("mma.sync.aligned.m16n8k16.row.col.f32.f16.f16.f32 {%0, %1, %2, %3}, {%4, %5, %6, %7}, "
++                  "{%8, %9}, {%0, %1, %2, %3};"
++                  : "+f"(c[0]), "+f"(c[1]), "+f"(c[2]), "+f"(c[3])
++                  : "r"(a0), "r"(a1), "r"(a2), "r"(a3), "r"(b0), "r"(b1));
++}
++
++__device__ __forceinline__ uint32_t hsub2_u32(uint32_t a, uint32_t b)
++{
++    half2 r = __hsub2(*reinterpret_cast<half2*>(&a), *reinterpret_cast<half2*>(&b));
++    return *reinterpret_cast<uint32_t*>(&r);
++}
++
++// int4 word -> four A-fragment half2 registers. Nibble p (bits 4p..4p+3) and nibble p + 4 (bits
++// 16+4p..) hold pair p's two elements as q + 8, q in [-8, 7]; (w >> 4p) & 0x000f000f | 0x6400_6400 is
++// the fp16 pair (1024 + q + 8), and subtracting 1032 is exact
++__device__ __forceinline__ void dq4(uint32_t w, uint32_t (&a)[4])
++{
++    const uint32_t bias = 0x64086408u;
++    #pragma unroll
++    for (int p = 0; p < 4; ++p)
++    {
++        uint32_t t = ((w >> (4 * p)) & 0x000f000fu) | 0x64006400u;
++        a[p] = hsub2_u32(t, bias);
++    }
++}
++
++// ------------------------------------------------------------------------------------------------
++// Top-K lists distributed over a warp in the C-fragment layout: for token 2q + (e & 1) the entry at
++// position p = g + 8 (e >> 1) sits in lane 4 g + q, slot e. Positions of one token span lanes of equal q
++// (xor 4, 8, 16) and the slot bit e >> 1. Order: value descending, then id ascending (a strict total
++// order on distinct ids), so the kept set and its order are independent of how the vocabulary was
++// partitioned (see bend/draft_head_topk*.bend)
++
++#define HEAD_TOPK 16
++#define HEAD_TOKENS 8
++
++__device__ __forceinline__ bool better(float av, int ai, float bv, int bi)
++{
++    return av > bv || (av == bv && ai < bi);
++}
++
++// One bitonic compare-exchange stage (block size k, distance j) over all 8 tokens' 16-lists
++template <bool desc>
++__device__ __forceinline__ void cas_stage(float (&v)[4], int (&id)[4], int k, int j, int g)
++{
++    if (j == 8)
++    {
++        const bool asc = ((g & k) == 0) != desc;
++        #pragma unroll
++        for (int e = 0; e < 2; ++e)
++        {
++            const bool low_better = better(v[e], id[e], v[e + 2], id[e + 2]);
++            if (asc == low_better)
++            {
++                float tv = v[e]; v[e] = v[e + 2]; v[e + 2] = tv;
++                int ti = id[e]; id[e] = id[e + 2]; id[e + 2] = ti;
++            }
++        }
++    }
++    else
++    {
++        const int lm = j << 2;
++        const bool is_low = (g & j) == 0;
++        #pragma unroll
++        for (int e = 0; e < 4; ++e)
++        {
++            const int p = g + 8 * (e >> 1);
++            const bool asc = ((p & k) == 0) != desc;
++            const float ov = __shfl_xor_sync(0xffffffffu, v[e], lm);
++            const int oi = __shfl_xor_sync(0xffffffffu, id[e], lm);
++            const bool mine_better = better(v[e], id[e], ov, oi);
++            const bool keep_better = is_low != asc;
++            if (keep_better != mine_better) { v[e] = ov; id[e] = oi; }
++        }
++    }
++}
++
++template <bool desc>
++__device__ __forceinline__ void bitonic_sort16(float (&v)[4], int (&id)[4], int g)
++{
++    #pragma unroll
++    for (int k = 2; k <= 16; k <<= 1)
++        #pragma unroll
++        for (int j = k >> 1; j > 0; j >>= 1)
++            cas_stage<desc>(v, id, k, j, g);
++}
++
++// r (descending) := top-16 of r and t, where t is ascending: the elementwise better-of is bitonic and
++// holds the 16 best of the union; four stages sort it descending
++__device__ __forceinline__ void merge_asc(float (&rv)[4], int (&ri)[4], const float (&tv)[4], const int (&ti)[4], int g)
++{
++    #pragma unroll
++    for (int e = 0; e < 4; ++e)
++        if (!better(rv[e], ri[e], tv[e], ti[e])) { rv[e] = tv[e]; ri[e] = ti[e]; }
++    #pragma unroll
++    for (int j = 8; j > 0; j >>= 1)
++        cas_stage<true>(rv, ri, 16, j, g);
++}
++
++__device__ __forceinline__ void list_store(float* s_v, int* s_i, int slot, const float (&v)[4], const int (&id)[4], int lane)
++{
++    const int g = lane >> 2, q = lane & 3;
++    #pragma unroll
++    for (int e = 0; e < 4; ++e)
++    {
++        const int o = (slot * HEAD_TOKENS + 2 * q + (e & 1)) * HEAD_TOPK + g + 8 * (e >> 1);
++        s_v[o] = v[e]; s_i[o] = id[e];
++    }
++}
++
++// Load a stored descending list reversed (ascending) into fragment layout
++template <bool cg>
++__device__ __forceinline__ void list_load_rev(const float* s_v, const int* s_i, int slot, float (&v)[4], int (&id)[4], int lane)
++{
++    const int g = lane >> 2, q = lane & 3;
++    #pragma unroll
++    for (int e = 0; e < 4; ++e)
++    {
++        const int o = (slot * HEAD_TOKENS + 2 * q + (e & 1)) * HEAD_TOPK + (15 - (g + 8 * (e >> 1)));
++        if (cg) { v[e] = __ldcg(s_v + o); id[e] = __ldcg(s_i + o); }
++        else    { v[e] = s_v[o]; id[e] = s_i[o]; }
++    }
++}
++
++// Tree merge of the block's warp lists in shared memory (warp w merges w + r for r = 1, 2, 4, 8, in
++// that order); warp 0 ends with the block list in registers
++template <int WARPS>
++__device__ __forceinline__ void block_merge(float* s_v, int* s_i, float (&rv)[4], int (&ri)[4], int warp, int lane)
++{
++    list_store(s_v, s_i, warp, rv, ri, lane);
++    __syncthreads();
++    #pragma unroll
++    for (int r = 1; r < WARPS; r <<= 1)
++    {
++        if ((warp & (2 * r - 1)) == 0)
++        {
++            float tv[4]; int ti[4];
++            list_load_rev<false>(s_v, s_i, warp + r, tv, ti, lane);
++            merge_asc(rv, ri, tv, ti, lane >> 2);
++            list_store(s_v, s_i, warp, rv, ri, lane);
++        }
++        __syncthreads();
++    }
++}
++
++// ------------------------------------------------------------------------------------------------
++// int4 (group 128, symmetric, fp16 scale) draft head with the selector's top-K fused into the epilogue.
++//
++//   wq     [n_tiles, K / 64, 32] uint4: lane's four A-fragment words for the four k16 steps of chunk c
++//   scales [n_tiles, K / 128, 8] half2: (scale of row g, scale of row g + 8) of 16-row tile, group
++//   x      [m, K] fp16, m <= 8 (rows >= m read as zero)
++//
++// Tile n (vocab rows 16 n .. 16 n + 15) belongs to global warp n mod W (W = grid warps) and is its
++// (n div W)-th tile; a warp streams its tiles' chunks in order through a HEAD_DEPTH-deep register ring
++// that prefetches across tile boundaries.
++// Each group's 8 MMAs accumulate from zero in fp32 and are folded into the tile accumulator times the
++// group scale (group order 0..K/128-1). Per tile the 16 x 8 logits are scaled / softcapped, sorted and
++// merged into the warp's running per-token top-16; warps merge per block, the last-arriving block merges
++// the block lists and writes rows row0 .. row0 + rows_out - 1
++
++#define HEAD_WARPS 16
++#define HEAD_THREADS (HEAD_WARPS * 32)
++#define HEAD_DEPTH 8
++
++__global__ __launch_bounds__(HEAD_THREADS, 1)
++void dflash2_q4_head_topk_kernel
++(
++    const half* __restrict__ x,
++    const int m,
++    const int K,
++    const uint4* __restrict__ wq,
++    const uint32_t* __restrict__ sc,
++    const int n_tiles,
++    const int vocab,
++    const int row0,
++    const int rows_out,
++    const float scale,
++    const float softcap,
++    float* __restrict__ part_v,
++    int* __restrict__ part_ix,
++    int* __restrict__ counter,
++    float* __restrict__ values,
++    int64_t* __restrict__ indices
++)
++{
++    extern __shared__ uint4 smem4[];
++    __shared__ bool s_last;
++    uint32_t* xs = (uint32_t*) smem4;
++
++    const int t = threadIdx.x, warp = t >> 5, lane = t & 31, g = lane >> 2, q = lane & 3;
++    const int CH = K >> 6, G = K >> 7;
++    const int W = gridDim.x * HEAD_WARPS;
++    const int gw = blockIdx.x * HEAD_WARPS + warp;
++    // Weight ring first, so DRAM is busy while x is staged. The load cursor (ld_tile, ld_c) walks the
++    // warp's chunk stream (tiles gw, gw + W, ..., chunks 0..CH-1 each) HEAD_DEPTH chunks ahead of the
++    // compute cursor and runs across tile boundaries; ld_tile >= n_tiles means the stream is exhausted
++    uint4 rw[HEAD_DEPTH];
++    uint32_t rs[HEAD_DEPTH];
++    int ld_tile = gw, ld_c = 0;
++    #pragma unroll
++    for (int j = 0; j < HEAD_DEPTH; ++j)
++    {
++        if (ld_tile < n_tiles)
++        {
++            rw[j] = ldg_stream(wq + ((size_t) ld_tile * CH + ld_c) * 32 + lane);
++            rs[j] = __ldg(sc + ((size_t) ld_tile * G + (ld_c >> 1)) * 8 + g);
++            if (++ld_c == CH) { ld_c = 0; ld_tile += W; }
++        }
++    }
++
++    // x -> shared memory in B-fragment order: word f = ((c * 2 + h) * 32 + l) * 4 + v holds, for lane l
++    // and k16 step s = 2 h + v / 2 of chunk c, the pair x[l / 4][64 c + 16 s + 2 (l % 4) + 8 (v % 2) + {0, 1}]
++    for (int f = t; f < K * 4; f += HEAD_THREADS)
++    {
++        const int c = f >> 8, h = (f >> 7) & 1, l = (f >> 2) & 31, v = f & 3;
++        const int s = 2 * h + (v >> 1);
++        const int k = 64 * c + 16 * s + 2 * (l & 3) + 8 * (v & 1);
++        const int row = l >> 2;
++        xs[f] = row < m ? *((const uint32_t*) (x + (size_t) row * K + k)) : 0u;
++    }
++    __syncthreads();
++
++    float rv[4]; int ri[4];
++    #pragma unroll
++    for (int e = 0; e < 4; ++e) { rv[e] = -INFINITY; ri[e] = INT_MAX; }
++
++    const uint4* xs4 = (const uint4*) xs;
++
++    // Tiles gw, gw + W, ... < n_tiles (the finisher loop form of patch 2001, see
++    // bend/draft_head_partition.bend); chunks 0..CH-1 in order (CH % HEAD_DEPTH == 0, so ring slot j
++    // always holds chunk base + j and odd j closes a 128-deep scale group); one epilogue per tile
++    for (int tile = gw; tile < n_tiles; tile += W)
++    {
++        float acc[4] = {0.0f, 0.0f, 0.0f, 0.0f};
++        float part[4] = {0.0f, 0.0f, 0.0f, 0.0f};
++        #pragma unroll 1
++        for (int base = 0; base < CH; base += HEAD_DEPTH)
++        {
++            #pragma unroll
++            for (int j = 0; j < HEAD_DEPTH; ++j)
++            {
++                const int c = base + j;
++                const uint4 w = rw[j];
++                const uint32_t s = rs[j];
++                if (ld_tile < n_tiles)
++                {
++                    rw[j] = ldg_stream(wq + ((size_t) ld_tile * CH + ld_c) * 32 + lane);
++                    rs[j] = __ldg(sc + ((size_t) ld_tile * G + (ld_c >> 1)) * 8 + g);
++                    if (++ld_c == CH) { ld_c = 0; ld_tile += W; }
++                }
++
++                const uint4 xa = xs4[c * 64 + lane];
++                const uint4 xb = xs4[c * 64 + 32 + lane];
++                uint32_t a[4];
++                dq4(w.x, a); mma_16816(part, a[0], a[1], a[2], a[3], xa.x, xa.y);
++                dq4(w.y, a); mma_16816(part, a[0], a[1], a[2], a[3], xa.z, xa.w);
++                dq4(w.z, a); mma_16816(part, a[0], a[1], a[2], a[3], xb.x, xb.y);
++                dq4(w.w, a); mma_16816(part, a[0], a[1], a[2], a[3], xb.z, xb.w);
++
++                if (j & 1)
++                {
++                    const float2 sf = __half22float2(*reinterpret_cast<const half2*>(&s));
++                    acc[0] = fmaf(sf.x, part[0], acc[0]);
++                    acc[1] = fmaf(sf.x, part[1], acc[1]);
++                    acc[2] = fmaf(sf.y, part[2], acc[2]);
++                    acc[3] = fmaf(sf.y, part[3], acc[3]);
++                    part[0] = part[1] = part[2] = part[3] = 0.0f;
++                }
++            }
++        }
++
++        float tv[4]; int ti[4];
++        #pragma unroll
++        for (int e = 0; e < 4; ++e)
++        {
++            const int id = tile * 16 + g + 8 * (e >> 1);
++            float val = acc[e] * scale;
++            if (softcap > 0.0f) val = tanhf(val / softcap) * softcap;
++            tv[e] = id < vocab ? val : -INFINITY;
++            ti[e] = id < vocab ? id : INT_MAX;
++        }
++        bitonic_sort16<false>(tv, ti, g);
++        merge_asc(rv, ri, tv, ti, g);
++    }
++
++    // Block merge (shared memory reused after every warp is done with x)
++    __syncthreads();
++    float* s_v = (float*) smem4;
++    int* s_i = (int*) (s_v + HEAD_WARPS * HEAD_TOKENS * HEAD_TOPK);
++    block_merge<HEAD_WARPS>(s_v, s_i, rv, ri, warp, lane);
++
++    if (warp == 0) list_store(part_v, part_ix, blockIdx.x, rv, ri, lane);
++    __threadfence();
++    __syncthreads();
++    if (t == 0) s_last = atomicAdd(counter, 1) == (int) gridDim.x - 1;
++    __syncthreads();
++    if (!s_last) return;
++    __threadfence();
++
++    // Last block: warp w merges block lists w, w + 16, ... then the warps tree-merge
++    #pragma unroll
++    for (int e = 0; e < 4; ++e) { rv[e] = -INFINITY; ri[e] = INT_MAX; }
++    for (int b = warp; b < (int) gridDim.x; b += HEAD_WARPS)
++    {
++        float tv[4]; int ti[4];
++        list_load_rev<true>(part_v, part_ix, b, tv, ti, lane);
++        merge_asc(rv, ri, tv, ti, g);
++    }
++    block_merge<HEAD_WARPS>(s_v, s_i, rv, ri, warp, lane);
++
++    if (warp == 0)
++    {
++        #pragma unroll
++        for (int e = 0; e < 4; ++e)
++        {
++            const int tok = 2 * q + (e & 1) - row0;
++            if (tok >= 0 && tok < rows_out)
++            {
++                const int o = tok * HEAD_TOPK + g + 8 * (e >> 1);
++                values[o] = rv[e];
++                indices[o] = (int64_t) ri[e];
++            }
++        }
++        if (t == 0) *counter = 0;
++    }
++}
++
++/*
++x:        (m, K) fp16 contiguous, m <= 8, K % 512 == 0 (the rotated draft state: had_r_128(state, suh))
++wq:       (n_tiles, K / 64, 32, 4) int32, see above; n_tiles = ceil(vocab / 16)
++scales:   (n_tiles, K / 128, 8, 2) fp16
++row0:     first token row written; values / indices (rows_out, 16) row r <- token row0 + r
++part_v:   (>= grid * 8 * 16) fp32, part_ix: same int32; counter: (1,) int32, zero on entry, zero on exit
++Grid: one block of 512 threads per SM (grid = part_v.numel() / 128)
++*/
++
++void dflash2_q4_head_topk
++(
++    const at::Tensor& x,
++    const at::Tensor& wq,
++    const at::Tensor& scales,
++    int64_t vocab,
++    int64_t row0,
++    double scale,
++    double softcap,
++    at::Tensor& part_v,
++    at::Tensor& part_ix,
++    at::Tensor& counter,
++    at::Tensor& values,
++    at::Tensor& indices
++)
++{
++    const at::cuda::OptionalCUDAGuard device_guard(x.device());
++    cudaStream_t stream = at::cuda::getCurrentCUDAStream().stream();
++
++    TORCH_CHECK_DTYPE(x, kHalf);
++    TORCH_CHECK_DIM(x, 2);
++    TORCH_CHECK(x.is_contiguous(), "dflash2_q4_head_topk: x must be contiguous");
++    TORCH_CHECK_DTYPE(wq, kInt);
++    TORCH_CHECK_DIM(wq, 4);
++    TORCH_CHECK_DTYPE(scales, kHalf);
++    TORCH_CHECK_DIM(scales, 4);
++    TORCH_CHECK_DTYPE(part_v, kFloat);
++    TORCH_CHECK_DTYPE(part_ix, kInt);
++    TORCH_CHECK_DTYPE(counter, kInt);
++    TORCH_CHECK_DTYPE(values, kFloat);
++    TORCH_CHECK_DTYPE(indices, kLong);
++    TORCH_CHECK(wq.is_contiguous() && scales.is_contiguous() && part_v.is_contiguous() && part_ix.is_contiguous()
++                && values.is_contiguous() && indices.is_contiguous(), "dflash2_q4_head_topk: tensors must be contiguous");
++    const at::Tensor* on_device[] = {&wq, &scales, &part_v, &part_ix, &counter, &values, &indices};
++    for (const at::Tensor* p : on_device)
++        TORCH_CHECK(p->device() == x.device(), "dflash2_q4_head_topk: tensors must share x's device");
++
++    const int m = x.size(0);
++    const int K = x.size(1);
++    const int n_tiles = wq.size(0);
++    TORCH_CHECK(m >= 1 && m <= HEAD_TOKENS, "dflash2_q4_head_topk: 1..8 rows");
++    TORCH_CHECK(K % (64 * HEAD_DEPTH) == 0 && K >= 1024, "dflash2_q4_head_topk: K must be a multiple of 512, >= 1024");
++    TORCH_CHECK(wq.size(1) == K / 64 && wq.size(2) == 32 && wq.size(3) == 4, "dflash2_q4_head_topk: wq shape");
++    TORCH_CHECK(scales.size(0) == n_tiles && scales.size(1) == K / 128 && scales.size(2) == 8 && scales.size(3) == 2,
++                "dflash2_q4_head_topk: scales shape");
++    TORCH_CHECK(vocab >= HEAD_TOPK && (vocab + 15) / 16 == n_tiles, "dflash2_q4_head_topk: vocab / tiles mismatch");
++    TORCH_CHECK(vocab < INT_MAX, "dflash2_q4_head_topk: vocab too large");
++    TORCH_CHECK(scale > 0.0, "dflash2_q4_head_topk: scale must be positive (order-preserving)");
++    TORCH_CHECK(softcap >= 0.0, "dflash2_q4_head_topk: negative softcap");
++    TORCH_CHECK(counter.numel() == 1, "dflash2_q4_head_topk: counter must hold one int32");
++    const int rows_out = values.size(0);
++    TORCH_CHECK_DIM(values, 2);
++    TORCH_CHECK(values.size(1) == HEAD_TOPK, "dflash2_q4_head_topk: top-k is 16");
++    TORCH_CHECK_SHAPES_FULL(values, indices);
++    TORCH_CHECK(row0 >= 0 && rows_out >= 1 && row0 + rows_out <= m, "dflash2_q4_head_topk: output rows out of range");
++    TORCH_CHECK(part_v.numel() == part_ix.numel() && part_v.numel() % (HEAD_TOKENS * HEAD_TOPK) == 0,
++                "dflash2_q4_head_topk: partial buffers");
++    const int grid = part_v.numel() / (HEAD_TOKENS * HEAD_TOPK);
++    TORCH_CHECK(grid >= 1 && grid <= n_tiles, "dflash2_q4_head_topk: grid out of range");
++
++    const int smem = K * HEAD_TOKENS * 2;   // x in fragment order; >= 16 KiB of warp lists since K >= 1024
++    static int configured = 0;
++    if (smem > configured)
++    {
++        cuda_check(cudaFuncSetAttribute(dflash2_q4_head_topk_kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, smem));
++        configured = smem;
++    }
++    dflash2_q4_head_topk_kernel<<<grid, HEAD_THREADS, smem, stream>>>
++    (
++        (const half*) x.data_ptr(), m, K,
++        (const uint4*) wq.data_ptr(), (const uint32_t*) scales.data_ptr(),
++        n_tiles, (int) vocab, (int) row0, rows_out, (float) scale, (float) softcap,
++        (float*) part_v.data_ptr(), (int*) part_ix.data_ptr(), (int*) counter.data_ptr(),
++        (float*) values.data_ptr(), (int64_t*) indices.data_ptr()
++    );
++    cuda_check(cudaPeekAtLastError());
++}
+--- /dev/null
++++ b/exllamav3_ext/dflash2_head.cuh
+@@ -0,0 +1,21 @@
++#pragma once
++
++#include <ATen/Tensor.h>
++
++// Draft-only int4 LM head with fused top-16 for DFlash2 at M <= 8 rows (see dflash2_head.cu)
++
++void dflash2_q4_head_topk
++(
++    const at::Tensor& x,
++    const at::Tensor& wq,
++    const at::Tensor& scales,
++    int64_t vocab,
++    int64_t row0,
++    double scale,
++    double softcap,
++    at::Tensor& part_v,
++    at::Tensor& part_ix,
++    at::Tensor& counter,
++    at::Tensor& values,
++    at::Tensor& indices
++);
+--- a/modules/arch_specific/dflash2.py
++++ b/modules/arch_specific/dflash2.py
+@@ -350,8 +350,6 @@
+         and the whole chain run as two kernels (no per-row host round trip, no torch
+         intermediates)."""
+         vocab_size = vocab_size or logits.shape[-1]
+-        gate = self.hidden_proj.forward(hidden.half(), params = {})
+-        anchor_ids = anchor_ids.long()
+         bsz, rows = logits.shape[:2]
+         cuda = hidden.is_cuda and self.pred_codebook.dtype in (torch.half, torch.bfloat16)
+         if cuda and self.top_k in (8, 16, 32) and logits.stride(-1) == 1:
+@@ -363,6 +361,23 @@
+             if softcap > 0.0:
+                 logits = torch.tanh(logits / softcap) * softcap
+             unary, cands = torch.topk(logits, self.top_k, dim = -1, sorted = False)
++        return self.walk_cands(hidden, unary, cands, anchor_ids, return_confidence)
++
++
++    def walk_cands(
++        self,
++        hidden: torch.Tensor,
++        unary: torch.Tensor,
++        cands: torch.Tensor,
++        anchor_ids: torch.Tensor,
++        return_confidence: bool = False,
++    ) -> tuple[torch.Tensor, torch.Tensor | None]:
++        """walk_block from each row's top-k (unary [b, rows, k] scaled / softcapped logits, cands the
++        ids), e.g. from a head whose GEMM already selected them"""
++        gate = self.hidden_proj.forward(hidden.half(), params = {})
++        anchor_ids = anchor_ids.long()
++        bsz, rows = unary.shape[:2]
++        cuda = hidden.is_cuda and self.pred_codebook.dtype in (torch.half, torch.bfloat16)
+         if cuda:
+             out = torch.empty((bsz, rows + 1), dtype = torch.long, device = hidden.device)
+             conf = torch.empty((bsz, rows + 1), dtype = torch.float, device = hidden.device) if return_confidence else None
+--- /dev/null
++++ b/modules/arch_specific/dflash2_q4_head.py
+@@ -0,0 +1,174 @@
++"""
++Draft-only int4 LM head for DFlash2 at M <= 8 token rows (ext dflash2_head.cu).
++
++Q4DraftHead is an int4 (group 128, symmetric, fp16 scale) copy of the attached target's EXL3 LM head,
++derived once at attach time, whose GEMM fuses the selector's top-16 (no logits tensor, no separate top-k).
++Weights live in the head's input-rotated basis: W' = W_inner H_128 diag(svh) per 128-column block and
++x' = (x * suh) H_128, so x' W' = x W. Only the draft's proposals use it; the target's own head (greedy
++verification) is untouched.
++
++Weights are repacked into per-lane mma.m16n8k16 A-fragment order (see dflash2_head.cu). The packing
++functions are pure torch and run on any device, so the layout is checked on the CPU against the
++kernel's own index expressions (fragment_rows_cols, unpack_q4).
++"""
++
++from __future__ import annotations
++import math
++import torch
++
++from ...ext import exllamav3_ext as ext
++
++Q4_GROUP = 128
++Q4_SCALE_SEARCH = (1.0, 0.95, 0.9, 0.85)   # absmax clipping at most 15%
++HEAD_SLICE_N = 2048                         # vocab columns reconstructed per step at attach
++HEAD_TOP_K = 16                             # the kernel's fused top-k
++HEAD_K_MULTIPLE = 512                       # K % (64 * HEAD_DEPTH), dflash2_q4_head_topk host check
++
++
++def fragment_rows_cols(device = "cpu") -> tuple[torch.Tensor, torch.Tensor]:
++    """(rows, cols) [32 lanes, 4 pairs, 2 halves] of the m16n8k16 A fragment: lane = 4 g + q;
++    pair p covers row g + 8 (p & 1), columns 2 q + 8 (p >> 1) + {0, 1}"""
++    lane = torch.arange(32, device = device).view(32, 1, 1)
++    p = torch.arange(4, device = device).view(1, 4, 1)
++    h = torch.arange(2, device = device).view(1, 1, 2)
++    g, q = lane // 4, lane % 4
++    rows = (g + 8 * (p & 1)).expand(32, 4, 2)
++    cols = (2 * q + 8 * (p >> 1) + h).expand(32, 4, 2)
++    return rows.contiguous(), cols.contiguous()
++
++
++def _tile_fragments(wt: torch.Tensor) -> torch.Tensor:
++    """wt [n_tiles * 16, K] (rows = output features) -> [n_tiles, K / 16, 32, 4, 2] fragment elements"""
++    n, K = wt.shape
++    rows, cols = fragment_rows_cols(wt.device)
++    t = wt.view(n // 16, 16, K // 16, 16).permute(0, 2, 1, 3)               # [tiles, k16, 16 r, 16 c]
++    flat = (rows * 16 + cols).view(-1)                                      # [32 * 4 * 2]
++    return t.reshape(n // 16, K // 16, 256)[:, :, flat].view(n // 16, K // 16, 32, 4, 2)
++
++
++def pack_q4(wt: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
++    """wt [n, K] fp32 rows = vocab ids (n <= padded to 16) -> (wq int32 [tiles, K/64, 32, 4],
++    scales fp16 [tiles, K/128, 8, 2]). Symmetric int4, level q in [-8, 7], group 128 along K; per group
++    the scale minimizing squared error over Q4_SCALE_SEARCH * absmax / 7 (fp16-rounded before rounding q)"""
++    n, K = wt.shape
++    if K % Q4_GROUP:
++        raise ValueError("pack_q4: K must be a multiple of 128")
++    pad = (-n) % 16
++    if pad:
++        wt = torch.cat([wt, wt.new_zeros(pad, K)], 0)
++    n_p = wt.shape[0]
++    G = K // Q4_GROUP
++    wg = wt.float().view(n_p, G, Q4_GROUP)
++    amax = wg.abs().amax(-1, keepdim = True)
++    def candidate(f: float) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
++        s = (amax * (f / 7.0)).half().float()
++        s = torch.where(s > 0, s, torch.ones_like(s))
++        qv = torch.clamp(torch.round(wg / s), -8, 7)
++        return ((qv * s - wg) ** 2).sum(-1, keepdim = True), s, qv
++    best_err, best_s, best_q = candidate(Q4_SCALE_SEARCH[0])
++    for f in Q4_SCALE_SEARCH[1:]:
++        err, s, qv = candidate(f)
++        take = err < best_err
++        best_err = torch.where(take, err, best_err)
++        best_s = torch.where(take, s, best_s)
++        best_q = torch.where(take, qv, best_q)
++    q = (best_q + 8).to(torch.int32).view(n_p, K)                           # biased nibble 0..15
++    tiles = n_p // 16
++    fr = _tile_fragments(q)                                                 # [tiles, K/16, 32, 4, 2]
++    fr = fr.view(tiles, K // 64, 4, 32, 4, 2).permute(0, 1, 3, 2, 4, 5)    # [tiles, c, lane, j, p, h]
++    shift = (4 * torch.arange(4, device = wt.device)).view(4, 1) + torch.tensor([0, 16], device = wt.device).view(1, 2)
++    words = (fr.to(torch.int64) << shift).sum((-1, -2))                     # [tiles, c, lane, j]
++    wq = torch.where(words >= 2 ** 31, words - 2 ** 32, words).to(torch.int32).contiguous()
++    s = best_s.view(tiles, 16, G).permute(0, 2, 1)                          # [tiles, G, 16 rows]
++    scales = torch.stack([s[:, :, 0:8], s[:, :, 8:16]], -1).half().contiguous()   # [tiles, G, 8, 2]
++    return wq, scales
++
++
++def unpack_q4(wq: torch.Tensor, scales: torch.Tensor, K: int) -> torch.Tensor:
++    """Inverse of pack_q4 through the kernel's own decode: nibble p / p + 4 of word j of (tile, chunk c,
++    lane) is pair p of k16 step 4 c + j; value = (nibble - 8) * scale[tile, k / 128, row % 8, row // 8]"""
++    tiles = wq.shape[0]
++    w = wq.to(torch.int64) & 0xffffffff
++    shift = (4 * torch.arange(4, device = wq.device)).view(4, 1) + torch.tensor([0, 16], device = wq.device).view(1, 2)
++    nib = (w.unsqueeze(-1).unsqueeze(-1) >> shift) & 0xf                    # [tiles, c, lane, j, p, h]
++    rows, cols = fragment_rows_cols(wq.device)
++    out = torch.empty(tiles, 16, K, dtype = torch.float, device = wq.device)
++    c = torch.arange(K // 64, device = wq.device).view(-1, 1, 1, 1, 1)
++    j = torch.arange(4, device = wq.device).view(1, 1, 4, 1, 1)
++    kk = 64 * c + 16 * j + cols.view(1, 32, 1, 4, 2)                        # [c, lane, j, p, h]
++    rr = rows.view(1, 32, 1, 4, 2).expand_as(kk)
++    sc = scales.float()                                                     # [tiles, G, 8, 2]
++    s = sc[:, kk // Q4_GROUP, rr % 8, rr // 8]                              # [tiles, c, lane, j, p, h]
++    out[:, rr, kk] = (nib.float() - 8.0) * s
++    return out.view(tiles * 16, K)
++
++
++class Q4DraftHead:
++    """int4 copy of an EXL3 LM head with fused top-16 (draft proposals only)"""
++
++    @staticmethod
++    def supported(lm_inner, vocab: int, top_k: int, scale: float, softcap: float) -> bool:
++        """The head qualifies: an unbiased CUDA EXL3 head whose dims the kernel takes (K % 512 == 0,
++        1024 <= K <= 6144 for the 16 B/element activation staging in shared memory), a selector top-k of 16
++        and an order-preserving output transform (scale > 0, softcap >= 0)"""
++        from ...modules.quant.exl3 import LinearEXL3
++        if not isinstance(lm_inner, LinearEXL3) or lm_inner.bias is not None or not lm_inner.trellis.is_cuda:
++            return False
++        K, N = lm_inner.in_features, lm_inner.out_features
++        return (top_k == HEAD_TOP_K and K % HEAD_K_MULTIPLE == 0 and 1024 <= K <= 6144 and N % 128 == 0
++                and HEAD_TOP_K <= vocab <= N and scale > 0.0 and softcap >= 0.0)
++
++    def __init__(self, lm_inner, vocab: int, top_k: int, scale: float, softcap: float):
++        from ...modules.quant.exl3_lib.quantize import get_hadamard_dt
++        if not Q4DraftHead.supported(lm_inner, vocab, top_k, scale, softcap):
++            raise ValueError("Q4DraftHead: unsupported LM head (see Q4DraftHead.supported)")
++        K = lm_inner.in_features
++        self.scale = scale
++        self.softcap = softcap
++        dev = lm_inner.trellis.device
++        self.device = dev
++        self.K = K
++        self.vocab = vocab
++        self.suh = lm_inner.suh
++        had = get_hadamard_dt(128, dev, torch.float, 1 / math.sqrt(128))
++        n_used = (vocab + 127) // 128 * 128
++        tiles = (vocab + 15) // 16
++        self.wq = torch.empty((tiles, K // 64, 32, 4), dtype = torch.int32, device = dev)
++        self.scales = torch.empty((tiles, K // 128, 8, 2), dtype = torch.half, device = dev)
++        w = torch.empty((K, HEAD_SLICE_N), dtype = torch.half, device = dev)
++        for n0 in range(0, n_used, HEAD_SLICE_N):
++            n1 = min(n0 + HEAD_SLICE_N, n_used)
++            ws = w[:, : n1 - n0]
++            ext.reconstruct_slice(ws, lm_inner.trellis, lm_inner.K, lm_inner.mcg, lm_inner.mul1, n0)
++            wr = (ws.float().view(K, -1, 128) @ had).view(K, n1 - n0) * lm_inner.svh[n0:n1].float()
++            v1 = min(n1, vocab)
++            wq, sc = pack_q4(wr[:, : v1 - n0].T.contiguous())
++            t0 = n0 // 16
++            self.wq[t0 : t0 + wq.shape[0]] = wq
++            self.scales[t0 : t0 + sc.shape[0]] = sc
++            del wr, wq, sc
++        del w
++        sms = torch.cuda.get_device_properties(dev).multi_processor_count
++        grid = min(sms, tiles)
++        self.part_v = torch.empty((grid * 8 * 16,), dtype = torch.float, device = dev)
++        self.part_ix = torch.empty((grid * 8 * 16,), dtype = torch.int, device = dev)
++        self.counter = torch.zeros((1,), dtype = torch.int, device = dev)
++        torch.cuda.synchronize(dev)
++
++    def vram_bytes(self) -> int:
++        return self.wq.numel() * 4 + self.scales.numel() * 2 + self.part_v.numel() * 8 + 4
++
++    def topk(self, state: torch.Tensor, row0: int) -> tuple[torch.Tensor, torch.Tensor]:
++        """state [1, m, K] -> (unary fp32 [1, m - row0, 16], cands int64 [1, m - row0, 16]): per row the 16
++        best of softcap(scale * logit), descending by value, then lower id, rows row0.. of the block"""
++        if state.dim() != 3 or state.shape[0] != 1 or not row0 < state.shape[1] <= 8:
++            raise ValueError("Q4DraftHead.topk: needs one sequence of <= 8 rows")
++        x = state[0].to(self.device).half().contiguous()
++        xr = torch.empty_like(x)
++        ext.had_r_128(x, xr, self.suh, None, 1.0)
++        rows = x.shape[0] - row0
++        values = torch.empty((rows, HEAD_TOP_K), dtype = torch.float, device = self.device)
++        indices = torch.empty((rows, HEAD_TOP_K), dtype = torch.long, device = self.device)
++        ext.dflash2_q4_head_topk(xr, self.wq, self.scales, self.vocab, row0, self.scale, self.softcap,
++                                 self.part_v, self.part_ix, self.counter, values, indices)
++        return values.unsqueeze(0), indices.unsqueeze(0)
