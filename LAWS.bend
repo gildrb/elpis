@@ -82,3 +82,8 @@ import ./bend/attn_pre_laws.bend as AttnPreLaws
 # and of the other rows; the reduction reads completed partials after the barrier; S > 8 or k > 5120 falls back to KS 0.
 # Supersedes gdn_fast's task_exactly_once for the served b/a path (that law still describes the KS 0 fallback).
 import ./bend/gdn_ba_ksplit_laws.bend as GdnBaKsplitLaws
+# ext 2105 grouped m16g projections (and 8205's schedule generator): slot-weighted split-K partition
+# (bend/gemm_m16_wpart.bend): W / start / closed-form owner generic in (w0, w1, nsm, G, total), owner = the
+# largest b with start(b) <= x, exactly-once ownership, (w, w) = v2, host guard, contributor slots and
+# max_contrib bounds; served GDN / attention bundles at (100, 91): guard holds, max_contrib 7 / 8, launch fits.
+import ./bend/gemm_m16_wpart_laws.bend as GemmM16WpartLaws

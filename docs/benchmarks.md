@@ -358,12 +358,18 @@ causes at these sample sizes.
 **Bend coverage after #56.** `bend/mlp_m16_defer*` (8204's deferred publish) and
 `bend/attn_pre*` (3007's fused pre-attention kernel) are wired; their differentials and
 `attn_stride_diff`, `tail_m16_sched_diff`, `mlp_m16_sched_diff` and `gemm_m16_group_diff`
-pass on the #56 tree. Still unproven for the served code:
-- 2105's weighted partition. `gemm_m16_group` models the uniform v2 partition, which 2105
-  reproduces bit for bit only at equal weights (the draft rows); the target rows run at
-  (100, 91).
-- A differential for 9003b's draft shapes. It exists, but quotes 2102's kernel source and
-  must be ported to 2105's.
+pass on the #56 tree. Two gaps remained after #56 and are closed since:
+
+- 2105's weighted partition: `bend/gemm_m16_wpart*` (22 laws) proves W, start and the
+  closed-form owner generically in (w0, w1, nsm, G, total). The owner is the largest block
+  whose start is at most x; ownership is exactly once; equal weights reproduce v2; and the
+  host guard, contributor slots and `max_contrib` are bounded. The served GDN and attention
+  bundles at (100, 91) satisfy the guard and fit the launch, with `max_contrib` 7 and 8.
+  `bend/gemm_m16_wpart_diff.py` quotes 84 lines of the 2105 patch and matches the Bend
+  table byte for byte for 8 configurations. Those include 9003b's draft shapes at (1, 1),
+  so it also serves as the draft-shape differential. One mutation (`<` → `<=` in the owner
+  threshold) survives because it is equivalent: an exhaustive comparison of 65.7 M owner
+  evaluations finds no difference.
 
 5106's K-split GEMV is covered since: `bend/gdn_ba_ksplit*` proves that every half2
 element of every b/a task is multiplied once, by one (warp, lane, iteration). The per-task
