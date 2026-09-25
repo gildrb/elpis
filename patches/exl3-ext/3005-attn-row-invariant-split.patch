@@ -1,0 +1,261 @@
+--- a/modules/attention_fn/triton_paged.py
++++ b/modules/attention_fn/triton_paged.py
+@@ -1140,16 +1140,113 @@
+ 
+ 
+ @triton.jit
+-def _gqa_store(partial_o, partial_ml, idx, has_work, m, l, acc,
++def _gqa_store(partial_o, partial_ml, idx, has_work, m, l, acc, store_rows,
+                ROWS: tl.constexpr, HD_PAD: tl.constexpr):
++    """Row-masked partial store: only rows in `store_rows` are written (the rows of this pass)."""
+     rows = tl.arange(0, ROWS)
+     offs_d = tl.arange(0, HD_PAD)
+-    tl.store(partial_ml + idx * ROWS * 2 + rows * 2, m)
+-    tl.store(partial_ml + idx * ROWS * 2 + rows * 2 + 1, l)
++    tl.store(partial_ml + idx * ROWS * 2 + rows * 2, m, mask=store_rows)
++    tl.store(partial_ml + idx * ROWS * 2 + rows * 2 + 1, l, mask=store_rows)
+     if has_work:
+-        tl.store(partial_o + idx * ROWS * HD_PAD + rows[:, None] * HD_PAD + offs_d[None, :], acc)
++        tl.store(partial_o + idx * ROWS * HD_PAD + rows[:, None] * HD_PAD + offs_d[None, :], acc,
++                 mask=store_rows[:, None])
++
++
++@triton.jit
++def _gqa_row_split(q_abs, MIN_SPLIT: tl.constexpr, SPLITS: tl.constexpr, BLOCK_N: tl.constexpr):
++    """Split length of a causal query row at absolute position q_abs (q_abs + 1 keys), a function
++    of the row alone: s(n) = max(MIN_SPLIT, BLOCK_N * cdiv(n, SPLITS * BLOCK_N)). cdiv(n, s(n)) <=
++    SPLITS, and s(n) is a multiple of BLOCK_N, so the row's splits k * s(n) are BLOCK_N-aligned
++    absolute boundaries that fit the SPLITS programs whatever round the row is verified in."""
++    STEP: tl.constexpr = SPLITS * BLOCK_N
++    return tl.maximum(MIN_SPLIT, ((q_abs + STEP) // STEP) * BLOCK_N)
++
++
++@triton.jit
++def _gqa_live_split(total_k_len, q_len: tl.constexpr, WINDOW_LEFT: tl.constexpr,
++                    SPLITS: tl.constexpr, MIN_SPLIT: tl.constexpr, BLOCK_N: tl.constexpr):
++    """3002's round-relative sizing (window start lo, split length from the live span), kept for
++    sliding-window / non-causal launches: (lo, s_len)."""
++    lo = total_k_len * 0
++    if WINDOW_LEFT >= 0:
++        lo = (tl.maximum(0, total_k_len - q_len - WINDOW_LEFT) // BLOCK_N) * BLOCK_N
++    span = total_k_len - lo
++    live = tl.maximum(1, tl.minimum(SPLITS, tl.cdiv(span, MIN_SPLIT)))
++    return lo, tl.cdiv(tl.cdiv(span, live), BLOCK_N) * BLOCK_N
++
++
++@triton.jit
++def _gqa_pass(k_cache, v_cache, block_table, k_scales, v_scales, partial_o, partial_ml,
++              batch, kv_head, bh, split, lo, s_len, total_k_len, num_pages_per_seq, store_acc,
++              q0, vr0, qa0, st0, q1, vr1, qa1, st1, q2, vr2, qa2, st2, q3, vr3, qa3, st3,
++              QCK: tl.constexpr, QCV: tl.constexpr, n_kv_heads: tl.constexpr,
++              page_size: tl.constexpr, head_dim: tl.constexpr, HD_PAD: tl.constexpr,
++              scale: tl.constexpr, CAUSAL: tl.constexpr, WINDOW_LEFT: tl.constexpr,
++              WINDOW_RIGHT: tl.constexpr, SOFTCAP: tl.constexpr, BLOCK_ROWS: tl.constexpr,
++              BLOCK_N: tl.constexpr, NSUB: tl.constexpr, SPLITS: tl.constexpr,
++              PV_F16: tl.constexpr):
++    """Split `split` of length s_len from lo for the rows valid in this pass (vrX), stored for the
++    rows stX. The per-tile arithmetic is 3002's, unchanged."""
++    n_start = lo + split * s_len
++    n_end = tl.minimum(n_start + s_len, total_k_len)
++    m0 = tl.full((BLOCK_ROWS,), -float("inf"), tl.float32)
++    l0 = tl.full((BLOCK_ROWS,), 0.0, tl.float32)
++    a0 = tl.zeros((BLOCK_ROWS, HD_PAD), tl.float32)
++    if NSUB > 1:
++        m1 = tl.full((BLOCK_ROWS,), -float("inf"), tl.float32)
++        l1 = tl.full((BLOCK_ROWS,), 0.0, tl.float32)
++        a1 = tl.zeros((BLOCK_ROWS, HD_PAD), tl.float32)
++    if NSUB > 2:
++        m2 = tl.full((BLOCK_ROWS,), -float("inf"), tl.float32)
++        l2 = tl.full((BLOCK_ROWS,), 0.0, tl.float32)
++        a2 = tl.zeros((BLOCK_ROWS, HD_PAD), tl.float32)
++    if NSUB > 3:
++        m3 = tl.full((BLOCK_ROWS,), -float("inf"), tl.float32)
++        l3 = tl.full((BLOCK_ROWS,), 0.0, tl.float32)
++        a3 = tl.zeros((BLOCK_ROWS, HD_PAD), tl.float32)
+ 
++    offs_d = tl.arange(0, HD_PAD)
++    d_mask = offs_d < head_dim
++    for n0 in range(n_start, n_end, BLOCK_N):
++        offs_n = n0 + tl.arange(0, BLOCK_N)
++        page = offs_n // page_size
++        page_off = offs_n - page * page_size
++        phys = tl.load(block_table + batch * num_pages_per_seq + page, mask=offs_n < n_end, other=0)
++        tok_rows = phys * page_size + page_off
++        if QCK > 0:
++            k_tile = _qc_load_kt(k_cache, k_scales, tok_rows, kv_head, offs_d, offs_n < n_end, QCK, n_kv_heads, head_dim, HD_PAD)
++        else:
++            k_ptrs = k_cache + ((tok_rows[None, :] * n_kv_heads + kv_head) * head_dim + offs_d[:, None])
++            k_tile = tl.load(k_ptrs, mask=(offs_n[None, :] < n_end) & d_mask[:, None], other=0.0)
++        if QCV > 0:
++            v_tile = _qc_load_v(v_cache, v_scales, tok_rows, kv_head, offs_d, offs_n < n_end, QCV, n_kv_heads, head_dim, HD_PAD)
++        else:
++            v_ptrs = v_cache + ((tok_rows[:, None] * n_kv_heads + kv_head) * head_dim + offs_d[None, :])
++            v_tile = tl.load(v_ptrs, mask=(offs_n[:, None] < n_end) & d_mask[None, :], other=0.0)
++        m0, l0, a0 = _gqa_step(q0, k_tile, v_tile, m0, l0, a0, offs_n, n_end, qa0, vr0,
++                               scale, SOFTCAP, CAUSAL, WINDOW_LEFT, WINDOW_RIGHT, PV_F16)
++        if NSUB > 1:
++            m1, l1, a1 = _gqa_step(q1, k_tile, v_tile, m1, l1, a1, offs_n, n_end, qa1, vr1,
++                                   scale, SOFTCAP, CAUSAL, WINDOW_LEFT, WINDOW_RIGHT, PV_F16)
++        if NSUB > 2:
++            m2, l2, a2 = _gqa_step(q2, k_tile, v_tile, m2, l2, a2, offs_n, n_end, qa2, vr2,
++                                   scale, SOFTCAP, CAUSAL, WINDOW_LEFT, WINDOW_RIGHT, PV_F16)
++        if NSUB > 3:
++            m3, l3, a3 = _gqa_step(q3, k_tile, v_tile, m3, l3, a3, offs_n, n_end, qa3, vr3,
++                                   scale, SOFTCAP, CAUSAL, WINDOW_LEFT, WINDOW_RIGHT, PV_F16)
+ 
++    # Partials: ((bh * SPLITS + split) * NSUB + sub) row blocks of BLOCK_ROWS x HD_PAD. The
++    # (m, l) pair is always stored (m = -inf marks an empty split); acc when the block has work
++    base = (bh * SPLITS + split) * NSUB
++    _gqa_store(partial_o, partial_ml, base, store_acc, m0, l0, a0, st0, BLOCK_ROWS, HD_PAD)
++    if NSUB > 1:
++        _gqa_store(partial_o, partial_ml, base + 1, store_acc, m1, l1, a1, st1, BLOCK_ROWS, HD_PAD)
++    if NSUB > 2:
++        _gqa_store(partial_o, partial_ml, base + 2, store_acc, m2, l2, a2, st2, BLOCK_ROWS, HD_PAD)
++    if NSUB > 3:
++        _gqa_store(partial_o, partial_ml, base + 3, store_acc, m3, l3, a3, st3, BLOCK_ROWS, HD_PAD)
++
++
+ @triton.jit
+ def _paged_attn_decode_gqa_split_kernel(
+     q,
+@@ -1197,8 +1294,11 @@
+     tile is dequantized once and shared by all NSUB 16-row blocks of the GQA group (separate
+     accumulators, no padded rows). The grid keeps the per-h_block geometry of
+     _paged_attn_decode_split_kernel ((programs, GRID_Y)); the h_block index is folded into the
+-    split index. Splits are sized from the live length (cache_seqlens) and, for a sliding
+-    window, cover only [window start, total_k_len)."""
++    split index. Causal full-context rows (the target's verify) split by their own absolute
++    position (_gqa_row_split), so a row's partials and their combine order do not depend on the
++    round it is verified in; a round whose rows straddle a split-length step runs a second pass
++    for the later rows. Otherwise (sliding window / non-causal, e.g. the DFlash draft) splits are
++    sized from the live length (cache_seqlens) and cover only [window start, total_k_len)."""
+     pid = tl.program_id(0)
+     y = tl.program_id(1)
+     bh = pid // NSUB
+@@ -1210,80 +1310,65 @@
+     group_size: tl.constexpr = n_q_heads // n_kv_heads
+ 
+     total_k_len = tl.load(cache_seqlens + batch) + kv_append_len
+-    lo = 0
+-    if WINDOW_LEFT >= 0:
+-        lo = (tl.maximum(0, total_k_len - q_len - WINDOW_LEFT) // BLOCK_N) * BLOCK_N
+-    span = total_k_len - lo
+-    live = tl.maximum(1, tl.minimum(SPLITS, tl.cdiv(span, MIN_SPLIT)))
+-    s_len = tl.cdiv(tl.cdiv(span, live), BLOCK_N) * BLOCK_N
+-    n_start = lo + split * s_len
+-    n_end = tl.minimum(n_start + s_len, total_k_len)
+-
+     q0, vr0, qa0 = _gqa_rows(q, batch, kv_head, 0, total_k_len, q_len, n_q_heads, group_size,
+                              head_dim, HD_PAD, BLOCK_M, BLOCK_H, QCK, h32)
+-    m0 = tl.full((BLOCK_ROWS,), -float("inf"), tl.float32)
+-    l0 = tl.full((BLOCK_ROWS,), 0.0, tl.float32)
+-    a0 = tl.zeros((BLOCK_ROWS, HD_PAD), tl.float32)
++    q1, vr1, qa1 = q0, vr0, qa0
++    q2, vr2, qa2 = q0, vr0, qa0
++    q3, vr3, qa3 = q0, vr0, qa0
+     if NSUB > 1:
+         q1, vr1, qa1 = _gqa_rows(q, batch, kv_head, 1, total_k_len, q_len, n_q_heads, group_size,
+                                  head_dim, HD_PAD, BLOCK_M, BLOCK_H, QCK, h32)
+-        m1 = tl.full((BLOCK_ROWS,), -float("inf"), tl.float32)
+-        l1 = tl.full((BLOCK_ROWS,), 0.0, tl.float32)
+-        a1 = tl.zeros((BLOCK_ROWS, HD_PAD), tl.float32)
+     if NSUB > 2:
+         q2, vr2, qa2 = _gqa_rows(q, batch, kv_head, 2, total_k_len, q_len, n_q_heads, group_size,
+                                  head_dim, HD_PAD, BLOCK_M, BLOCK_H, QCK, h32)
+-        m2 = tl.full((BLOCK_ROWS,), -float("inf"), tl.float32)
+-        l2 = tl.full((BLOCK_ROWS,), 0.0, tl.float32)
+-        a2 = tl.zeros((BLOCK_ROWS, HD_PAD), tl.float32)
+     if NSUB > 3:
+         q3, vr3, qa3 = _gqa_rows(q, batch, kv_head, 3, total_k_len, q_len, n_q_heads, group_size,
+                                  head_dim, HD_PAD, BLOCK_M, BLOCK_H, QCK, h32)
+-        m3 = tl.full((BLOCK_ROWS,), -float("inf"), tl.float32)
+-        l3 = tl.full((BLOCK_ROWS,), 0.0, tl.float32)
+-        a3 = tl.zeros((BLOCK_ROWS, HD_PAD), tl.float32)
+ 
+-    offs_d = tl.arange(0, HD_PAD)
+-    d_mask = offs_d < head_dim
+-    for n0 in range(n_start, n_end, BLOCK_N):
+-        offs_n = n0 + tl.arange(0, BLOCK_N)
+-        page = offs_n // page_size
+-        page_off = offs_n - page * page_size
+-        phys = tl.load(block_table + batch * num_pages_per_seq + page, mask=offs_n < n_end, other=0)
+-        tok_rows = phys * page_size + page_off
+-        if QCK > 0:
+-            k_tile = _qc_load_kt(k_cache, k_scales, tok_rows, kv_head, offs_d, offs_n < n_end, QCK, n_kv_heads, head_dim, HD_PAD)
+-        else:
+-            k_ptrs = k_cache + ((tok_rows[None, :] * n_kv_heads + kv_head) * head_dim + offs_d[:, None])
+-            k_tile = tl.load(k_ptrs, mask=(offs_n[None, :] < n_end) & d_mask[:, None], other=0.0)
+-        if QCV > 0:
+-            v_tile = _qc_load_v(v_cache, v_scales, tok_rows, kv_head, offs_d, offs_n < n_end, QCV, n_kv_heads, head_dim, HD_PAD)
+-        else:
+-            v_ptrs = v_cache + ((tok_rows[:, None] * n_kv_heads + kv_head) * head_dim + offs_d[None, :])
+-            v_tile = tl.load(v_ptrs, mask=(offs_n[:, None] < n_end) & d_mask[None, :], other=0.0)
+-        m0, l0, a0 = _gqa_step(q0, k_tile, v_tile, m0, l0, a0, offs_n, n_end, qa0, vr0,
+-                               scale, SOFTCAP, CAUSAL, WINDOW_LEFT, WINDOW_RIGHT, PV_F16)
+-        if NSUB > 1:
+-            m1, l1, a1 = _gqa_step(q1, k_tile, v_tile, m1, l1, a1, offs_n, n_end, qa1, vr1,
+-                                   scale, SOFTCAP, CAUSAL, WINDOW_LEFT, WINDOW_RIGHT, PV_F16)
+-        if NSUB > 2:
+-            m2, l2, a2 = _gqa_step(q2, k_tile, v_tile, m2, l2, a2, offs_n, n_end, qa2, vr2,
+-                                   scale, SOFTCAP, CAUSAL, WINDOW_LEFT, WINDOW_RIGHT, PV_F16)
+-        if NSUB > 3:
+-            m3, l3, a3 = _gqa_step(q3, k_tile, v_tile, m3, l3, a3, offs_n, n_end, qa3, vr3,
+-                                   scale, SOFTCAP, CAUSAL, WINDOW_LEFT, WINDOW_RIGHT, PV_F16)
++    # Row pass: False = pass A (split length s_a), True = pass B (s_b). Invalid rows are pass A
++    b0 = vr0 & False
++    b1, b2, b3 = b0, b0, b0
++    lo, s_a = _gqa_live_split(total_k_len, q_len, WINDOW_LEFT, SPLITS, MIN_SPLIT, BLOCK_N)
++    s_b = s_a
++    if CAUSAL:
++        if WINDOW_LEFT < 0:
++            # s_a / s_b: split lengths of the round's first / last row (s is nondecreasing and
++            # steps by BLOCK_N every SPLITS * BLOCK_N >= q_len positions, so every row has one of
++            # the two)
++            tl.static_assert(q_len <= SPLITS * BLOCK_N)
++            s_a = _gqa_row_split(total_k_len - q_len, MIN_SPLIT, SPLITS, BLOCK_N)
++            s_b = _gqa_row_split(total_k_len - 1, MIN_SPLIT, SPLITS, BLOCK_N)
++            b0 = vr0 & (_gqa_row_split(qa0, MIN_SPLIT, SPLITS, BLOCK_N) != s_a)
++            if NSUB > 1:
++                b1 = vr1 & (_gqa_row_split(qa1, MIN_SPLIT, SPLITS, BLOCK_N) != s_a)
++            if NSUB > 2:
++                b2 = vr2 & (_gqa_row_split(qa2, MIN_SPLIT, SPLITS, BLOCK_N) != s_a)
++            if NSUB > 3:
++                b3 = vr3 & (_gqa_row_split(qa3, MIN_SPLIT, SPLITS, BLOCK_N) != s_a)
+ 
+-    # Partials: ((bh * SPLITS + split) * NSUB + sub) row blocks of BLOCK_ROWS x HD_PAD. The
+-    # (m, l) pair is always stored (m = -inf marks an empty split); acc only when non-empty
+-    has_work = n_start < n_end
+-    base = (bh * SPLITS + split) * NSUB
+-    _gqa_store(partial_o, partial_ml, base, has_work, m0, l0, a0, BLOCK_ROWS, HD_PAD)
+-    if NSUB > 1:
+-        _gqa_store(partial_o, partial_ml, base + 1, has_work, m1, l1, a1, BLOCK_ROWS, HD_PAD)
+-    if NSUB > 2:
+-        _gqa_store(partial_o, partial_ml, base + 2, has_work, m2, l2, a2, BLOCK_ROWS, HD_PAD)
+-    if NSUB > 3:
+-        _gqa_store(partial_o, partial_ml, base + 3, has_work, m3, l3, a3, BLOCK_ROWS, HD_PAD)
++    # Accumulators are stored whenever pass A has work here (s_a <= s_b, so pass B then has work
++    # only if pass A does): a block the combine reads never holds a stale accumulator row
++    store_acc = lo + split * s_a < total_k_len
++    _gqa_pass(k_cache, v_cache, block_table, k_scales, v_scales, partial_o, partial_ml,
++              batch, kv_head, bh, split, lo, s_a, total_k_len, num_pages_per_seq, store_acc,
++              q0, vr0 & ~b0, qa0, ~b0, q1, vr1 & ~b1, qa1, ~b1,
++              q2, vr2 & ~b2, qa2, ~b2, q3, vr3 & ~b3, qa3, ~b3,
++              QCK, QCV, n_kv_heads, page_size, head_dim, HD_PAD, scale, CAUSAL, WINDOW_LEFT,
++              WINDOW_RIGHT, SOFTCAP, BLOCK_ROWS, BLOCK_N, NSUB, SPLITS, PV_F16)
++    # Pass B exists only for causal full-context launches with more than one query row (a single
++    # row, or 3002's round-relative sizing, never straddles); emitted statically so no dead pass
++    # is compiled for the draft / decode slots
++    if CAUSAL:
++        if WINDOW_LEFT < 0:
++            if q_len > 1:
++                if s_b != s_a:
++                    _gqa_pass(k_cache, v_cache, block_table, k_scales, v_scales, partial_o, partial_ml,
++                              batch, kv_head, bh, split, lo, s_b, total_k_len, num_pages_per_seq, store_acc,
++                              q0, vr0 & b0, qa0, b0, q1, vr1 & b1, qa1, b1,
++                              q2, vr2 & b2, qa2, b2, q3, vr3 & b3, qa3, b3,
++                              QCK, QCV, n_kv_heads, page_size, head_dim, HD_PAD, scale, CAUSAL,
++                              WINDOW_LEFT, WINDOW_RIGHT, SOFTCAP, BLOCK_ROWS, BLOCK_N, NSUB, SPLITS,
++                              PV_F16)
+ 
+ 
+ @triton.jit

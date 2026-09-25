@@ -16,7 +16,7 @@
     "path": "/opt/venv/lib/python3.13/site-packages/exllamav3_ext.cpython-313-x86_64-linux-gnu.so",
     "base_sha256": "6d30690fdb76b3c4ad3fb5e69f0479707e410fc9b6194e2a5e32f4d7fe1fd8b3"
   },
-  "series_sha256": "6d111f2be980c50b21334a0b6fdaa837a6bcfb4253ef19ca82f5afbb6d8f1c2f",
+  "series_sha256": "f5f6eb4286eede402ff77c63a123cfa75e2706940292311edea5ff9cb297f163",
   "patches": [
     {
       "name": "0001-gdn-shared-carveout.patch",
@@ -57,6 +57,14 @@
     {
       "name": "7001-norm-residual-fuse.patch",
       "sha256": "e446ac76d805f9b7013de15d833dd4e32de134f16ab4a123745cba61f36c588d"
+    },
+    {
+      "name": "3004-attn-partial-bounds.patch",
+      "sha256": "70cc4c5fc1d6d076bda31e58440651604eee7c058c3d56328fe1301f8fd689c7"
+    },
+    {
+      "name": "3005-attn-row-invariant-split.patch",
+      "sha256": "98f69ed7a3e31893b99ab43c3ce7af2854d8128915628aef65b5b827d8547280"
     }
   ],
   "files": {
@@ -134,11 +142,11 @@
     },
     "modules/attention_fn/bc_attn.py": {
       "pre": "63f0768f313cb7015485d4655b433020f2e9e66bb44d971a9e6c65bc306994e0",
-      "post": "75b26b226dd18fcfc101e252b7b3c9727a6a811348c6e580409a7237f3e4e9c1"
+      "post": "513d62f9f7a855bd306fef985e5558ef386802b091cccda83a41597d63edc610"
     },
     "modules/attention_fn/triton_paged.py": {
       "pre": "910379b663acb08711c3be207cd3e9ed96658527cc110a6ce39c793f997836d9",
-      "post": "06d96660c166270d2fdb94cc557df2b9ad6c8122048d563758564595f8e57194"
+      "post": "12896d430c94639ec4157a967f1635cc4a0dcc2198294d6349a9a2749ed9623e"
     },
     "modules/gated_delta_net.py": {
       "pre": "955f2ae25509ccf695dac4b79721115bc51d9d63a7f6f1eeb0a42671b685cf5a",

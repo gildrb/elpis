@@ -1,0 +1,76 @@
+--- a/modules/attention_fn/bc_attn.py
++++ b/modules/attention_fn/bc_attn.py
+@@ -61,6 +61,29 @@
+     return n > 0 and (n & (n - 1)) == 0
+ 
+ 
++def dense_partial_blocks(bsz: int, n_kv_heads: int, splits: int, nsub: int) -> int:
++    """Partial row blocks (BLOCK_ROWS x HD_PAD fp32 in partial_o, BLOCK_ROWS x 2 in partial_ml)
++    to allocate for a dense slot: the GQA split kernel (3002) stores NSUB blocks per (batch,
++    kv_head, split) over SPLITS splits; the pristine kernel one block per (program, split) over
++    splits_cap splits (nsub = h_blocks, splits = splits_cap)."""
++    return bsz * n_kv_heads * splits * nsub
++
++
++def dense_partial_extent(use_gqa: bool, programs: int, grid_y: int, splits: int, nsub: int) -> int:
++    """One past the largest partial block index the launched (programs, grid_y) split grid
++    stores and the (programs,) combine grid reads, in each kernel's own index arithmetic.
++      GQA: program (pid, y) -> bh = pid // NSUB, split = (pid % NSUB) * GRID_Y + y (returns when
++        split >= SPLITS), stores idx = (bh * SPLITS + split) * NSUB + sub for sub < NSUB; the
++        combine program pid reads (bh * SPLITS + s) * NSUB + pid % NSUB for s < SPLITS.
++      pristine: split program (pid, split) stores pid * num_splits + split for split <
++        num_splits <= grid_y; the combine reads the same."""
++    if use_gqa:
++        bh_max = (programs - 1) // nsub
++        split_max = min(splits, nsub * grid_y) - 1
++        return (bh_max * splits + split_max) * nsub + (nsub - 1) + 1
++    return (programs - 1) * grid_y + (grid_y - 1) + 1
++
++
+ def _compile_kernel(device: torch.device, fn, signature: dict, constexprs: dict,
+                     num_warps: int, num_stages: int):
+     key = (device.index, fn.__name__, tuple(sorted(constexprs.items())), num_warps, num_stages,
+@@ -314,8 +337,8 @@
+             BLOCK_M = block_m, BLOCK_H = block_h, BLOCK_ROWS = block_rows, BLOCK_N = block_n,
+         )
+         # GQA-fused kernels (shape-based selection, gqa_geometry): same launch geometry
+-        # (programs, splits_cap) and partial buffers; the kernels size splits in-kernel from
+-        # the live length, so the patched split_len / num_splits arguments go unused
++        # (programs, splits_cap), NSUB x more partial blocks (sized below); the kernels size splits
++        # in-kernel from the live length, so the patched split_len / num_splits arguments go unused
+         use_gqa, gqa_splits, gqa_min_split = gqa_geometry(
+             bsz, kvh, h_blocks, splits_cap, _get_sm_count(dev), block_n)
+         if use_gqa:
+@@ -376,14 +399,28 @@
+                 gate_b = g_tensor_cache.get(dev, (R, qh * hd), torch.half, "bca_g")
+         kv = g_tensor_cache.get(dev, (2, R, kvh * hd), torch.half, "bca_kv")
+         o = g_tensor_cache.get(dev, (bsz, q_len, qh, hd), torch.half, "bca_o")
+-        # Regime-1 slots never launch the dense split/combine; their partials are sized by the
+-        # sparse kernels in _configure_qsa (same bucketed tags, so the footprint is the max)
+-        pn_o = programs * splits_cap * block_rows * hd_pad
+-        pn_ml = programs * splits_cap * block_rows * 2
++        # Partials are sized from the dense kernels' own store layout (dense_partial_blocks):
++        # the GQA split kernel stores NSUB blocks per (bh, split) over SPLITS splits, up to NSUB x
++        # the pristine programs * splits_cap. The extent the launched grids actually touch
++        # (dense_partial_extent) is checked against the allocation, fail closed. Regime-1 slots
++        # never launch the dense split/combine; their partials are sized by the sparse kernels
++        # in _configure_qsa (same bucketed tags, so the footprint is the max)
++        nsub_p, splits_p = h_blocks, (gqa_splits if use_gqa else splits_cap)
++        dense_blocks = dense_partial_blocks(bsz, kvh, splits_p, nsub_p)
++        pn_o = dense_blocks * block_rows * hd_pad
++        pn_ml = dense_blocks * block_rows * 2
+         if regime == 1:
+             pn_o, pn_ml = self._qsa_partial_sizes(bsz * q_len)
+         partial_o = g_tensor_cache.get_bucketed(dev, pn_o, torch.float, "bca_po")
+         partial_ml = g_tensor_cache.get_bucketed(dev, pn_ml, torch.float, "bca_ml")
++        if regime == 0:
++            extent = dense_partial_extent(use_gqa, programs, splits_cap, splits_p, nsub_p)
++            if (partial_o.numel() < extent * block_rows * hd_pad or
++                    partial_ml.numel() < extent * block_rows * 2):
++                raise RuntimeError(
++                    f"BC attention: the dense split/combine grids touch {extent} partial blocks of "
++                    f"{block_rows} rows, the allocation holds {partial_o.numel()} / "
++                    f"{partial_ml.numel()} floats")
+ 
+         # Padded hidden dim: zero-padded input staging and padded o_proj output. The pad columns
+         # of xp are zeroed here and never written afterwards (the graph copies only the exact
