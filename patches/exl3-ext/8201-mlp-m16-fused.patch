@@ -1,0 +1,1401 @@
+--- a/exllamav3_ext/libtorch/mlp.cpp
++++ b/exllamav3_ext/libtorch/mlp.cpp
+@@ -7,6 +7,7 @@
+ #include "../hgemm.cuh"
+ #include "../quant/exl3_gemm.cuh"
+ #include "../quant/exl3_gemm_m16.cuh"
++#include "../quant/exl3_mlp_m16.cuh"
+ #include "../activation.cuh"
+ #include "../add.cuh"
+ 
+@@ -60,6 +61,23 @@
+                 // bszm=2 is the gate/up slot pair, unrelated to num_tokens (carried via size_m)
+         );
+     }
++    else if (act_silu && !gate->bias && !up->bias && gate->mul1 && !gate->mcg && up->mul1 && !up->mcg &&
++             down->mul1 && !down->mcg && exl3_gemm_m16_enabled() &&
++             exl3_mlp_m16_supported(num_tokens, gate->trellis, up->trellis, down->trellis))
++    {
++        // Whole MLP in one persistent launch (ext 8201): same g / u / a / xh buffers and the same
++        // graph sites (A, C(g), A, C(u), C(d)) as the unfused m16 path below
++        at::Tensor g2 = gu_n.select(0, 0);
++        at::Tensor u2 = gu_n.select(0, 1);
++        at::Tensor gate_xh = guh_n.select(0, 0);
++        at::Tensor up_xh   = guh_n.select(0, 1);
++        exl3_mlp_m16_gr(x, gate->trellis, gate->suh, gate->svh, up->trellis, up->suh, up->svh,
++                        down->trellis, down->suh, down->svh, g2, u2, a_n, gate_xh, up_xh, down_xh_n, d,
++                        act_limit, graph, {});
++        if (down->bias)
++            add_gr(d, down->bias.value(), d, graph);
++        return;
++    }
+     else
+     {
+         // num_tokens > 1 bypasses BC_LinearEXL3::run_gr (which hard-refuses graphing above bsz 1
+--- a/exllamav3_ext/quant/exl3_gemm_m16.cu
++++ b/exllamav3_ext/quant/exl3_gemm_m16.cu
+@@ -83,6 +83,16 @@
+ }
+ 
+ }  // namespace
++
++float* exl3_gemm_m16_ws(int device, cudaStream_t stream)
++{
++    return get_ws(device, stream);
++}
++
++size_t exl3_gemm_m16_ws_bytes()
++{
++    return EXL3_M16_WS_BYTES;
++}
+ 
+ bool exl3_gemm_m16_enabled()
+ {
+--- a/exllamav3_ext/quant/exl3_gemm_m16.cuh
++++ b/exllamav3_ext/quant/exl3_gemm_m16.cuh
+@@ -10,6 +10,11 @@
+ bool exl3_gemm_m16_enabled();
+ 
+ bool exl3_gemm_m16_supported(int size_m, int size_k, int size_n, int K, bool mcg, bool mul1);
++
++// The per-device split-K workspace (allocated on first use, never under capture) and its size;
++// the fused MLP (exl3_mlp_m16.cu) shares it, launches on one stream are ordered.
++float* exl3_gemm_m16_ws(int device, cudaStream_t stream);
++size_t exl3_gemm_m16_ws_bytes();
+ 
+ // C_i = had_out(had_in(A * suh_i) @ W_i) * svh_i for one matrix (B1 empty) or two matrices sharing A
+ // (gate and up). xh_i receive the input transform (same role as A_had in exl3_gemm_gr). Graph sites:
+--- /dev/null
++++ b/exllamav3_ext/quant/exl3_mlp_m16.cu
+@@ -0,0 +1,236 @@
++#include <cuda_fp16.h>
++#include <type_traits>
++#include "exl3_mlp_m16.cuh"
++#include "exl3_gemm_m16.cuh"
++
++#include <c10/cuda/CUDAGuard.h>
++#include <ATen/cuda/CUDAContext.h>
++#include "../util.h"
++#include "../util.cuh"
++#include "exl3_mlp_m16_kernel.cuh"
++#include "exl3_devctx.cuh"
++#include <cstdlib>
++#include <mutex>
++
++namespace {
++
++std::mutex g_mtx;
++
++// Per device: the m16 split-K workspace (shared with exl3_gemm_m16, launches are stream-ordered)
++// and one allocation holding the self-resetting counters followed by the schedule tables.
++struct MlpDev
++{
++    float* ws;
++    unsigned int* cnt;
++    const unsigned short* sched;
++};
++MlpDev g_dev[MAX_DEVICES] = {};
++
++constexpr size_t SCHED_WORDS = (size_t) EXL3_MLP_SCHED_G * EXL3_MLP_SCHED_BF + (size_t) EXL3_MLP_SCHED_PAIRS * EXL3_MLP_SCHED_PFLD + EXL3_MLP_SCHED_NWAIT;
++constexpr size_t WS1_FLOATS = (size_t) 2 * EXL3_MLP_SCHED_PAIRS * EXL3_MLP_SCHED_MC1 * EXL3_M16_SLOT_FLOATS;
++constexpr size_t WS2_FLOATS = (size_t) (EXL3_MLP_SCHED_N2 / EXL3_M16_GW) * EXL3_MLP_SCHED_MC2 * EXL3_M16_SLOT_FLOATS;
++
++MlpDev get_dev(int device, cudaStream_t stream)
++{
++    std::lock_guard<std::mutex> lock(g_mtx);
++    MlpDev& d = g_dev[device];
++    if (!d.ws)
++    {
++        cudaStreamCaptureStatus st;
++        cuda_check(cudaStreamIsCapturing(stream, &st));
++        TORCH_CHECK(st == cudaStreamCaptureStatusNone, "exl3_mlp_m16: first call must not be under graph capture");
++        d.ws = exl3_gemm_m16_ws(device, stream);
++        TORCH_CHECK((WS1_FLOATS + WS2_FLOATS) * sizeof(float) <= exl3_gemm_m16_ws_bytes(), "exl3_mlp_m16: workspace too small");
++        uint8_t* buf;
++        const size_t cnt_bytes = EXL3_MLP_M16_NCNT * sizeof(unsigned int);
++        cuda_check(cudaMalloc(&buf, cnt_bytes + SCHED_WORDS * sizeof(unsigned short)));
++        cuda_check(cudaMemset(buf, 0, cnt_bytes));
++        unsigned short* s = (unsigned short*) (buf + cnt_bytes);
++        cuda_check(cudaMemcpy(s, exl3_mlp_sched_block, sizeof(exl3_mlp_sched_block), cudaMemcpyHostToDevice));
++        s += EXL3_MLP_SCHED_G * EXL3_MLP_SCHED_BF;
++        cuda_check(cudaMemcpy(s, exl3_mlp_sched_pair, sizeof(exl3_mlp_sched_pair), cudaMemcpyHostToDevice));
++        s += EXL3_MLP_SCHED_PAIRS * EXL3_MLP_SCHED_PFLD;
++        cuda_check(cudaMemcpy(s, exl3_mlp_sched_wait, sizeof(exl3_mlp_sched_wait), cudaMemcpyHostToDevice));
++        d.cnt = (unsigned int*) buf;
++        d.sched = (const unsigned short*) (buf + cnt_bytes);
++    }
++    return d;
++}
++
++template <int MT, bool d_fp32>
++void* kernel_ptr() { return (void*) exl3_mlp_m16_kernel<MT, d_fp32>; }
++
++struct Launch
++{
++    void* kernel;
++    int smem;
++    int blocks_per_sm;
++};
++
++Launch get_launch(int MT, bool d_fp32, int device)
++{
++    static Launch cache[MAX_DEVICES][2][2] = {};
++    std::lock_guard<std::mutex> lock(g_mtx);
++    Launch& l = cache[device][MT - 1][d_fp32 ? 1 : 0];
++    if (!l.kernel)
++    {
++        void* k = MT == 1 ? (d_fp32 ? kernel_ptr<1, true>() : kernel_ptr<1, false>())
++                          : (d_fp32 ? kernel_ptr<2, true>() : kernel_ptr<2, false>());
++        int sm = MT == 1 ? Exl3M16Cfg<1>::SMEM : Exl3M16Cfg<2>::SMEM;
++        cuda_check(cudaFuncSetAttribute(k, cudaFuncAttributeMaxDynamicSharedMemorySize, sm));
++        cuda_check(cudaFuncSetAttribute(k, cudaFuncAttributePreferredSharedMemoryCarveout, (int) cudaSharedmemCarveoutMaxShared));
++        int occ = 0;
++        cuda_check(cudaOccupancyMaxActiveBlocksPerMultiprocessor(&occ, k, EXL3_M16_THREADS, sm));
++        l.kernel = k;
++        l.smem = sm;
++        l.blocks_per_sm = occ < 2 ? occ : 2;
++    }
++    return l;
++}
++
++bool trellis_is(const at::Tensor& t, int k, int n)
++{
++    return t.dim() == 3 && t.scalar_type() == at::kShort && t.size(0) * 16 == k && t.size(1) * 16 == n && t.size(2) == 4 * 16;
++}
++
++}  // namespace
++
++int exl3_mlp_m16_l2pf(int set)
++{
++    // Benchmark knob, read at launch/capture time: EXL3_MLP_M16_L2PF (default 0) or the last set >= 0
++    static int value = []
++    {
++        const char* env = std::getenv("EXL3_MLP_M16_L2PF");
++        return env ? std::atoi(env) : 0;
++    }();
++    if (set >= 0) value = set;
++    return value;
++}
++
++bool exl3_mlp_m16_supported
++(
++    int size_m,
++    const at::Tensor& gate_trellis,
++    const at::Tensor& up_trellis,
++    const at::Tensor& down_trellis
++)
++{
++    static const bool enabled = []
++    {
++        const char* env = std::getenv("EXL3_MLP_M16");
++        return !(env && env[0] == '0');
++    }();
++    if (!enabled || size_m < 1 || size_m > 16) return false;
++    if (!trellis_is(gate_trellis, EXL3_MLP_SCHED_K1, EXL3_MLP_SCHED_N1) ||
++        !trellis_is(up_trellis, EXL3_MLP_SCHED_K1, EXL3_MLP_SCHED_N1) ||
++        !trellis_is(down_trellis, EXL3_MLP_SCHED_K2, EXL3_MLP_SCHED_N2)) return false;
++    int device;
++    cudaGetDevice(&device);
++    Launch l = get_launch(size_m <= 8 ? 1 : 2, true, device);
++    Launch l16 = get_launch(size_m <= 8 ? 1 : 2, false, device);
++    int num_sms = DevCtx::instance().get_num_sms(device);
++    return l.blocks_per_sm == 2 && l16.blocks_per_sm == 2 && num_sms * 2 == EXL3_MLP_SCHED_G;
++}
++
++int exl3_mlp_m16_gr
++(
++    const at::Tensor& x,
++    const at::Tensor& gate_trellis, const at::Tensor& gate_suh, const at::Tensor& gate_svh,
++    const at::Tensor& up_trellis, const at::Tensor& up_suh, const at::Tensor& up_svh,
++    const at::Tensor& down_trellis, const at::Tensor& down_suh, const at::Tensor& down_svh,
++    at::Tensor& g, at::Tensor& u, at::Tensor& a,
++    at::Tensor& xh_g, at::Tensor& xh_u, at::Tensor& xh_d,
++    at::Tensor& d,
++    float act_limit,
++    Graph* graph,
++    const c10::optional<at::Tensor>& prof
++)
++{
++    const at::cuda::OptionalCUDAGuard device_guard(x.device());
++    cudaStream_t stream = graph ? graph->capture_stream : at::cuda::getCurrentCUDAStream().stream();
++
++    TORCH_CHECK_DTYPE(x, kHalf);
++    TORCH_CHECK(x.is_contiguous() && x.size(-1) == EXL3_MLP_SCHED_K1, "exl3_mlp_m16: x must be contiguous (..., ", EXL3_MLP_SCHED_K1, ")");
++    const int size_m = (int) (x.numel() / EXL3_MLP_SCHED_K1);
++    TORCH_CHECK(exl3_mlp_m16_supported(size_m, gate_trellis, up_trellis, down_trellis), "exl3_mlp_m16: unsupported shape or device");
++    TORCH_CHECK(gate_trellis.is_contiguous() && up_trellis.is_contiguous() && down_trellis.is_contiguous(), "exl3_mlp_m16: trellis must be contiguous");
++    const bool d_fp32 = d.dtype() == at::kFloat;
++    if (!d_fp32) TORCH_CHECK_DTYPE(d, kHalf);
++
++    auto half_buf = [&] (const at::Tensor& t, int64_t numel, const char* name)
++    {
++        TORCH_CHECK(t.dtype() == at::kHalf && t.is_contiguous() && t.numel() == numel, "exl3_mlp_m16: ", name, " must be contiguous half with ", numel, " elements");
++        TORCH_CHECK(t.data_ptr() != x.data_ptr(), "exl3_mlp_m16: ", name, " must not alias x");
++    };
++    half_buf(gate_suh, EXL3_MLP_SCHED_K1, "gate suh");
++    half_buf(up_suh, EXL3_MLP_SCHED_K1, "up suh");
++    half_buf(down_suh, EXL3_MLP_SCHED_K2, "down suh");
++    half_buf(gate_svh, EXL3_MLP_SCHED_N1, "gate svh");
++    half_buf(up_svh, EXL3_MLP_SCHED_N1, "up svh");
++    half_buf(down_svh, EXL3_MLP_SCHED_N2, "down svh");
++    half_buf(g, (int64_t) size_m * EXL3_MLP_SCHED_N1, "g");
++    half_buf(u, (int64_t) size_m * EXL3_MLP_SCHED_N1, "u");
++    half_buf(a, (int64_t) size_m * EXL3_MLP_SCHED_N1, "a");
++    half_buf(xh_g, (int64_t) size_m * EXL3_MLP_SCHED_K1, "xh_g");
++    half_buf(xh_u, (int64_t) size_m * EXL3_MLP_SCHED_K1, "xh_u");
++    half_buf(xh_d, (int64_t) size_m * EXL3_MLP_SCHED_K2, "xh_d");
++    TORCH_CHECK(d.is_contiguous() && d.numel() == (int64_t) size_m * EXL3_MLP_SCHED_N2, "exl3_mlp_m16: d must be contiguous (m, ", EXL3_MLP_SCHED_N2, ")");
++    TORCH_CHECK(xh_g.data_ptr() != xh_u.data_ptr() && g.data_ptr() != u.data_ptr() && a.data_ptr() != g.data_ptr() && a.data_ptr() != u.data_ptr(),
++        "exl3_mlp_m16: g, u, a and xh buffers must not alias");
++
++    int device;
++    cudaGetDevice(&device);
++    MlpDev dev = get_dev(device, stream);
++    const int MT = size_m <= 8 ? 1 : 2;
++    Launch l = get_launch(MT, d_fp32, device);
++    const int G = EXL3_MLP_SCHED_G;
++
++    Exl3MlpM16Args args = {};
++    args.Bg = (const uint16_t*) gate_trellis.data_ptr();
++    args.Bu = (const uint16_t*) up_trellis.data_ptr();
++    args.Bd = (const uint16_t*) down_trellis.data_ptr();
++    args.suh_g = (const half*) gate_suh.data_ptr();
++    args.suh_u = (const half*) up_suh.data_ptr();
++    args.suh_d = (const half*) down_suh.data_ptr();
++    args.xh_g = (half*) xh_g.data_ptr();
++    args.xh_u = (half*) xh_u.data_ptr();
++    args.xh_d = (half*) xh_d.data_ptr();
++    args.svh_g = (const half*) gate_svh.data_ptr();
++    args.svh_u = (const half*) up_svh.data_ptr();
++    args.svh_d = (const half*) down_svh.data_ptr();
++    args.a = (half*) a.data_ptr();
++    args.ws = dev.ws;
++    args.ws2 = dev.ws + WS1_FLOATS;
++    args.cnt = dev.cnt;
++    args.sched = dev.sched;
++    args.prof = nullptr;
++    if (prof)
++    {
++        TORCH_CHECK(prof->dtype() == at::kLong && prof->is_contiguous() && prof->numel() >= (int64_t) G * EXL3_MLP_M16_PROF_WORDS,
++            "exl3_mlp_m16: prof must be contiguous int64 with ", G * EXL3_MLP_M16_PROF_WORDS, " elements");
++        args.prof = (unsigned long long*) prof->data_ptr();
++    }
++    args.size_m = size_m;
++    args.act_limit = act_limit;
++    args.l2pf = exl3_mlp_m16_l2pf(-1);
++
++    const half* A_ptr = (const half*) x.data_ptr();
++    half* g_ptr = (half*) g.data_ptr();
++    half* u_ptr = (half*) u.data_ptr();
++    void* d_ptr = d.data_ptr();
++    void* kernel_args[] = { (void*) &A_ptr, (void*) &g_ptr, (void*) &u_ptr, (void*) &d_ptr, (void*) &args };
++
++    cuda_check(cudaLaunchCooperativeKernel(l.kernel, dim3(G), dim3(EXL3_M16_THREADS), kernel_args, l.smem, stream));
++
++    if (graph)
++    {
++        graph->record_param(l.kernel, GP_gemm_A, 0);
++        graph->record_param(l.kernel, GP_gemm_C, 1);
++        graph->record_param(l.kernel, GP_gemm_A, 0);
++        graph->record_param(l.kernel, GP_gemm_C, 2);
++        graph->record_param(l.kernel, GP_gemm_C, 3);
++        graph->record_param(l.kernel, GP_end, 0);
++    }
++    cuda_check(cudaPeekAtLastError());
++    return G;
++}
+--- /dev/null
++++ b/exllamav3_ext/quant/exl3_mlp_m16.cuh
+@@ -0,0 +1,40 @@
++#pragma once
++
++#include <ATen/Tensor.h>
++#include "../graph.cuh"
++
++// Fused gated MLP for 1..16 rows (exl3_mlp_m16_kernel.cuh): gate+up m16 GEMM, silu(g) * u and the
++// down m16 GEMM in one persistent launch following the Bend-emitted schedule exl3_mlp_m16_sched.h.
++// Supported: the schedule's shapes (k 5120 -> n 17408 -> 5120), 4 bpw mul1, SiLU, no gate/up bias,
++// and a grid of exactly the schedule's G blocks (2 per SM) on the current device. EXL3_MLP_M16=0
++// disables it (callers then run exl3_gemm_m16_gr + silu_mul_gr + exl3_gemm_m16_gr).
++
++// L2 prefetch depth (down tiles per warp, issued once between the phases): returns the value used
++// by later launches; set >= 0 changes it (benchmark knob; default EXL3_MLP_M16_L2PF or 0).
++int exl3_mlp_m16_l2pf(int set);
++
++bool exl3_mlp_m16_supported
++(
++    int size_m,
++    const at::Tensor& gate_trellis,
++    const at::Tensor& up_trellis,
++    const at::Tensor& down_trellis
++);
++
++// d = down(silu(gate(x)) * up(x)); g, u, a receive the gate/up outputs and silu(g) * u exactly as
++// exl3_gemm_m16_gr + silu_mul_gr would write them, xh_g / xh_u / xh_d the three input transforms.
++// Graph sites: A, C(g), A, C(u), C(d), the sequence the unfused m16 path records.
++// Returns the grid size.
++int exl3_mlp_m16_gr
++(
++    const at::Tensor& x,
++    const at::Tensor& gate_trellis, const at::Tensor& gate_suh, const at::Tensor& gate_svh,
++    const at::Tensor& up_trellis, const at::Tensor& up_suh, const at::Tensor& up_svh,
++    const at::Tensor& down_trellis, const at::Tensor& down_suh, const at::Tensor& down_svh,
++    at::Tensor& g, at::Tensor& u, at::Tensor& a,
++    at::Tensor& xh_g, at::Tensor& xh_u, at::Tensor& xh_d,
++    at::Tensor& d,
++    float act_limit,
++    Graph* graph,
++    const c10::optional<at::Tensor>& prof
++);
+--- /dev/null
++++ b/exllamav3_ext/quant/exl3_mlp_m16_kernel.cuh
+@@ -0,0 +1,617 @@
++#pragma once
++
++// Fused gated MLP for 1..16 token rows (ext 8201): gate+up m16 GEMM, silu(gate) * up and the down
++// m16 GEMM in ONE persistent cooperative launch, with no grid-wide barrier between the two GEMMs.
++// Host side: exl3_mlp_m16.cu. Per-block schedule: exl3_mlp_m16_sched.h, emitted by
++// bend/MLP_M16_SCHED_TABLE.bend (laws bend/mlp_m16_sched_laws.bend); the kernel reads it from device
++// memory and derives no schedule of its own.
++//
++// - Phase 1 is patch 2001 v2's gate+up launch unchanged: same input transform + grid barrier, same
++//   partition (block b owns [s1, s1 + n1) of the 2 * 34 * 320 (group, k-tile) iterations), same
++//   hot loop, fp16 MMA with fp32 fold every FOLD k-tiles and at every group end, same split-K
++//   slots (group, b - first contributor). After flushing group g each warp publishes it with a
++//   fenced add of 1 to counter cnt1[g] (expected 8 * contributors).
++// - The warp-private cp.async weight ring is ONE stream of n1 + n2 tiles: once the phase-1 tiles
++//   are issued the cursor continues with this block's down tiles (weights never depend on
++//   activations), so the down ring is full when phase 1 ends and DRAM keeps streaming through the
++//   finish below. Tile i uses slot i % PF throughout.
++// - Finish (per 512-column pair P = gate group P + up group 34 + P = down k-tiles [32 P, 32 P + 32)):
++//   the schedule names the finisher blocks of P (fin_rank < fin_cnt). A finisher block's thread 0
++//   waits for cnt1[P] and cnt1[34 + P] (for its 8 warps), then its warps run jobs (row, 128-column chunk) exactly as v2's finish (slot
++//   sums in slot order, had_fh_r_128_inner with svh) for gate and up, then act_mul_kernel_h's
++//   silu(g) * u on the same half2 pairs, then v2 down's input transform had_hf_r_128_inner with the
++//   down suh: the same device functions on the same values, through the same g / u / a buffers.
++//   Then it adds 1 to cnt2[P] (expected 8 * fin_cnt).
++// - Phase 2 is v2's down launch with its partition, slots, loop and final grid barrier + finish, except
++//   that the input transform comes from the finish above: thread 0 waits for cnt2[P] of every pair
++//   in the block's slice (schedule wait list) before the first activation chunk is issued.
++//   Waits never busy-spin: one poller per block with exponential __nanosleep backoff while the
++//   rest of the block sleeps at a barrier (the GPU runs power-capped, idle SMs keep clocks up).
++// - Counters self-reset: every waiter adds 1 to the pass counter of what it waited on; the last one
++//   (count from the schedule) zeroes the counter and the pass counter. The next launch is
++//   stream-ordered after this one.
++// - Deadlock-freedom needs all blocks co-resident (cooperative launch, grid = 2 blocks/SM).
++
++#include "exl3_gemm_m16_kernel.cuh"
++#include "exl3_mlp_m16_sched.h"
++
++#define EXL3_MLP_M16_NCNT (5 * EXL3_MLP_SCHED_PAIRS + 1)
++#define EXL3_MLP_M16_PROF_WORDS 16
++
++// counter layout (unsigned int): cnt1[68] | pass1[34] | cnt2[34] | pass2[34] | grid barrier word
++#define EXL3_MLP_CNT1 0
++#define EXL3_MLP_PASS1 (2 * EXL3_MLP_SCHED_PAIRS)
++#define EXL3_MLP_CNT2 (3 * EXL3_MLP_SCHED_PAIRS)
++#define EXL3_MLP_PASS2 (4 * EXL3_MLP_SCHED_PAIRS)
++#define EXL3_MLP_GBAR (5 * EXL3_MLP_SCHED_PAIRS)
++
++struct Exl3MlpM16Args
++{
++    const uint16_t* Bg;
++    const uint16_t* Bu;
++    const uint16_t* Bd;
++    const half* suh_g;
++    const half* suh_u;
++    const half* suh_d;
++    half* xh_g;
++    half* xh_u;
++    half* xh_d;
++    const half* svh_g;
++    const half* svh_u;
++    const half* svh_d;
++    half* a;                         // silu(g) * u (m, N1), the act_mul output / down A
++    float* ws;                       // phase-1 slots at 0, phase-2 slots at ws2
++    float* ws2;
++    unsigned int* cnt;               // EXL3_MLP_M16_NCNT counters, zero between launches
++    const unsigned short* sched;     // block table | pair table | wait list (exl3_mlp_m16_sched.h)
++    unsigned long long* prof;
++    int size_m;
++    float act_limit;
++    int l2pf;                        // down tiles per warp prefetched to L2 across the finish (0 = off)
++};
++
++// act_mul_kernel_h<ACT_SILU>'s _silu(half2) (activation_kernels.cuh), same operations
++__device__ __forceinline__ half2 exl3_mlp_silu_h2(half2 x)
++{
++    half2 one = __float2half2_rn(1.0f);
++    half2 neg_x = __hneg2(x);
++    half2 e = h2exp(neg_x);
++    half2 sum = __hadd2(one, e);
++    half2 r = h2rcp(sum);
++    half2 result = __hmul2(x, r);
++    return result;
++}
++
++// act_mul_kernel_h<ACT_SILU> body for one half2 (x = gate, y = up)
++__device__ __forceinline__ half2 exl3_mlp_act_mul_h2(half2 x2, half2 y2, const float act_limit)
++{
++    x2 = exl3_mlp_silu_h2(x2);
++    if (act_limit != 0.0f)
++    {
++        y2 = __hmax2(y2, __float2half2_rn(-act_limit));
++        y2 = __hmin2(y2, __float2half2_rn(act_limit));
++        x2 = __hmin2(x2, __float2half2_rn(act_limit));
++    }
++    return __hmul2(x2, y2);
++}
++
++__device__ __forceinline__ unsigned int exl3_mlp_ld_acquire(const unsigned int* p)
++{
++    unsigned int v;
++    asm volatile ("ld.global.acquire.gpu.b32 %0, [%1];\n" : "=r"(v) : "l"(p) : "memory");
++    return v;
++}
++
++// Wait until *c >= target: one polling thread per block (the rest of the block sleeps at the
++// following barrier), exponential __nanosleep backoff 32 .. 512 ns so a waiting SM draws little
++// power (the board runs at its power cap; SM clock follows total power)
++__device__ __forceinline__ void exl3_mlp_wait(unsigned int* c, unsigned int target)
++{
++    unsigned int ns = 32;
++    while (exl3_mlp_ld_acquire(c) < target)
++    {
++        __nanosleep(ns);
++        if (ns < 512) ns <<= 1;
++    }
++    __threadfence();
++}
++
++// Account `n` passes (the waits of n warps, done by their block's poller); the pass that completes
++// `waiters` zeroes the counter (and, for the gate/up pair, its partner) and the pass counter
++__device__ __forceinline__ void exl3_mlp_pass(unsigned int* pass, unsigned int n, unsigned int waiters, unsigned int* c0, unsigned int* c1)
++{
++    unsigned int old = atomicAdd(pass, n);
++    if (old == waiters - n)
++    {
++        atomicExch(c0, 0u);
++        if (c1) atomicExch(c1, 0u);
++        atomicExch(pass, 0u);
++    }
++}
++
++// Grid barrier (cooperative launch => all blocks co-resident), cooperative_groups' flip protocol
++// (block 0 adds 0x80000000 - (G - 1), the others 1; the top bit flips once per barrier and the word
++// returns to its low bits, so it needs no reset) but polled by thread 0 with exponential backoff
++// instead of CG's tight spin
++__device__ __forceinline__ void exl3_mlp_grid_sync(unsigned int* bar)
++{
++    __syncthreads();
++    if (threadIdx.x == 0)
++    {
++        unsigned int nb = blockIdx.x == 0 ? 0x80000000u - (gridDim.x - 1) : 1u;
++        unsigned int old, cur;
++        asm volatile ("atom.add.release.gpu.u32 %0, [%1], %2;\n" : "=r"(old) : "l"(bar), "r"(nb) : "memory");
++        unsigned int ns = 32;
++        while (true)
++        {
++            asm volatile ("ld.acquire.gpu.u32 %0, [%1];\n" : "=r"(cur) : "l"(bar) : "memory");
++            if ((old ^ cur) & 0x80000000u) break;
++            __nanosleep(ns);
++            if (ns < 512) ns <<= 1;
++        }
++    }
++    __syncthreads();
++}
++
++template <int MT, bool d_fp32>
++__global__ __launch_bounds__(EXL3_M16_THREADS, 2)
++void exl3_mlp_m16_kernel(const half* __restrict__ A, half* Cg, half* Cu, void* D, Exl3MlpM16Args p)
++{
++    using Cfg = Exl3M16Cfg<MT>;
++    constexpr int PF = Cfg::PF;
++    constexpr int XR = Cfg::XR;
++    constexpr int W_STAGE = Cfg::W_STAGE;
++    constexpr int X_ITER = Cfg::X_ITER;
++    constexpr int ROWS = MT * 8;
++    constexpr int GW = EXL3_M16_GW;
++    static_assert(PF == EXL3_MLP_SCHED_PF, "schedule ring depth");
++
++    constexpr int K1 = EXL3_MLP_SCHED_K1;
++    constexpr int N1 = EXL3_MLP_SCHED_N1;
++    constexpr int K2 = EXL3_MLP_SCHED_K2;
++    constexpr int N2 = EXL3_MLP_SCHED_N2;
++    constexpr int NP = EXL3_MLP_SCHED_PAIRS;
++    constexpr int KT1 = K1 / 16;
++    constexpr int NG1 = N1 / GW;
++    constexpr int KT2 = K2 / 16;
++    constexpr int NG2 = N2 / GW;
++    constexpr int T1 = 2 * NG1 * KT1;
++    constexpr int T2 = NG2 * KT2;
++    constexpr size_t ROW1 = (size_t) (N1 / 16) * 128;
++    constexpr size_t ROW2 = (size_t) (N2 / 16) * 128;
++    static_assert(NP == NG1 && K2 == N1 && N2 == K1, "gated MLP shapes");
++
++    extern __shared__ __align__(16) uint8_t sm[];
++
++    const bool prof = p.prof != nullptr;
++    auto stamp = [&] (int i)
++    {
++        if (prof && threadIdx.x == 0)
++            p.prof[(size_t) blockIdx.x * EXL3_MLP_M16_PROF_WORDS + i] = exl3_m16_gtime();
++    };
++    stamp(0);
++
++    const int warp = threadIdx.x >> 5;
++    const int lane = threadIdx.x & 31;
++    const int size_m = p.size_m;
++    const int G = gridDim.x;
++    const int b = blockIdx.x;
++
++    // Schedule record of this block (exl3_mlp_m16_sched.h field order)
++    const unsigned short* rec = p.sched + b * EXL3_MLP_SCHED_BF;
++    const int s1 = rec[0];
++    const int n1 = rec[1];
++    const int v = rec[2];
++    const int s2 = rec[3];
++    const int n2 = rec[4];
++    const int ring2 = rec[5];
++    const int fin_pair = rec[6];
++    const int fin_rank = rec[7];
++    const int fin_cnt = rec[8];
++    const int wait_off = rec[9];
++    const int wait_cnt = rec[10];
++    const unsigned short* pair_tab = p.sched + EXL3_MLP_SCHED_G * EXL3_MLP_SCHED_BF;
++    const unsigned short* wait_tab = pair_tab + NP * EXL3_MLP_SCHED_PFLD;
++    const int n_tot = n1 + n2;
++
++    uint8_t* ring = sm + warp * PF * W_STAGE;
++    uint8_t* xbuf = sm + Cfg::RING;
++
++    // Weight issue cursor over the ring stream: tiles [0, n1) = phase-1 iterations s1 + i,
++    // tiles [n1, n_tot) = phase-2 iterations s2 + i - n1. iss_rem = tiles left in the current
++    // contiguous run (one group of one phase); this lane's 16 bytes of each 512-byte warp stage.
++    int iss_j = 0;
++    int iss_rem = 0;
++    size_t iss_row = ROW1;
++    const uint8_t* iss_ptr = nullptr;
++    auto iss_seek = [&] ()
++    {
++        if (iss_j < n1)
++        {
++            int it = s1 + iss_j;
++            int g = it / KT1;
++            int kt = it - g * KT1;
++            int mat = g >= NG1 ? 1 : 0;
++            int ng = g - mat * NG1;
++            const uint16_t* B = mat ? p.Bu : p.Bg;
++            iss_ptr = (const uint8_t*) (B + ((size_t) ng * (GW / 16) + warp * EXL3_M16_TILES_W) * 64) + lane * 16 + (size_t) kt * ROW1;
++            iss_rem = min(KT1 - kt, n1 - iss_j);
++            iss_row = ROW1;
++        }
++        else
++        {
++            int it = s2 + (iss_j - n1);
++            int g = it / KT2;
++            int kt = it - g * KT2;
++            iss_ptr = (const uint8_t*) (p.Bd + ((size_t) g * (GW / 16) + warp * EXL3_M16_TILES_W) * 64) + lane * 16 + (size_t) kt * ROW2;
++            iss_rem = min(KT2 - kt, n_tot - iss_j);
++            iss_row = ROW2;
++        }
++    };
++    auto issue_w = [&] (int slot)
++    {
++        cp_async_stream(ring + slot * W_STAGE + lane * 16, iss_ptr);
++        iss_j++;
++        if (--iss_rem == 0)
++        {
++            if (iss_j < n_tot) iss_seek();
++        }
++        else iss_ptr += iss_row;
++    };
++    if (n_tot > 0) iss_seek();
++
++    // Activation chunk c of a phase = phase-relative iterations [c * XR, c * XR + XR) (v2's
++    // issue_x_chunk with the phase's xh); rows past size_m replicate the last row
++    auto issue_x_chunk = [&] (int c, auto ph)
++    {
++        constexpr int PH = decltype(ph)::value;
++        const int s = PH == 1 ? s1 : s2;
++        const int n = PH == 1 ? n1 : n2;
++        uint8_t* dst = xbuf + (c & 1) * XR * X_ITER;
++        for (int q = threadIdx.x; q < XR * 2 * ROWS; q += EXL3_M16_THREADS)
++        {
++            int jj = q / (2 * ROWS);
++            int r = q - jj * (2 * ROWS);
++            int j = c * XR + jj;
++            if (j < n)
++            {
++                int it = s + j;
++                int row = min(r % ROWS, size_m - 1);
++                int kh = r / ROWS;
++                if constexpr (PH == 1)
++                {
++                    int g = it / KT1;
++                    int kt = it - g * KT1;
++                    const half* xh = g >= NG1 ? p.xh_u : p.xh_g;
++                    cp_async(dst + jj * X_ITER + r * 16, xh + (size_t) row * K1 + kt * 16 + kh * 8);
++                }
++                else
++                {
++                    int g = it / KT2;
++                    int kt = it - g * KT2;
++                    cp_async(dst + jj * X_ITER + r * 16, p.xh_d + (size_t) row * K2 + kt * 16 + kh * 8);
++                }
++            }
++        }
++    };
++
++    // Prologue: first PF - 1 ring tiles (independent of the input transform)
++    #pragma unroll
++    for (int d = 0; d < PF - 1; ++d)
++    {
++        if (iss_j < n_tot) issue_w(d);
++        cp_async_fence();
++    }
++
++    // Gate/up input scales and Hadamard transform (v2, num_mats = 2), then the only grid barrier
++    // before the down GEMM's final reduction (same placement as v2's grid.sync, backoff polling)
++    {
++        int per_mat = size_m * K1 / 128;
++        int total_warps = 2 * per_mat;
++        int warps_grid = G * EXL3_M16_WARPS;
++        for (int w = warp + EXL3_M16_WARPS * b; w < total_warps; w += warps_grid)
++        {
++            int mat = w >= per_mat ? 1 : 0;
++            int r = w - mat * per_mat;
++            had_hf_r_128_inner<true, false>
++            (
++                A + r * 128,
++                (mat ? p.xh_u : p.xh_g) + r * 128,
++                (mat ? p.suh_u : p.suh_g) + (r * 128) % K1,
++                0.088388347648f  // 1/sqrt(128)
++            );
++        }
++        exl3_mlp_grid_sync(p.cnt + EXL3_MLP_GBAR);
++    }
++    stamp(1);
++
++    issue_x_chunk(0, std::integral_constant<int, 1>{});
++    cp_async_fence();
++    cp_async_wait<0>();
++    __syncthreads();
++
++    int ldsm_off;
++    {
++        int i = MT == 1 ? (lane >> 3) & 1 : lane >> 3;
++        ldsm_off = ((i & 1) * ROWS + (i >> 1) * 8 + (lane & 7)) * 16;
++    }
++    const uint32_t xbuf_sa = static_cast<uint32_t>(__cvta_generic_to_shared(xbuf)) + ldsm_off;
++
++    FragC_h hacc[EXL3_M16_TILES_W][MT];
++    FragC acc[EXL3_M16_TILES_W][MT];
++    const half2 hzero = __half2half2(__ushort_as_half(0));
++    #pragma unroll
++    for (int t = 0; t < EXL3_M16_TILES_W; ++t)
++        #pragma unroll
++        for (int mt = 0; mt < MT; ++mt)
++        {
++            hacc[t][mt][0] = hzero;
++            hacc[t][mt][1] = hzero;
++            #pragma unroll
++            for (int c = 0; c < 4; ++c) acc[t][mt][c] = 0.0f;
++        }
++
++    auto fold = [&] ()
++    {
++        #pragma unroll
++        for (int t = 0; t < EXL3_M16_TILES_W; ++t)
++            #pragma unroll
++            for (int mt = 0; mt < MT; ++mt)
++            {
++                acc[t][mt][0] += __low2float(hacc[t][mt][0]);
++                acc[t][mt][1] += __high2float(hacc[t][mt][0]);
++                acc[t][mt][2] += __low2float(hacc[t][mt][1]);
++                acc[t][mt][3] += __high2float(hacc[t][mt][1]);
++                hacc[t][mt][0] = hzero;
++                hacc[t][mt][1] = hzero;
++            }
++    };
++
++    // v2 flush of group g into slot (g, slice - first contributor); phase 1 then publishes it
++    auto flush = [&] (int g, auto ph)
++    {
++        constexpr int PH = decltype(ph)::value;
++        const int cidx = PH == 1 ? b - exl3_m16_owner(g * KT1, T1, G) : v - exl3_m16_owner(g * KT2, T2, G);
++        float* ws = PH == 1 ? p.ws + (size_t) g * EXL3_MLP_SCHED_MC1 * EXL3_M16_SLOT_FLOATS
++                            : p.ws2 + (size_t) g * EXL3_MLP_SCHED_MC2 * EXL3_M16_SLOT_FLOATS;
++        float* slot = ws + (size_t) cidx * EXL3_M16_SLOT_FLOATS + warp * 64 + (lane >> 2);
++        #pragma unroll
++        for (int t = 0; t < EXL3_M16_TILES_W; ++t)
++            #pragma unroll
++            for (int mt = 0; mt < MT; ++mt)
++                #pragma unroll
++                for (int c = 0; c < 4; ++c)
++                {
++                    int row = mt * 8 + 2 * (lane & 3) + (c & 1);
++                    if (row < size_m) __stcg(slot + row * GW + t * 16 + (c >> 1) * 8, acc[t][mt][c]);
++                    acc[t][mt][c] = 0.0f;
++                }
++        if constexpr (PH == 1)
++        {
++            __threadfence();
++            __syncwarp();
++            if (lane == 0) atomicAdd(p.cnt + EXL3_MLP_CNT1 + g, 1u);
++        }
++    };
++
++    // v2 main loop (rolled) over one phase's slice; the ring slots continue across phases
++    int cur_slot = 0;
++    int iss_slot = PF - 1;
++    auto run_phase = [&] (auto ph)
++    {
++        constexpr int PH = decltype(ph)::value;
++        constexpr int KT = PH == 1 ? KT1 : KT2;
++        const int s = PH == 1 ? s1 : s2;
++        const int n = PH == 1 ? n1 : n2;
++        const int e = s + n;
++        int j = 0;
++        for (int g_cur = s / KT; j < n; ++g_cur)
++        {
++            const int seg_end = min(e, (g_cur + 1) * KT) - s;
++
++            #pragma unroll 1
++            for (; j < seg_end; ++j)
++            {
++                if ((j & (XR - 1)) == 0)
++                {
++                    if (j > 0) __syncthreads();
++                    issue_x_chunk(j / XR + 1, ph);
++                }
++                if (iss_j < n_tot) issue_w(iss_slot);
++                iss_slot = iss_slot == PF - 1 ? 0 : iss_slot + 1;
++                cp_async_fence();
++                cp_async_wait<PF - 1>();
++                __syncwarp();
++
++                {
++                    const uint8_t* st = ring + cur_slot * W_STAGE;
++                    uint32_t bx[MT][2];
++                    {
++                        uint32_t sa = xbuf_sa + (((j / XR) & 1) * XR + (j & (XR - 1))) * X_ITER;
++                        if constexpr (MT == 2)
++                            asm volatile ("ldmatrix.sync.aligned.m8n8.x4.shared.b16 {%0,%1,%2,%3}, [%4];\n"
++                                : "=r"(bx[0][0]), "=r"(bx[0][1]), "=r"(bx[1][0]), "=r"(bx[1][1]) : "r"(sa));
++                        else
++                            asm volatile ("ldmatrix.sync.aligned.m8n8.x2.shared.b16 {%0,%1}, [%2];\n"
++                                : "=r"(bx[0][0]), "=r"(bx[0][1]) : "r"(sa));
++                    }
++
++                    #pragma unroll
++                    for (int t = 0; t < EXL3_M16_TILES_W; ++t)
++                    {
++                        FragB f0, f1;
++                        dq8_aligned_4bits<2>((const uint32_t*) (st + t * 128), lane * 8, f0, f1);
++                        FragA a;
++                        a[0] = f0[0];
++                        a[1] = f1[0];
++                        a[2] = f0[1];
++                        a[3] = f1[1];
++                        #pragma unroll
++                        for (int mt = 0; mt < MT; ++mt)
++                        {
++                            FragB bb;
++                            bb[0] = *reinterpret_cast<half2*>(&bx[mt][0]);
++                            bb[1] = *reinterpret_cast<half2*>(&bx[mt][1]);
++                            ptx_mma_m16n8k16(a, bb, hacc[t][mt]);
++                        }
++                    }
++                }
++                __syncwarp();
++                cur_slot = cur_slot == PF - 1 ? 0 : cur_slot + 1;
++
++                if ((j & (Cfg::FOLD - 1)) == Cfg::FOLD - 1) fold();
++            }
++
++            fold();
++            flush(g_cur, ph);
++        }
++    };
++
++    // ---- Phase 1: gate + up
++    run_phase(std::integral_constant<int, 1>{});
++    stamp(2);
++
++    // Optional (p.l2pf > 0, default 0): L2 prefetch of the next l2pf down tiles past the ring, so
++    // DRAM keeps streaming through the finish below; one instruction per 128-byte line (lanes 0, 8,
++    // 16, 24 of the warp's 512-byte stage), outside both hot loops
++    if ((lane & 7) == 0)
++    {
++        for (int t = max(iss_j, n1), t_end = min(iss_j + p.l2pf, n_tot); t < t_end; ++t)
++        {
++            int it = s2 + (t - n1);
++            int g = it / KT2;
++            int kt = it - g * KT2;
++            const uint8_t* ptr = (const uint8_t*) (p.Bd + ((size_t) g * (GW / 16) + warp * EXL3_M16_TILES_W) * 64) + lane * 16 + (size_t) kt * ROW2;
++            asm volatile ("prefetch.global.L2 [%0];\n" :: "l"(ptr));
++        }
++    }
++
++    // ---- Finish of pair fin_pair by this block's warps (finisher warp f of 8 * fin_cnt). Thread 0
++    // polls for the block and accounts the 8 warps' passes; the other warps sleep at the barrier.
++    {
++        const int P = fin_pair;
++        const unsigned short* pr = pair_tab + P * EXL3_MLP_SCHED_PFLD;
++        if (threadIdx.x == 0)
++        {
++            exl3_mlp_wait(p.cnt + EXL3_MLP_CNT1 + P, pr[0]);
++            exl3_mlp_wait(p.cnt + EXL3_MLP_CNT1 + NG1 + P, pr[1]);
++            exl3_mlp_pass(p.cnt + EXL3_MLP_PASS1 + P, EXL3_M16_WARPS, pr[2], p.cnt + EXL3_MLP_CNT1 + P, p.cnt + EXL3_MLP_CNT1 + NG1 + P);
++        }
++        __syncthreads();
++
++        const int F = EXL3_M16_WARPS * fin_cnt;
++        const int nc_g = exl3_m16_owner((P + 1) * KT1 - 1, T1, G) - exl3_m16_owner(P * KT1, T1, G) + 1;
++        const int nc_u = exl3_m16_owner((NG1 + P + 1) * KT1 - 1, T1, G) - exl3_m16_owner((NG1 + P) * KT1, T1, G) + 1;
++        for (int x = fin_rank * EXL3_M16_WARPS + warp; x < 4 * size_m; x += F)
++        {
++            const int r = x >> 2;
++            const int ch = x & 3;
++            const int col0 = P * GW + ch * 128;
++            #pragma unroll
++            for (int mat = 0; mat < 2; ++mat)
++            {
++                // v2 finish of group (mat ? NG1 + P : P), row r, chunk ch
++                const int g = mat * NG1 + P;
++                const int nc = mat ? nc_u : nc_g;
++                float* s0 = p.ws + (size_t) g * EXL3_MLP_SCHED_MC1 * EXL3_M16_SLOT_FLOATS + r * GW + ch * 128;
++                float4 acc4 = __ldcg(((const float4*) s0) + lane);
++                for (int c = 1; c < nc; ++c)
++                {
++                    float4 w4 = __ldcg(((const float4*) (s0 + (size_t) c * EXL3_M16_SLOT_FLOATS)) + lane);
++                    acc4.x += w4.x; acc4.y += w4.y; acc4.z += w4.z; acc4.w += w4.w;
++                }
++                ((float4*) s0)[lane] = acc4;
++                __syncwarp();
++                had_fh_r_128_inner<false, true>
++                (
++                    s0,
++                    (mat ? Cu : Cg) + (size_t) r * N1 + col0,
++                    (mat ? p.svh_u : p.svh_g) + col0,
++                    0.088388347648f  // 1/sqrt(128)
++                );
++            }
++            // act_mul_kernel_h<ACT_SILU> on the half2 pairs this lane's had_fh stored (4 lane .. + 3)
++            {
++                const size_t o = (size_t) r * N1 + col0 + lane * 4;
++                half2* gp = (half2*) (Cg + o);
++                half2* up = (half2*) (Cu + o);
++                half2* ap = (half2*) (p.a + o);
++                ap[0] = exl3_mlp_act_mul_h2(gp[0], up[0], p.act_limit);
++                ap[1] = exl3_mlp_act_mul_h2(gp[1], up[1], p.act_limit);
++            }
++            __syncwarp();
++            // v2 down input transform of row r, 128 columns col0 (A = a, xh = xh_d, suh = down suh)
++            had_hf_r_128_inner<true, false>
++            (
++                p.a + (size_t) r * K2 + col0,
++                p.xh_d + (size_t) r * K2 + col0,
++                p.suh_d + col0,
++                0.088388347648f  // 1/sqrt(128)
++            );
++            __syncwarp();
++        }
++        __threadfence();
++        __syncwarp();
++        if (lane == 0) atomicAdd(p.cnt + EXL3_MLP_CNT2 + P, 1u);
++    }
++    stamp(3);
++
++    // ---- Phase 2: down. Wait for the input transform of every pair of this slice, then v2's
++    // activation prologue; the ring already holds this slice's first PF - 1 weight tiles.
++    if (threadIdx.x == 0)
++    {
++        for (int i = 0; i < wait_cnt; ++i)
++        {
++            const int P = wait_tab[wait_off + i];
++            const unsigned short* pr = pair_tab + P * EXL3_MLP_SCHED_PFLD;
++            exl3_mlp_wait(p.cnt + EXL3_MLP_CNT2 + P, pr[3]);
++            exl3_mlp_pass(p.cnt + EXL3_MLP_PASS2 + P, 1u, pr[4], p.cnt + EXL3_MLP_CNT2 + P, nullptr);
++        }
++    }
++    __syncthreads();
++    stamp(4);
++    // cur_slot == ring2 here (tile n1 of the stream); the schedule states it
++    cur_slot = ring2;
++    issue_x_chunk(0, std::integral_constant<int, 2>{});
++    cp_async_fence();
++    cp_async_wait<0>();
++    __syncthreads();
++
++    run_phase(std::integral_constant<int, 2>{});
++    cp_async_wait<0>();
++    stamp(5);
++
++    exl3_mlp_grid_sync(p.cnt + EXL3_MLP_GBAR);
++    stamp(6);
++
++    // v2 down finish: one warp per (group, row, 128 columns), slots in slot order, output Hadamard
++    {
++        constexpr int CH = GW / 128;
++        const int jobs = NG2 * size_m * CH;
++        for (int w = warp + EXL3_M16_WARPS * b; w < jobs; w += EXL3_M16_WARPS * G)
++        {
++            int g = w / (size_m * CH);
++            int rem = w - g * size_m * CH;
++            int r = rem / CH;
++            int ch = rem - r * CH;
++            int nc = exl3_m16_owner((g + 1) * KT2 - 1, T2, G) - exl3_m16_owner(g * KT2, T2, G) + 1;
++            float* s0 = p.ws2 + (size_t) g * EXL3_MLP_SCHED_MC2 * EXL3_M16_SLOT_FLOATS + r * GW + ch * 128;
++            float4 acc4 = __ldcg(((const float4*) s0) + lane);
++            for (int c = 1; c < nc; ++c)
++            {
++                float4 w4 = __ldcg(((const float4*) (s0 + (size_t) c * EXL3_M16_SLOT_FLOATS)) + lane);
++                acc4.x += w4.x; acc4.y += w4.y; acc4.z += w4.z; acc4.w += w4.w;
++            }
++            ((float4*) s0)[lane] = acc4;
++            __syncwarp();
++
++            const int col0 = g * GW + ch * 128;
++            const half* svh = p.svh_d + col0;
++            if constexpr (d_fp32)
++                had_ff_r_128_inner<false, true>(s0, ((float*) D) + (size_t) r * N2 + col0, svh, 0.088388347648f);
++            else
++                had_fh_r_128_inner<false, true>(s0, ((half*) D) + (size_t) r * N2 + col0, svh, 0.088388347648f);
++        }
++    }
++    stamp(7);
++}
+--- /dev/null
++++ b/exllamav3_ext/quant/exl3_mlp_m16_op.cpp
+@@ -0,0 +1,45 @@
++#include <torch/library.h>
++#include <ATen/Tensor.h>
++#include "exl3_mlp_m16.cuh"
++
++// Eager entry points of the fused MLP (exl3_mlp_m16.cu) for isolated A/B and benchmarking, as
++// torch ops so bindings.cpp stays untouched. Same launcher as the BC_GatedMLP path, no graph sites.
++//   torch.ops.exl3_mlp_m16.supported(m, gate_trellis, up_trellis, down_trellis) -> bool
++//   torch.ops.exl3_mlp_m16.mlp(x, gate trellis/suh/svh, up ..., down ..., g, u, a, xh_g, xh_u, xh_d, d,
++//                              act_limit, prof?) -> grid size
++//   torch.ops.exl3_mlp_m16.l2pf(set) -> current L2 prefetch depth (set < 0 only reads)
++
++static bool exl3_mlp_m16_supported_op(int64_t m, const at::Tensor& gt, const at::Tensor& ut, const at::Tensor& dt)
++{
++    return exl3_mlp_m16_supported((int) m, gt, ut, dt);
++}
++
++static int64_t exl3_mlp_m16_op
++(
++    const at::Tensor& x,
++    const at::Tensor& gt, const at::Tensor& gsuh, const at::Tensor& gsvh,
++    const at::Tensor& ut, const at::Tensor& usuh, const at::Tensor& usvh,
++    const at::Tensor& dt, const at::Tensor& dsuh, const at::Tensor& dsvh,
++    const at::Tensor& g, const at::Tensor& u, const at::Tensor& a,
++    const at::Tensor& xh_g, const at::Tensor& xh_u, const at::Tensor& xh_d,
++    const at::Tensor& d,
++    double act_limit,
++    const c10::optional<at::Tensor>& prof
++)
++{
++    at::Tensor g_ = g, u_ = u, a_ = a, xg = xh_g, xu = xh_u, xd = xh_d, d_ = d;
++    return exl3_mlp_m16_gr(x, gt, gsuh, gsvh, ut, usuh, usvh, dt, dsuh, dsvh, g_, u_, a_, xg, xu, xd, d_,
++                           (float) act_limit, nullptr, prof);
++}
++
++static int64_t exl3_mlp_m16_l2pf_op(int64_t set)
++{
++    return exl3_mlp_m16_l2pf((int) set);
++}
++
++TORCH_LIBRARY(exl3_mlp_m16, m)
++{
++    m.def("l2pf", &exl3_mlp_m16_l2pf_op);
++    m.def("supported", &exl3_mlp_m16_supported_op);
++    m.def("mlp", &exl3_mlp_m16_op);
++}
+--- /dev/null
++++ b/exllamav3_ext/quant/exl3_mlp_m16_sched.h
+@@ -0,0 +1,381 @@
++// Generated by bend/MLP_M16_SCHED_TABLE.bend (ext 8201 fused MLP schedule); do not edit.
++#define EXL3_MLP_SCHED_G 164
++#define EXL3_MLP_SCHED_PF 8
++#define EXL3_MLP_SCHED_K1 5120
++#define EXL3_MLP_SCHED_N1 17408
++#define EXL3_MLP_SCHED_K2 17408
++#define EXL3_MLP_SCHED_N2 5120
++#define EXL3_MLP_SCHED_PAIRS 34
++#define EXL3_MLP_SCHED_BF 11
++#define EXL3_MLP_SCHED_PFLD 5
++#define EXL3_MLP_SCHED_NWAIT 496
++#define EXL3_MLP_SCHED_MC1 4
++#define EXL3_MLP_SCHED_MC2 18
++static const unsigned short exl3_mlp_sched_block[164 * 11] = {
++0,132,0,0,66,4,0,0,6,0,3,
++132,133,1,66,66,5,2,0,6,3,3,
++265,133,2,132,67,5,4,0,6,6,3,
++398,132,3,199,66,4,6,0,4,9,3,
++530,133,4,265,66,5,8,0,4,12,3,
++663,133,5,331,67,5,10,0,4,15,3,
++796,132,6,398,66,4,12,0,6,18,3,
++928,133,7,464,66,5,14,0,6,21,3,
++1061,133,8,530,67,5,16,0,4,24,3,
++1194,132,9,597,66,4,18,0,4,27,3,
++1326,133,10,663,66,5,20,0,4,30,3,
++1459,133,11,729,67,5,22,0,4,33,3,
++1592,132,12,796,66,4,24,0,6,36,3,
++1724,133,13,862,66,5,26,0,6,39,3,
++1857,133,14,928,67,5,29,0,6,42,3,
++1990,132,15,995,66,4,31,0,6,45,3,
++2122,133,16,1061,66,5,33,0,4,48,3,
++2255,133,17,1127,67,5,1,0,4,51,3,
++2388,132,18,1194,66,4,3,0,4,54,3,
++2520,133,19,1260,66,5,5,0,4,57,3,
++2653,133,20,1326,67,5,7,0,6,60,3,
++2786,133,21,1393,66,5,9,0,6,63,3,
++2919,132,22,1459,66,4,11,0,4,66,3,
++3051,133,23,1525,67,5,13,0,4,69,3,
++3184,133,24,1592,66,5,15,0,4,72,3,
++3317,132,25,1658,66,4,17,0,6,75,3,
++3449,133,26,1724,67,5,19,0,6,78,3,
++3582,133,27,1791,66,5,21,0,6,81,4,
++3715,132,28,1857,66,4,24,1,6,85,3,
++3847,133,29,1923,67,5,26,1,6,88,3,
++3980,133,30,1990,66,5,28,0,4,91,3,
++4113,132,31,2056,66,4,30,0,4,94,3,
++4245,133,32,2122,67,5,32,0,4,97,3,
++4378,133,33,2189,66,5,0,1,6,100,3,
++4511,132,34,2255,66,4,2,1,6,103,3,
++4643,133,35,2321,67,5,4,1,6,106,3,
++4776,133,36,2388,66,5,6,1,4,109,3,
++4909,132,37,2454,66,4,8,1,4,112,3,
++5041,133,38,2520,67,5,10,1,4,115,3,
++5174,133,39,2587,66,5,12,1,6,118,3,
++5307,133,40,2653,67,5,14,1,6,121,3,
++5440,132,41,2720,66,4,17,1,6,124,3,
++5572,133,42,2786,66,5,19,1,6,127,3,
++5705,133,43,2852,67,5,21,1,6,130,3,
++5838,132,44,2919,66,4,23,0,4,133,3,
++5970,133,45,2985,66,5,25,0,4,136,3,
++6103,133,46,3051,67,5,27,0,4,139,3,
++6236,132,47,3118,66,4,29,1,6,142,3,
++6368,133,48,3184,66,5,31,1,6,145,3,
++6501,133,49,3250,67,5,33,1,4,148,3,
++6634,132,50,3317,66,4,1,1,4,151,3,
++6766,133,51,3383,66,5,3,1,4,154,3,
++6899,133,52,3449,67,5,5,1,4,157,3,
++7032,132,53,3516,66,4,7,1,6,160,3,
++7164,133,54,3582,66,5,9,1,6,163,3,
++7297,133,55,3648,67,5,12,2,6,166,3,
++7430,132,56,3715,66,4,14,2,6,169,3,
++7562,133,57,3781,66,5,16,1,4,172,3,
++7695,133,58,3847,67,5,18,1,4,175,3,
++7828,132,59,3914,66,4,20,1,4,178,3,
++7960,133,60,3980,66,5,22,1,4,181,3,
++8093,133,61,4046,67,5,24,2,6,184,3,
++8226,133,62,4113,66,5,26,2,6,187,3,
++8359,132,63,4179,66,4,28,1,4,190,3,
++8491,133,64,4245,67,5,30,1,4,193,3,
++8624,133,65,4312,66,5,32,1,4,196,3,
++8757,132,66,4378,66,4,0,2,6,199,3,
++8889,133,67,4444,67,5,2,2,6,202,3,
++9022,133,68,4511,66,5,4,2,6,205,4,
++9155,132,69,4577,66,4,7,2,6,209,3,
++9287,133,70,4643,67,5,9,2,6,212,3,
++9420,133,71,4710,66,5,11,1,4,215,3,
++9553,132,72,4776,66,4,13,1,4,218,3,
++9685,133,73,4842,67,5,15,1,4,221,3,
++9818,133,74,4909,66,5,17,2,6,224,3,
++9951,132,75,4975,66,4,19,2,6,227,3,
++10083,133,76,5041,67,5,21,2,6,230,3,
++10216,133,77,5108,66,5,23,1,4,233,3,
++10349,132,78,5174,66,4,25,1,4,236,3,
++10481,133,79,5240,67,5,27,1,4,239,3,
++10614,133,80,5307,66,5,29,2,6,242,3,
++10747,133,81,5373,67,5,31,2,6,245,3,
++10880,132,82,5440,66,4,0,3,6,248,3,
++11012,133,83,5506,66,5,2,3,6,251,3,
++11145,133,84,5572,67,5,4,3,6,254,3,
++11278,132,85,5639,66,4,6,2,4,257,3,
++11410,133,86,5705,66,5,8,2,4,260,3,
++11543,133,87,5771,67,5,10,2,4,263,3,
++11676,132,88,5838,66,4,12,3,6,266,3,
++11808,133,89,5904,66,5,14,3,6,269,3,
++11941,133,90,5970,67,5,16,2,4,272,3,
++12074,132,91,6037,66,4,18,2,4,275,3,
++12206,133,92,6103,66,5,20,2,4,278,3,
++12339,133,93,6169,67,5,22,2,4,281,3,
++12472,132,94,6236,66,4,24,3,6,284,3,
++12604,133,95,6302,66,5,26,3,6,287,3,
++12737,133,96,6368,67,5,29,3,6,290,3,
++12870,132,97,6435,66,4,31,3,6,293,3,
++13002,133,98,6501,66,5,33,2,4,296,3,
++13135,133,99,6567,67,5,1,2,4,299,3,
++13268,132,100,6634,66,4,3,2,4,302,3,
++13400,133,101,6700,66,5,5,2,4,305,3,
++13533,133,102,6766,67,5,7,3,6,308,3,
++13666,133,103,6833,66,5,9,3,6,311,3,
++13799,132,104,6899,66,4,11,2,4,314,3,
++13931,133,105,6965,67,5,13,2,4,317,3,
++14064,133,106,7032,66,5,15,2,4,320,3,
++14197,132,107,7098,66,4,17,3,6,323,3,
++14329,133,108,7164,67,5,19,3,6,326,3,
++14462,133,109,7231,66,5,21,3,6,329,4,
++14595,132,110,7297,66,4,24,4,6,333,3,
++14727,133,111,7363,67,5,26,4,6,336,3,
++14860,133,112,7430,66,5,28,2,4,339,3,
++14993,132,113,7496,66,4,30,2,4,342,3,
++15125,133,114,7562,67,5,32,2,4,345,3,
++15258,133,115,7629,66,5,0,4,6,348,3,
++15391,132,116,7695,66,4,2,4,6,351,3,
++15523,133,117,7761,67,5,4,4,6,354,3,
++15656,133,118,7828,66,5,6,3,4,357,3,
++15789,132,119,7894,66,4,8,3,4,360,3,
++15921,133,120,7960,67,5,10,3,4,363,3,
++16054,133,121,8027,66,5,12,4,6,366,3,
++16187,133,122,8093,67,5,14,4,6,369,3,
++16320,132,123,8160,66,4,17,4,6,372,3,
++16452,133,124,8226,66,5,19,4,6,375,3,
++16585,133,125,8292,67,5,21,4,6,378,3,
++16718,132,126,8359,66,4,23,2,4,381,3,
++16850,133,127,8425,66,5,25,2,4,384,3,
++16983,133,128,8491,67,5,27,2,4,387,3,
++17116,132,129,8558,66,4,29,4,6,390,3,
++17248,133,130,8624,66,5,31,4,6,393,3,
++17381,133,131,8690,67,5,33,3,4,396,3,
++17514,132,132,8757,66,4,1,3,4,399,3,
++17646,133,133,8823,66,5,3,3,4,402,3,
++17779,133,134,8889,67,5,5,3,4,405,3,
++17912,132,135,8956,66,4,7,4,6,408,3,
++18044,133,136,9022,66,5,9,4,6,411,3,
++18177,133,137,9088,67,5,12,5,6,414,3,
++18310,132,138,9155,66,4,14,5,6,417,3,
++18442,133,139,9221,66,5,16,3,4,420,3,
++18575,133,140,9287,67,5,18,3,4,423,3,
++18708,132,141,9354,66,4,20,3,4,426,3,
++18840,133,142,9420,66,5,22,3,4,429,3,
++18973,133,143,9486,67,5,24,5,6,432,3,
++19106,133,144,9553,66,5,26,5,6,435,3,
++19239,132,145,9619,66,4,28,3,4,438,3,
++19371,133,146,9685,67,5,30,3,4,441,3,
++19504,133,147,9752,66,5,32,3,4,444,3,
++19637,132,148,9818,66,4,0,5,6,447,3,
++19769,133,149,9884,67,5,2,5,6,450,3,
++19902,133,150,9951,66,5,4,5,6,453,4,
++20035,132,151,10017,66,4,7,5,6,457,3,
++20167,133,152,10083,67,5,9,5,6,460,3,
++20300,133,153,10150,66,5,11,3,4,463,3,
++20433,132,154,10216,66,4,13,3,4,466,3,
++20565,133,155,10282,67,5,15,3,4,469,3,
++20698,133,156,10349,66,5,17,5,6,472,3,
++20831,132,157,10415,66,4,19,5,6,475,3,
++20963,133,158,10481,67,5,21,5,6,478,3,
++21096,133,159,10548,66,5,23,3,4,481,3,
++21229,132,160,10614,66,4,25,3,4,484,3,
++21361,133,161,10680,67,5,27,3,4,487,3,
++21494,133,162,10747,66,5,29,5,6,490,3,
++21627,133,163,10813,67,5,31,5,6,493,3,
++};
++static const unsigned short exl3_mlp_sched_pair[34 * 5] = {
++24,24,48,48,14,
++24,24,32,32,14,
++32,32,48,48,16,
++24,24,32,32,14,
++32,32,48,48,16,
++24,24,32,32,14,
++24,24,32,32,14,
++32,32,48,48,16,
++24,24,32,32,14,
++32,32,48,48,16,
++24,24,32,32,14,
++24,24,32,32,14,
++32,32,48,48,14,
++24,24,32,32,14,
++32,32,48,48,16,
++24,24,32,32,14,
++24,24,32,32,14,
++24,24,48,48,14,
++24,24,32,32,14,
++32,32,48,48,16,
++24,24,32,32,14,
++32,32,48,48,16,
++24,24,32,32,14,
++24,24,32,32,14,
++32,32,48,48,16,
++24,24,32,32,14,
++32,32,48,48,16,
++24,24,32,32,14,
++24,24,32,32,14,
++32,32,48,48,14,
++24,24,32,32,14,
++32,32,48,48,16,
++24,24,32,32,14,
++24,24,32,32,14,
++};
++static const unsigned short exl3_mlp_sched_wait[496] = {
++0,1,2,
++2,3,4,
++4,5,6,
++6,7,8,
++8,9,10,
++10,11,12,
++12,13,14,
++14,15,16,
++16,17,18,
++18,19,20,
++20,21,22,
++22,23,24,
++24,25,26,
++26,27,28,
++29,30,31,
++31,32,33,
++33,0,1,
++1,2,3,
++3,4,5,
++5,6,7,
++7,8,9,
++9,10,11,
++11,12,13,
++13,14,15,
++15,16,17,
++17,18,19,
++19,20,21,
++21,22,23,24,
++24,25,26,
++26,27,28,
++28,29,30,
++30,31,32,
++32,33,0,
++0,1,2,
++2,3,4,
++4,5,6,
++6,7,8,
++8,9,10,
++10,11,12,
++12,13,14,
++14,15,16,
++17,18,19,
++19,20,21,
++21,22,23,
++23,24,25,
++25,26,27,
++27,28,29,
++29,30,31,
++31,32,33,
++33,0,1,
++1,2,3,
++3,4,5,
++5,6,7,
++7,8,9,
++9,10,11,
++12,13,14,
++14,15,16,
++16,17,18,
++18,19,20,
++20,21,22,
++22,23,24,
++24,25,26,
++26,27,28,
++28,29,30,
++30,31,32,
++32,33,0,
++0,1,2,
++2,3,4,
++4,5,6,7,
++7,8,9,
++9,10,11,
++11,12,13,
++13,14,15,
++15,16,17,
++17,18,19,
++19,20,21,
++21,22,23,
++23,24,25,
++25,26,27,
++27,28,29,
++29,30,31,
++31,32,33,
++0,1,2,
++2,3,4,
++4,5,6,
++6,7,8,
++8,9,10,
++10,11,12,
++12,13,14,
++14,15,16,
++16,17,18,
++18,19,20,
++20,21,22,
++22,23,24,
++24,25,26,
++26,27,28,
++29,30,31,
++31,32,33,
++33,0,1,
++1,2,3,
++3,4,5,
++5,6,7,
++7,8,9,
++9,10,11,
++11,12,13,
++13,14,15,
++15,16,17,
++17,18,19,
++19,20,21,
++21,22,23,24,
++24,25,26,
++26,27,28,
++28,29,30,
++30,31,32,
++32,33,0,
++0,1,2,
++2,3,4,
++4,5,6,
++6,7,8,
++8,9,10,
++10,11,12,
++12,13,14,
++14,15,16,
++17,18,19,
++19,20,21,
++21,22,23,
++23,24,25,
++25,26,27,
++27,28,29,
++29,30,31,
++31,32,33,
++33,0,1,
++1,2,3,
++3,4,5,
++5,6,7,
++7,8,9,
++9,10,11,
++12,13,14,
++14,15,16,
++16,17,18,
++18,19,20,
++20,21,22,
++22,23,24,
++24,25,26,
++26,27,28,
++28,29,30,
++30,31,32,
++32,33,0,
++0,1,2,
++2,3,4,
++4,5,6,7,
++7,8,9,
++9,10,11,
++11,12,13,
++13,14,15,
++15,16,17,
++17,18,19,
++19,20,21,
++21,22,23,
++23,24,25,
++25,26,27,
++27,28,29,
++29,30,31,
++31,32,33,
++};

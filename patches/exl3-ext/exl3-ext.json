@@ -16,7 +16,7 @@
     "path": "/opt/venv/lib/python3.13/site-packages/exllamav3_ext.cpython-313-x86_64-linux-gnu.so",
     "base_sha256": "6d30690fdb76b3c4ad3fb5e69f0479707e410fc9b6194e2a5e32f4d7fe1fd8b3"
   },
-  "series_sha256": "cd58faebdb4122978fa1b2cbdc7d1aab3b790f7847513413e333a9601d0999f2",
+  "series_sha256": "b52bf95e5874462ea5533feb9d780f2f5b47bb981f01b34ced7d15db8ca3e744",
   "patches": [
     {
       "name": "0001-gdn-shared-carveout.patch",
@@ -69,6 +69,10 @@
     {
       "name": "9002-draft-q4-head.patch",
       "sha256": "9b2554187cdfbdc82b987fb00a1e7dfb3e7a0da33491550c35d112796cb893eb"
+    },
+    {
+      "name": "8201-mlp-m16-fused.patch",
+      "sha256": "23c54fa0b589a264f311737fa2c2105c42b4d3f5f682461a6cf53b9ef30493f5"
     }
   ],
   "files": {
@@ -122,7 +126,7 @@
     },
     "exllamav3_ext/libtorch/mlp.cpp": {
       "pre": "3f5d326cabd970a9892b2b2ce69cfc5e7949a113462e5e22b572f6f77803ec85",
-      "post": "d9cee0843d44a5207718a4dfba4c8c35ea73085a186b062335651561aaeea6fb"
+      "post": "9237ab31c90ef2dfb31615f61555471ec30329ea8d8a3d06d90889160dec780e"
     },
     "exllamav3_ext/norm.cu": {
       "pre": "b7b43921a19aa64cbe56786a9911c2796b5d4327818f0cae73c4cf358e6907df",
@@ -130,11 +134,11 @@
     },
     "exllamav3_ext/quant/exl3_gemm_m16.cu": {
       "pre": null,
-      "post": "7f905123f535d2fb007b13af34ac978feac39554cfdc26b9027ad3b9cbad0150"
+      "post": "608c41c31942655426d53d9e92d74fd42a896ee850fad7d0d102336fce85641b"
     },
     "exllamav3_ext/quant/exl3_gemm_m16.cuh": {
       "pre": null,
-      "post": "dcb2871a90c232371536c4bdfff521e008032c7753b355ff1a4ece4a96187984"
+      "post": "8379d28c53667b7aaffa0368b5d8f30ef4313ad3090fe5ca47fbe949f26f81a6"
     },
     "exllamav3_ext/quant/exl3_gemm_m16_kernel.cuh": {
       "pre": null,
@@ -143,6 +147,26 @@
     "exllamav3_ext/quant/exl3_gemm_m16_op.cpp": {
       "pre": null,
       "post": "f7b9f4f2a970af9997a1af107dfa0c17383cc08b0690e35cabb97f96093fc3b8"
+    },
+    "exllamav3_ext/quant/exl3_mlp_m16.cu": {
+      "pre": null,
+      "post": "e6f4b8c2b8f20e886557a40f00ff3b0a676207855ed23ce1313042fbd26432ef"
+    },
+    "exllamav3_ext/quant/exl3_mlp_m16.cuh": {
+      "pre": null,
+      "post": "40d5cfb08cad3a77dc2af8ab5f62488d5752ace1074c0bcb78189c39b8f0b781"
+    },
+    "exllamav3_ext/quant/exl3_mlp_m16_kernel.cuh": {
+      "pre": null,
+      "post": "5d1632301a3a33a3b8b4f5ab8e894862a9e8c202319ec9d95ea817af39449602"
+    },
+    "exllamav3_ext/quant/exl3_mlp_m16_op.cpp": {
+      "pre": null,
+      "post": "0611be25f6fb6b64e2bd6fa8d6677f024a427b73a793d3a8752c9c52dea0d0d9"
+    },
+    "exllamav3_ext/quant/exl3_mlp_m16_sched.h": {
+      "pre": null,
+      "post": "2bf78e1d6dd07f9940ebb9d4a46e702c789929bbd67fb5373032f03ffb1ed2fd"
     },
     "model/model.py": {
       "pre": "013edc062e64d8fad98695491dd3fd504723752377db7e8f338c88e5afb85448",
