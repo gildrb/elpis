@@ -168,3 +168,97 @@ Sweep other caps only with explicit maintenance ownership, recording and
 restoring the original cap; containers must not modify host power or fans.
 Measure actual watts, clocks, temperature and throttle reasons over a stated
 interval before reporting tokens per joule.
+
+## 4. Engine state at the end of segment 4 (2026-09-25, 350 W)
+
+**Best kept configuration:** candidate image `qwen-inference:exl3-cand-g7kafqt`,
+`sha256:f2e72ec7c9b65aa0478119b7be980763162ed7837b1f2288ece6d46abbc795e7`. It was built
+from this commit's `patches/` by `bash docker/build-exl3.sh candidate-ext`. The live
+deployment (see [docker.md](docker.md)) is unchanged and still serves the promoted image
+`fca4c263`; nothing was promoted.
+
+- **exl3 series:** 0001 greedy batched verify, 0002 host overlap, 0003 draft graph,
+  0005 DFlash2 reference draft block mask (window (W-1, W-1), bidirectional block).
+- **exl3-ext series,** each patch after the one before it:
+  - 0001–0004 GDN verify/commit;
+  - 3001/3002 attention dequant and GQA split;
+  - 5001 GDN small fusions;
+  - 2001 M ≤ 16 GEMM;
+  - 6001 draft graph;
+  - 7001 norm/residual fusion;
+  - 3004 attention partial bounds;
+  - 3005 row-invariant split;
+  - 9002 int4 draft head;
+  - 8201 persistent fused MLP;
+  - 3003 CUDA verify attention over fixed absolute 512-token chunks;
+  - 5101 fused GDN front end, recurrence and norm;
+  - 2102 grouped m16 qkv(+z) projections;
+  - 8202 persistent layer tail (o/out-proj, residual, norm and MLP in one kernel).
+
+Primary `model_call_output_tok_s` of the kept runs (each run is one full lane):
+
+| Run | Image | Primary tok/s | tok/J | Note |
+|---|---|---|---|---|
+| #43 | g7n | 131.62 | 0.409 | segment baseline |
+| #45 | g7j | 132.50 | 0.408 | 3004/3005 correctness, 9002 |
+| #47 | g7km | 137.47 | 0.426 | 0005, 8201 (bit-exact) |
+| #48 | g7kma | 141.73 | 0.432 | 3003 (numerics change) |
+| #50 | g7kafq | 149.06 | 0.460 | 5101 (bit-exact), 2102 (numerics change) |
+| #53 | g7kafqt | 157.49 | 0.494 | 8202 (numerics change) |
+
+Numerics-changing keeps change the greedy text and with it the math call lengths.
+Part of the primary gain from #48 on is a shorter long call, not faster steps. The
+step-time traces below are text-independent.
+
+Verify-step time from the CUPTI kernel traces
+(`evidence/kernel-trace-N/trace.log`, unprofiled median). The floor is the
+Bend-proven byte count of one round (`bend/roofline.bend`, 9002's smaller draft
+head subtracted) at 875.6 GB/s:
+
+| Image | Power | Step ms at depth 107 / 8190 / 32728 | Share of DRAM floor |
+|---|---|---|---|
+| g3 | 280 W | 35.1 / 38.0 / 45.7 | 51 / 47 / 40 % |
+| g7n | 280 W | 30.9 / 32.6 / 36.7 | 58 / 55 / 50 % |
+| g7j | 350 W | 28.6 / 30.1 / 34.3 | 61 / 59 / 53 % |
+| g7kafqt | 350 W | 26.9 / 27.2 / 30.3 | 65 / 65 / 60 % |
+
+The largest remaining losses per step at short depth:
+- the MLP GEMMs (~78 % of DRAM bandwidth);
+- the GDN projections (~64 %);
+- ~1.3 ms of GPU idle between graphs;
+- ~2.5 ms of latency-bound small kernels (GDN recurrence, norms, attention).
+
+**Gates held for every kept change:**
+- Bend gate green.
+- The patch's Bend differential against the shipped source where the module has one
+  (`bend/*_diff.py`; 5101 is checked by its quoted source fragments instead).
+- Invariance: `ops/autoresearch/invariance.py run`. Target ids under the capped and
+  all-wrong draft arms must equal the normal arm on all 15 parity cases, so the
+  output is independent of the draft. Bit-exact candidates must also have ids
+  identical to their base.
+- tiny-math 3/3.
+
+**Open items:**
+- 8202 schedule laws: the baked header is byte-identical to
+  `TAIL_M16_SCHED_TABLE.bend` output, but four laws are still unproven, so the
+  module is not yet wired into `LAWS.bend`/`PROOF.bend`.
+- Measured and dropped:
+  - device-side acceptance with speculative next draft (+0.35 %, flat);
+  - one whole-target CUDA graph (−4.2 %);
+  - draft window > 2048 (8192: −28 % tokens per round);
+  - L2 prefetch into inter-GEMM windows (within noise).
+
+`ops/autoresearch/` is a snapshot of the operator scripts used for this segment.
+They are run from `/tmp`: copy them back there, `invariance.py` to
+`/tmp/kernel-work/Invariance/` and `kernel_trace.py` to `/tmp/kernel-work/KernelTrace/`.
+- `mkcand.py` and `gpu-window.sh` precreate and run guarded GPU windows around the
+  retained guardian.
+- `build-one.sh` builds a candidate from the committed series plus extra patches.
+- `ar-serve.sh` and `ar-when-built.sh` open the timing window for `bash autoresearch.sh`.
+- `gpu-inv.sh` and `inv-compare.py` run the invariance gate.
+- `ar-energy.py` and `step-report.py` give per-call tok/J and step efficiency.
+
+Launch every script that owns a GPU window through `detach.sh`. A caller that is
+killed mid-window leaves the guardian dead, and its library then refuses recovery.
+In that case restore by hand, as the guardian would: stop the candidate, start
+container `b5e51bc1…`, and require an authenticated `GET /v1/models` of 200.
