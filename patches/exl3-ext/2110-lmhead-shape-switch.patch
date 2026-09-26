@@ -1,0 +1,65 @@
+--- a/exllamav3_ext/quant/exl3_gemm.cu
++++ b/exllamav3_ext/quant/exl3_gemm.cu
+@@ -14,6 +14,8 @@
+ #include "exl3_gemv_int8.cuh"
+ #include "coop_autotune.cuh"
+ #include <set>
++#include <cstdlib>
++#include <cstring>
+ #include <vector>
+ 
+ int exl3_gemm_tilesize_k_g[] = {EXL3_GEMM_TILESIZE_K};
+@@ -121,6 +123,20 @@
+     return h;
+ }
+ 
++int exl3_lmhead_shape(int set)
++{
++    static int value = []
++    {
++        const char* env = std::getenv("EXL3_LMHEAD_SHAPE");
++        if (!env || !env[0] || !strcmp(env, "auto")) return 0;
++        TORCH_CHECK(!strcmp(env, "2") || !strcmp(env, "3"), "exl3_gemm: EXL3_LMHEAD_SHAPE must be auto, 2 or 3, got '", env, "'");
++        return env[0] - '0';
++    }();
++    TORCH_CHECK(set < 0 || set == 0 || set == 2 || set == 3, "exl3_lmhead_shape: set must be 0 (auto), 2, 3 or < 0 (read)");
++    if (set >= 0) value = set;
++    return value;
++}
++
+ int exl3_gemm_gr
+ (
+     const at::Tensor& A,
+@@ -247,6 +263,15 @@
+             cuda_check(cudaPeekAtLastError());
+             return 90;
+         }
++    }
++
++    // ext 2110 (experiment): EXL3_LMHEAD_SHAPE = auto | 2 | 3 forces the 512-thread shape 2 / 3 for the 6-bit
++    // target lm_head GEMM (the only 6-bit dense GEMM with n >= 65536) instead of the autotuned shape; numerics change
++    // (different split-K fold order), deterministic. Read once; anything else is an error.
++    if (force_shape_idx <= 0 && force_num_sms <= 0 && K == 6 && size_n >= 65536)
++    {
++        const int ls = exl3_lmhead_shape(-1);
++        if (ls > 0) force_shape_idx = ls;
+     }
+ 
+     bool autotune = force_shape_idx <= 0 && force_num_sms <= 0;
+--- /dev/null
++++ b/exllamav3_ext/quant/exl3_lmhead_shape_op.cpp
+@@ -0,0 +1,14 @@
++#include <torch/library.h>
++
++int exl3_lmhead_shape(int set);   // exl3_gemm.cu (ext 2110)
++
++// torch.ops.exl3_lmhead.shape(set) -> forced lm_head GEMM shape (0 = auto, 2, 3); set < 0 only reads
++static int64_t exl3_lmhead_shape_op(int64_t set)
++{
++    return exl3_lmhead_shape((int) set);
++}
++
++TORCH_LIBRARY(exl3_lmhead, m)
++{
++    m.def("shape", &exl3_lmhead_shape_op);
++}
