@@ -54,10 +54,10 @@
   "acceptor": {
     "root": "/opt/qwen/bend-exl3",
     "files": {
-      "libexl3_accept.so": "af90c7314c50101f51f6c141d86efd49b764c89a5208ea7b37072264e4b2f6e5",
+      "libexl3_accept.so": "4ff575845c90bac2ff391c3a796d8bdd714341aae4689159fb3ff6379325551c",
       "exl3_accept_table.txt": "7c84bd88fbd6ad01b0872e2516e24f44029bfc3f48c50978d6ca86ad93085d63",
-      "exl3_bend_accept.py": "1b49a21ee52854ccfb5012ee898540c3aeddad8dda3a4c27c4c3996bac9ec980",
-      "identity.json": "4f82bab6e6763b8f693f3b7016df662b21c30f45185948ddee43bbdddd4dbf85"
+      "exl3_bend_accept.py": "129b8b4b06d44cb86e5fac0eb47da545efc01fa306957eb3ce758dc3fa314c02",
+      "identity.json": "763798bd07b21424165d8afccbb71d35561d3e978572570b1891a685fde1ee75"
     }
   }
 }
