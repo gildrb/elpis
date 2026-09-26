@@ -130,22 +130,25 @@ reasoning and final content remain separate channels.
 
 ## Current persistent live deployment
 
-The current authenticated promotion is `qwen-exl3-serving-3`, container
-`288862e7573f5dec9abb9ecc06bb2d144c9926c1f8fb972efafcadf1fa0a235a`, with image
-`sha256:c3e161ab89c8ca459dba8294764588cd2b4374b2b48e34578c81e8b2f11a2971` (cs10,
-variant `candidate-ext`: the #58/#60 stack of `docs/benchmarks.md` §6). The canonical
-tag `qwen-inference:exl3` identifies this image and `qwen-inference:exl3-previous` the
-retained previous image `sha256:fca4c263b6ba5c049f6f670f657798af6f1f6b630d1db94353a07604506606eb`.
+The current authenticated promotion is `qwen-exl3-serving-4`, container
+`22154417d27bc0ce2455d3f60ff1e3743dd7c40aca8ef0f502450a2463ffa945`, with image
+`sha256:a8753e49905df860fc8537c01f402f513768d7e3f6c0dc9ee1ba6cbe488c8fdc` (cs11,
+variant `candidate-ext`: the #61 stack of `docs/benchmarks.md` §6, cs10 plus the 5108
+commit-replay gather and the one-pack acceptor loader). The canonical tag
+`qwen-inference:exl3` identifies this image and `qwen-inference:exl3-previous` the
+retained previous image `sha256:c3e161ab89c8ca459dba8294764588cd2b4374b2b48e34578c81e8b2f11a2971` (cs10).
 The persistent configuration is
-`/mnt/ssd/storage/ai/qwen3.8-27b/exl3-serving-3/compose.json` (Compose project
-`eta-exl3-serving-3`, network `eta_default`), alongside unchanged copies of
+`/mnt/ssd/storage/ai/qwen3.8-27b/exl3-serving-4/compose.json` (Compose project
+`eta-exl3-serving-4`, network `eta_default`), alongside unchanged copies of
 `launch-gate.py`, `recovery.py` and `operate.py` and its promoted `cutover-window-1/`.
 It sequentially reuses `/mnt/ssd/storage/ai/qwen3.8-27b/exl3-serving-1/cache`; preserve
 the old state. Promotions are made by `/tmp/eta-promote.sh TAG IMAGE` (operator
 tooling outside the repo), which replays the serving-2 guardian procedure below with
-automatic guardian rollback. The previous `qwen-exl3-serving-2` (container
+automatic guardian rollback. The previous `qwen-exl3-serving-3` (container
+`288862e7573f5dec9abb9ecc06bb2d144c9926c1f8fb972efafcadf1fa0a235a`, image cs10, network
+`eta_default`) and `qwen-exl3-serving-2` (container
 `b5e51bc1f6ac85b1b2af8db3612ff300190145397bb48b31e4cb7bf0f2d30f28`, network
-`litos_default`) is stopped and retained; its promoted window still admits it for
+`litos_default`) are stopped and retained; their promoted windows still admit them for
 rollback, so keep `litos_default` while any retained container uses it.
 
 The original cutover promoted `qwen-exl3-serving-1`, container
@@ -167,7 +170,7 @@ replace the gate with a direct launch, or start a competing root Compose/Nix
 service. Future maintenance must use the retained deployment and its approved
 ownership procedure. Restart configuration is not a demonstrated cold-boot test.
 
-Current private evidence is in `exl3-serving-3/evidence/` under the state root:
+Current private evidence is in `exl3-serving-4/evidence/` under the state root:
 `main-verification.json`, `promotion-receipt.json`, `cutover-receipt.json`,
 `endpoint-smoke.json`, `live-tool-smoke.json`, `hermes-real-tool-turns.json`,
 `omp-smoke.jsonl`, `installed-exl3-server.py`, `guardian.log` and `thermal.csv`. The
