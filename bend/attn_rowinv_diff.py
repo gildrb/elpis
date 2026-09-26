@@ -36,7 +36,7 @@ import textwrap
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
-BEND = "/nix/store/38r13iri36f1bpbvwy8kpi1fc058j07z-bend-2.0.28/bin/bend"
+BEND = "/nix/store/8inj4v2ng19vgmff7k73mvhddlpy25cc-bend-2.0.29/bin/bend"
 TABLE = "bend/ATTN_ROWINV_TABLE.bend"
 # pristine engine + committed ext series (through 3005)
 TRITON_PAGED_SHA256 = "12896d430c94639ec4157a967f1635cc4a0dcc2198294d6349a9a2749ed9623e"

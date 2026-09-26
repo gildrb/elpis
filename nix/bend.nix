@@ -3,17 +3,17 @@
 let
   buildHelper = ../bend/build_toolchain.py;
   source = pkgs.fetchurl {
-    url = "https://codeload.github.com/bendlang/bend/tar.gz/bc178404f4778704fa5584a73fcdf72bcdf9f32c";
-    sha256 = "46a3d5c518f3571399ef233d2209bf95d9be382e3ba56f60cadd960c16be2ab4";
+    url = "https://codeload.github.com/bendlang/bend/tar.gz/c8691aa93b0b1bb2fda277d9fc88c5aa797e88de";
+    sha256 = "1e5006bff6cdf9f03b2e60f33c45ed1d91fa9dbbd633466c9f22e48880f9351a";
   };
 in
 pkgs.stdenv.mkDerivation {
   pname = "bend";
-  version = "2.0.28";
+  version = "2.0.29";
 
   src = pkgs.fetchurl {
-    url = "https://github.com/bendlang/bend/releases/download/v2.0.28/bend-2.0.28-linux-x64.tar.gz";
-    sha256 = "22bb6d5f6bce8ae2c5b340371fedddcbd90edc07a48b6e2b351a944c4558a3eb";
+    url = "https://github.com/bendlang/bend/releases/download/v2.0.29/bend-2.0.29-linux-x64.tar.gz";
+    sha256 = "e0ff4fa44581b42f6024d2a1128e7e518219a502cb726030c714a5c23d61726e";
   };
   inherit source;
   dontUnpack = true;
@@ -56,7 +56,7 @@ pkgs.stdenv.mkDerivation {
 
 
   meta = {
-    description = "Unmodified Bend 2.0.28 release checker/compiler and Base";
+    description = "Unmodified Bend 2.0.29 release checker/compiler and Base";
     homepage = "https://github.com/bendlang/bend";
     license = pkgs.lib.licenses.asl20;
     platforms = [ "x86_64-linux" ];

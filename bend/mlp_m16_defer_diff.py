@@ -26,7 +26,7 @@ import sys
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
-BEND = "/nix/store/38r13iri36f1bpbvwy8kpi1fc058j07z-bend-2.0.28/bin/bend"
+BEND = "/nix/store/8inj4v2ng19vgmff7k73mvhddlpy25cc-bend-2.0.29/bin/bend"
 G, KT1, PF = 164, 5120 // 16, 8
 
 BLOCK = """            if (!{P}.defer_pub)

@@ -32,7 +32,7 @@ from pathlib import Path
 from typing import NoReturn
 
 HERE = Path(__file__).resolve().parent
-BEND = "/nix/store/38r13iri36f1bpbvwy8kpi1fc058j07z-bend-2.0.28/bin/bend"
+BEND = "/nix/store/8inj4v2ng19vgmff7k73mvhddlpy25cc-bend-2.0.29/bin/bend"
 LOCK = ["flock", "-s", "/tmp/eta-gpu.lock", "nice", "-n", "19"]
 PINS = {  # post-images: 0005 scratch manifest (dflash.py), repo exl3-ext.json (the others)
     "architecture/dflash.py": "a5c8ee679f8abc8ba464ad2fef71a74a9c502e3b4320b391b982428967999eaf",

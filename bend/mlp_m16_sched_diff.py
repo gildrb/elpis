@@ -19,7 +19,7 @@ import sys
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
-BEND = "/nix/store/38r13iri36f1bpbvwy8kpi1fc058j07z-bend-2.0.28/bin/bend"
+BEND = "/nix/store/8inj4v2ng19vgmff7k73mvhddlpy25cc-bend-2.0.29/bin/bend"
 TABLE = "bend/MLP_M16_SCHED_TABLE.bend"
 DEFAULT_REFERENCE = "/tmp/kernel-work/PersistMLP/gen_table.py"
 
