@@ -129,3 +129,7 @@ import ./bend/m16_diet_laws.bend as M16DietLaws
 # trace; every word read stays in its ring slot and, in every iteration of the 8201 / tail / m16g traces, in the ring;
 # EXL3_M16_DIET parses to 0 / 1 / 2 (default 2, else refused), diet(x) keeps 0..2, launchers run instance DIET = mode.
 import ./bend/m16_diet2_laws.bend as M16Diet2Laws
+# ext 5108 commit-replay input gather (bend/gdn_replay_gather.bend): the batched 16-byte loader stores exactly the k / v
+# cells RULE_COMMIT reads (each once, every S <= 16, every v chunk), from the conv_out elements the old loader read, widened
+# to the same fp32 bits; EXL3_GDN_REPLAY_GATHER parses 0 / 1 (default 1, else refused).
+import ./bend/gdn_replay_gather_laws.bend as GdnReplayGatherLaws

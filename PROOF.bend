@@ -34,3 +34,4 @@ import ./bend/pattn_sched_proof.bend as PattnSchedProof
 import ./bend/hgemm_wide_proof.bend as HgemmWideProof
 import ./bend/m16_diet_proof.bend as M16DietProof
 import ./bend/m16_diet2_proof.bend as M16Diet2Proof
+import ./bend/gdn_replay_gather_proof.bend as GdnReplayGatherProof

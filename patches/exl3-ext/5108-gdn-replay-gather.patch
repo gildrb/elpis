@@ -1,0 +1,200 @@
+--- a/exllamav3_ext/gdn.cu
++++ b/exllamav3_ext/gdn.cu
+@@ -2818,8 +2818,17 @@
+     const int warp = threadIdx.x / 32;
+     const int lane = threadIdx.x % 32;
+ 
+-    for (int task = warp; task < 2 * S; task += THREADS / 32)
+-        gdn_rule_l2norm_warp((task & 1 ? m.k : m.q) + (task >> 1) * 128, lane);
++    // RULE_COMMIT reads no q (v_out is dead): only k is normalized (ext 5108; same routine per row)
++    if constexpr (MODE == RULE_COMMIT)
++    {
++        for (int task = warp; task < S; task += THREADS / 32)
++            gdn_rule_l2norm_warp(m.k + task * 128, lane);
++    }
++    else
++    {
++        for (int task = warp; task < 2 * S; task += THREADS / 32)
++            gdn_rule_l2norm_warp((task & 1 ? m.k : m.q) + (task >> 1) * 128, lane);
++    }
+     __syncthreads();
+ 
+     for (int s = 0; s < S; ++s)
+@@ -4048,11 +4057,19 @@
+ // verified tokens of batch row `row` from the pre-verify state in row 0 through
+ // gdn_rule_tokens<RULE_COMMIT> -- the routine the verify ran, so the stored state is the verify's
+ // in-register state after `steps` tokens -- reading the verify's own conv output / g / beta, and
+-// writes it back to row 0. Block (v chunk of 32 columns, head, job), 128 threads
++// writes it back to row 0. Block (v chunk of 32 columns, head, job), 128 threads.
++// ext 5108 (GATHER): the inputs the commit reads -- k of the head's k head (128 wide) and this block's
++// 32 v columns, per token -- as 16-byte loads, all issued before the first use (REPLAY_GI per
++// thread), instead of gdn_rule_load_inputs' 3 S dependent 2-byte load/store rounds per thread, which
++// also gathered the unused q. Same bf16 values widened exactly, same smem layout; q stays unwritten
++// (RULE_COMMIT never reads it). GATHER false = the pre-5108 loader (A/B: EXL3_GDN_REPLAY_GATHER=0)
++#define REPLAY_PARTS 20                                     // 16 k + 4 v uint4 per token
++#define REPLAY_GI ((GR_MAX_S * REPLAY_PARTS + 127) / 128)
+ struct StateReplayJobBatch { StateReplayJob jobs[REWIND_MAX_JOBS]; int num_jobs; };
+ static_assert(sizeof(StateReplayJobBatch) <= 4096, "StateReplayJobBatch exceeds the kernel parameter limit");
+ 
+-__global__ __launch_bounds__(128)
++template <bool GATHER>
++__global__ __launch_bounds__(128, 8)                         // 64 registers: 8 CTAs/SM as before 5108
+ void batched_state_replay_kernel(StateReplayJobBatch batch)
+ {
+     int job_idx = blockIdx.z;
+@@ -4073,23 +4090,85 @@
+     float state[32];
+     gdn_rule_load_state(state, head_state, th);
+ 
+-    gdn_rule_load_inputs<128>
+-    (
+-        m,
+-        (const bfloat16*) j.mixed_qkv + row_tokens * F,
+-        (const float*) j.g + row_tokens * H,
+-        (const bfloat16*) j.beta + row_tokens * H,
+-        j.steps, F, j.num_k_heads, H, h
+-    );
++    if constexpr (GATHER)
++    {
++        const int S = j.steps;
++        const int kh = h / (H / j.num_k_heads);
++        const bfloat16* src = (const bfloat16*) j.mixed_qkv + row_tokens * F;
++        const int k_ch = (j.num_k_heads + kh) * HD;
++        const int v_ch = 2 * j.num_k_heads * HD + h * HD + blockIdx.x * 32;
++        uint4 r[REPLAY_GI];
++        #pragma unroll
++        for (int i = 0; i < REPLAY_GI; ++i)
++        {
++            const int e = threadIdx.x + i * 128;
++            if (e < S * REPLAY_PARTS)
++            {
++                const int s = e / REPLAY_PARTS;
++                const int p = e - s * REPLAY_PARTS;
++                const int ch = p < 16 ? k_ch + p * 8 : v_ch + (p - 16) * 8;
++                r[i] = *(const uint4*) (src + (size_t) s * F + ch);
++            }
++        }
++        const float* g_row = (const float*) j.g + row_tokens * H;
++        const bfloat16* beta_row = (const bfloat16*) j.beta + row_tokens * H;
++        for (int s = threadIdx.x; s < S; s += 128)
++            gdn_rule_scalars(g_row[(size_t) s * H + h], beta_row[(size_t) s * H + h], m.gexp[s], m.beta[s]);
++        #pragma unroll
++        for (int i = 0; i < REPLAY_GI; ++i)
++        {
++            const int e = threadIdx.x + i * 128;
++            if (e < S * REPLAY_PARTS)
++            {
++                const int s = e / REPLAY_PARTS;
++                const int p = e - s * REPLAY_PARTS;
++                float* dst = p < 16 ? m.k + s * HD + p * 8 : m.v + s * HD + blockIdx.x * 32 + (p - 16) * 8;
++                const uint32_t w[4] = { r[i].x, r[i].y, r[i].z, r[i].w };
++                float4 lo, hi;
++                lo.x = __uint_as_float(w[0] << 16); lo.y = __uint_as_float(w[0] & 0xffff0000u);
++                lo.z = __uint_as_float(w[1] << 16); lo.w = __uint_as_float(w[1] & 0xffff0000u);
++                hi.x = __uint_as_float(w[2] << 16); hi.y = __uint_as_float(w[2] & 0xffff0000u);
++                hi.z = __uint_as_float(w[3] << 16); hi.w = __uint_as_float(w[3] & 0xffff0000u);
++                ((float4*) dst)[0] = lo;
++                ((float4*) dst)[1] = hi;
++            }
++        }
++    }
++    else
++    {
++        gdn_rule_load_inputs<128>
++        (
++            m,
++            (const bfloat16*) j.mixed_qkv + row_tokens * F,
++            (const float*) j.g + row_tokens * H,
++            (const bfloat16*) j.beta + row_tokens * H,
++            j.steps, F, j.num_k_heads, H, h
++        );
++    }
+     __syncthreads();
+ 
+     gdn_rule_tokens<RULE_COMMIT, 1>(state, m, j.steps, th, 0.0f);
+     gdn_rule_store_state(state, head_state, th);
+ }
+ 
++// ext 5108: EXL3_GDN_REPLAY_GATHER (0 or 1, default 1; anything else is an error), read once
++int gdn_replay_gather(int set)
++{
++    static int value = []
++    {
++        const char* env = std::getenv("EXL3_GDN_REPLAY_GATHER");
++        if (!env) return 1;
++        TORCH_CHECK((env[0] == '0' || env[0] == '1') && env[1] == '\0', "EXL3_GDN_REPLAY_GATHER must be 0 or 1");
++        return env[0] - '0';
++    }();
++    if (set >= 0) value = set ? 1 : 0;
++    return value;
++}
++
+ void batched_state_replay(std::vector<StateReplayJob> const& jobs, int device_index)
+ {
+     if (jobs.empty()) return;
++    const bool gather = gdn_replay_gather(-1) != 0;
+     c10::cuda::CUDAGuard device_guard((c10::DeviceIndex) device_index);
+     cudaStream_t stream = at::cuda::getCurrentCUDAStream().stream();
+ 
+@@ -4108,15 +4187,19 @@
+                         "batched_state_replay: steps must be in 1..seqlen, seqlen <= 16");
+             TORCH_CHECK(j.num_k_heads >= 1 && j.num_v_heads % j.num_k_heads == 0 && j.num_v_heads <= 65535,
+                         "batched_state_replay: bad head counts");
++            // 5108 gather: 16-byte loads of conv_out rows (F and the channel offsets are multiples of 8)
++            TORCH_CHECK(!gather || ((j.mixed_qkv % 16) == 0 && ((2 * 128 * j.num_k_heads + 128 * j.num_v_heads) % 8) == 0),
++                        "batched_state_replay: conv_out must be 16-byte aligned for the 5108 gather");
+             batch.jobs[i] = j;
+             max_heads = MAX(max_heads, j.num_v_heads);
+             max_steps = MAX(max_steps, j.steps);
+         }
+ 
+-        gdn_max_shared_carveout((const void*) &batched_state_replay_kernel);
+-        gdn_rule_smem_optin((const void*) &batched_state_replay_kernel, gdn_rule_smem_bytes(GR_MAX_S, false, 0));
++        auto kernel = gather ? &batched_state_replay_kernel<true> : &batched_state_replay_kernel<false>;
++        gdn_max_shared_carveout((const void*) kernel);
++        gdn_rule_smem_optin((const void*) kernel, gdn_rule_smem_bytes(GR_MAX_S, false, 0));
+         dim3 blocks(128 / 32, max_heads, n);
+-        batched_state_replay_kernel<<<blocks, 128, gdn_rule_smem_bytes(max_steps, false, 0), stream>>>(batch);
++        kernel<<<blocks, 128, gdn_rule_smem_bytes(max_steps, false, 0), stream>>>(batch);
+         cuda_check(cudaPeekAtLastError());
+     }
+ }
+--- a/exllamav3_ext/gdn.cuh
++++ b/exllamav3_ext/gdn.cuh
+@@ -397,3 +397,6 @@
+ void batched_conv_rewind(std::vector<ConvRewindJob> const& jobs, int device_index);
+ void batched_state_rewind(std::vector<StateRewindJob> const& jobs, int device_index);
+ void batched_state_replay(std::vector<StateReplayJob> const& jobs, int device_index);
++// ext 5108: input loader of batched_state_replay (1 batched 16-byte gather, 0 the pre-5108 loader);
++// EXL3_GDN_REPLAY_GATHER or the last set >= 0, read at every launch. Returns the value in use
++int gdn_replay_gather(int set);
+--- a/exllamav3_ext/gdn_ba_ksplit_op.cpp
++++ b/exllamav3_ext/gdn_ba_ksplit_op.cpp
+@@ -7,6 +7,8 @@
+ // untouched. Same launcher as BC_GatedDeltaNetSplit's replay_verify path, no graph sites:
+ //   torch.ops.exl3_gdn.ba_ksplit(set) -> b/a GEMV variant used by later launches/captures (set < 0
+ //       only reads; default EXL3_GDN_BA_KSPLIT or the production value)
++//   torch.ops.exl3_gdn.replay_gather(set) -> ext 5108 loader of batched_state_replay (1 gather, 0 old;
++//       set < 0 only reads; default EXL3_GDN_REPLAY_GATHER or 1)
+ //   torch.ops.exl3_gdn.conv_rule_norm(x, ba_w, ba_bias?, ba, qkv, dt_bias, a_log, beta, g, beta_scale,
+ //       conv_state, slots, conv_weight, conv_bias?, conv_out, recurrent_state, num_k_heads,
+ //       num_v_heads, norm_w, gate, y, epsilon, constant_bias, gate_act, conv_sync, ksplit,
+@@ -16,6 +18,11 @@
+ static int64_t gdn_ba_ksplit_op(int64_t set)
+ {
+     return gdn_ba_ksplit((int) set);
++}
++
++static int64_t gdn_replay_gather_op(int64_t set)
++{
++    return gdn_replay_gather((int) set);
+ }
+ 
+ static unsigned long long* stamp_ptr(const c10::optional<at::Tensor>& t, int64_t need, const at::Tensor& like)
+@@ -72,5 +79,6 @@
+ TORCH_LIBRARY(exl3_gdn, m)
+ {
+     m.def("ba_ksplit", &gdn_ba_ksplit_op);
++    m.def("replay_gather", &gdn_replay_gather_op);   // ext 5108 A/B knob (set < 0 reads)
+     m.def("conv_rule_norm", &gdn_conv_rule_norm_op);
+ }

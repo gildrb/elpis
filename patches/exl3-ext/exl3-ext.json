@@ -16,7 +16,7 @@
     "path": "/opt/venv/lib/python3.13/site-packages/exllamav3_ext.cpython-313-x86_64-linux-gnu.so",
     "base_sha256": "6d30690fdb76b3c4ad3fb5e69f0479707e410fc9b6194e2a5e32f4d7fe1fd8b3"
   },
-  "series_sha256": "247c55925c542c4209e2b8c02ad6167e410ff6174ac54e8b578fa9ca7d9c1748",
+  "series_sha256": "186c5ca3bff614cb84550285b6914512b6baeaa140af913b399d4bb3d3f52434",
   "patches": [
     {
       "name": "0001-gdn-shared-carveout.patch",
@@ -137,6 +137,10 @@
     {
       "name": "2107-m16-decode-diet-on2106.patch",
       "sha256": "0584196dab3f0cdd2e255d383dfd23c6a76c10ec7c3c151fabcbd9418c1b2ae9"
+    },
+    {
+      "name": "5108-gdn-replay-gather.patch",
+      "sha256": "50f95a473212df078b6cfc8a0f85aa0c165209796ed3bceb53a1102fc7986f76"
     }
   ],
   "files": {
@@ -186,15 +190,15 @@
     },
     "exllamav3_ext/gdn.cu": {
       "pre": "a06effe57ac621eea19d908796b4848135f675438d5b3eedbd3c4e67d336eaf0",
-      "post": "cce51b97fbbca664fd24a5bb6a6c7ca331b6fe184bb351fb11186c09f29e2d71"
+      "post": "96bdf24c5f7895e62c913e9393c5a82164f2ac9409e27ce95e373ba6f8af7be7"
     },
     "exllamav3_ext/gdn.cuh": {
       "pre": "c64e35c29d7ebc40b7b10b64d4015dff7a5ab1409865f7ebf8cd38a903ab05fd",
-      "post": "8f225ec744a5f086cb77fdfe7d21f50eb1c00b9b2f8acbf03ed602f9fb6527df"
+      "post": "2f003a213d829f91598d6705cc6aeb1c00ea1df648f6003ab19ffed6710ff0ee"
     },
     "exllamav3_ext/gdn_ba_ksplit_op.cpp": {
       "pre": null,
-      "post": "6f222e6cf86cbf24b255567c84d665d3bbcb9ef5a7396361d20d803af21faf1b"
+      "post": "8fb049dcdf6022648c637eac66adf6d9e888ab6db0dc5fc34d0c5041ec757609"
     },
     "exllamav3_ext/graph.cu": {
       "pre": "8e57b2f599df4df9ac7cdd06dd7e175d511e5780b59e9b6f3570c3476f0a7901",

@@ -484,6 +484,17 @@ every weight tile issued once) and
 `bend/m16_diet2*` (2107: permute extraction equals the shift reference for every offset;
 hoisted load addresses equal the per-iteration ones).
 
+5108 (cs11, #61: 109.65 vs #60's 107.03) rewrites the commit replay's input loader: 16-byte
+gathers of only the k and v elements the commit reads, instead of 3S dependent 2-byte loads
+per thread that also fetched the unused q. Bit-exact (48-layer state hashes at 1-8 steps,
+e2e ids). The replay kernel goes from 620 to 402 µs at 8 committed tokens and 490 to
+396 µs at 5; it is unchanged at 3 or fewer. `bend/gdn_replay_gather*` proves, about its
+Bend model, that the loader stores exactly the cells the commit reads, each once, from the
+same conv_out elements, widened to the same fp32 bits, and that EXL3_GDN_REPLAY_GATHER
+parses as 0 or 1 (default 1). `bend/gdn_replay_gather_diff.py` checks that the kernel
+source still contains the 18 transcribed expressions (conformance of the transcription,
+not a proof of the CUDA code).
+
 **GPU clocks at 250 W.** Core clock offsets do nothing here: the card already runs at the
 bottom of its voltage curve (+75/+150 MHz: no change; +225 MHz: Xid 109 fault). A lower
 memory clock moves watts to the SMs: −1000 MHz cut the round by 0.77-0.90 ms (~2.3 %),
