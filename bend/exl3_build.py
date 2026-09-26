@@ -51,7 +51,20 @@ BEND_SOURCES = tuple(name for name in SOURCES if name.endswith(".bend"))
 LOADER = "bend/exl3_bend_accept.py"
 GLUE = "bend/exl3_accept_glue.c"
 PROGRAM_FLAGS = ("-std=c11", "-O2")
-LIBRARY_FLAGS = ("-std=c11", "-O2", "-fPIC", "-shared", "-fvisibility=hidden")
+# The library exports only eta_exl3_accept: section GC drops the unreachable
+# Bend runtime (IO loop, thread pool, the 1 MiB effect table) that the
+# emitted program carries for its own main, and --as-needed its libraries.
+LIBRARY_FLAGS = (
+    "-std=c11",
+    "-O2",
+    "-fPIC",
+    "-shared",
+    "-fvisibility=hidden",
+    "-ffunction-sections",
+    "-fdata-sections",
+    "-Wl,--gc-sections",
+    "-Wl,--as-needed",
+)
 LINK_FLAGS = ("-lpthread", "-lm")
 # The nix cc wrapper otherwise records build-shell paths as RUNPATH.
 LIBRARY_ENVIRONMENT = {"NIX_DONT_SET_RPATH_x86_64_unknown_linux_gnu": "1"}

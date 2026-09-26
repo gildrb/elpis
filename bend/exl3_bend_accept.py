@@ -9,7 +9,13 @@ printed by the Bend reference program bend/EXL3_ACCEPT_SPEC.bend, this file and
 identity.json. admit() verifies every file hash and the identity digest, loads
 the library, renders the complete finite differential table through the
 loaded leaf and requires it to equal the pinned reference table byte for
-byte. Any failure raises ValueError; there is no fallback implementation.
+byte, then probes the domain edges: the edge call must succeed and every call
+just outside the domain must raise. Any failure raises ValueError; there is
+no fallback implementation.
+
+Each call packs all 23 cells with one precompiled struct layout and calls the
+exported glue once with the GIL held. The glue alone validates the domain;
+this loader checks only the lengths it needs to choose the layout.
 
 Proved in Bend (bend/exl3_accept_proof.bend): the leaf equals the list
 reference for every input. Bridged by this finite differential only: the
@@ -21,6 +27,7 @@ from __future__ import annotations
 import ctypes
 import hashlib
 import json
+import struct
 import sys
 from collections.abc import Callable, Sequence
 from pathlib import Path
@@ -110,13 +117,40 @@ def render(accept: Accept) -> str:
     return "\n".join(lines) + "\n"
 
 
+def layout(k: int, stops: int) -> struct.Struct:
+    """Cells for k proposals and `stops` stop ids; unused registers are zero."""
+    return struct.Struct(
+        f"=4q{stops}q{8 * (MAX_STOPS - stops)}x{k + 1}q"
+        f"{8 * (MAX_PROPOSALS - k)}x{k}q{8 * (MAX_PROPOSALS - k)}x"
+    )
+
+
+# One precompiled cell layout per (k, stop count); index [k][stops].
+LAYOUTS = tuple(
+    tuple(layout(k, stops) for stops in range(MAX_STOPS + 1)) if k else ()
+    for k in range(MAX_PROPOSALS + 1)
+)
+# The glue validates every cell; its error codes, in its checking order.
+REJECTIONS = {
+    -1: f"proposal count outside 1..{MAX_PROPOSALS}",
+    -2: f"stop id count exceeds {MAX_STOPS}",
+    -3: f"budget outside 1..{BUDGET_LIMIT}",
+    -4: "checkpoint outside 0..k",
+    -5: "stop, verify or proposal id outside 0..2^32-1",
+    -6: "leaf failed or returned a verdict outside 1..k+1",
+}
+
+
 class Acceptor:
     """One loaded, admitted leaf. Reuses one buffer: call from one thread only."""
 
     def __init__(self, library: Path) -> None:
-        handle = ctypes.CDLL(str(library), mode=ctypes.RTLD_LOCAL)
+        # PyDLL keeps the GIL across the call: the leaf is a few nanoseconds of
+        # pure C, so releasing and reacquiring the GIL would only add latency.
+        handle = ctypes.PyDLL(str(library), mode=ctypes.RTLD_LOCAL)
         function = handle.eta_exl3_accept
-        function.argtypes = [ctypes.POINTER(ctypes.c_int64)]
+        # No argtypes: the only argument is always self._cells, an int64[23]
+        # ctypes array, which ctypes passes by address without a converter.
         function.restype = ctypes.c_int32
         self._handle = handle
         self._function = function
@@ -139,28 +173,19 @@ class Acceptor:
             raise fail(f"{len(verify_ids)} verify ids for {k} proposals")
         if stops > MAX_STOPS:
             raise fail(f"{stops} stop ids exceed {MAX_STOPS}")
-        if not 1 <= budget <= BUDGET_LIMIT:
-            raise fail(f"budget {budget} outside 1..{BUDGET_LIMIT}")
-        if not 0 <= checkpoint <= k:
-            raise fail(f"checkpoint {checkpoint} outside 0..{k}")
-        # ctypes wraps out-of-range integers silently; bound ids before storing.
-        if min(verify_ids) < 0 or max(verify_ids) >= ID_LIMIT:
-            raise fail("verify id outside 0..2^32-1")
-        if min(proposals) < 0 or max(proposals) >= ID_LIMIT:
-            raise fail("proposal id outside 0..2^32-1")
-        if stops and (min(stop_ids) < 0 or max(stop_ids) >= ID_LIMIT):
-            raise fail("stop id outside 0..2^32-1")
-        cells = self._cells
-        cells[0] = k
-        cells[1] = budget
-        cells[2] = checkpoint
-        cells[3] = stops
-        cells[4 : 4 + stops] = stop_ids
-        cells[8 : 9 + k] = verify_ids
-        cells[16 : 16 + k] = proposals
-        result = int(self._function(cells))
+        # One pack writes every cell. struct rejects non-integers and values
+        # outside int64 (ctypes stores would wrap them silently); the glue
+        # rejects every other out-of-domain budget, checkpoint or id.
+        try:
+            LAYOUTS[k][stops].pack_into(
+                self._cells, 0, k, budget, checkpoint, stops,
+                *stop_ids, *verify_ids, *proposals,
+            )
+        except (struct.error, TypeError, OverflowError) as error:
+            raise fail(f"argument is not a 64-bit integer: {error}") from None
+        result = self._function(self._cells)
         if result < 2:
-            raise fail(f"leaf rejected the call with code {result}")
+            raise fail(REJECTIONS.get(result, f"leaf returned code {result}"))
         return result >> 1, bool(result & 1)
 
 
@@ -199,6 +224,37 @@ def verify_files(directory: Path, identity: dict[str, object]) -> None:
         raise fail("running loader differs from the admitted loader")
 
 
+def domain(accept: Callable[..., tuple[int, bool]]) -> None:
+    """The loaded call accepts the domain's edges and rejects just past them."""
+    top = ID_LIMIT - 1
+    if accept([top] * 8, [top] * 7, (0, 1, 2, 3), BUDGET_LIMIT, 7) != (7, False):
+        raise fail("leaf rejects or misjudges the domain's upper edges")
+    ids, window = [0] * 8, [0] * 7
+    outside: list[tuple[object, ...]] = [
+        ([0], [], (), 1, 0),
+        ([0] * 9, [0] * 8, (), 1, 0),
+        ([0] * 7, window, (), 1, 0),
+        (ids, window, (0,) * 5, 1, 0),
+        (ids, window, (), 0, 0),
+        (ids, window, (), BUDGET_LIMIT + 1, 0),
+        (ids, window, (), 1 << 63, 0),
+        (ids, window, (), 1, -1),
+        (ids, window, (), 1, 8),
+        (ids, window, (ID_LIMIT,), 1, 0),
+        (ids, window, (-1,), 1, 0),
+        ([0] * 7 + [ID_LIMIT], window, (), 1, 0),
+        ([0] * 7 + [1 << 64], window, (), 1, 0),
+        (ids, [0] * 6 + [-1], (), 1, 0),
+        (ids, [0] * 6 + [1.0], (), 1, 0),
+    ]
+    for arguments in outside:
+        try:
+            accept(*arguments)
+        except ValueError:
+            continue
+        raise fail(f"leaf accepted out-of-domain call {arguments!r}")
+
+
 def admit(directory: str | Path) -> Acceptor:
     """Verify, load and differentially admit the leaf; raise ValueError on any failure."""
     root = Path(directory).resolve(strict=True)
@@ -208,6 +264,7 @@ def admit(directory: str | Path) -> Acceptor:
     rendered = render(acceptor.accept).encode("ascii")
     if rendered != (root / TABLE_NAME).read_bytes() or digest(rendered) != TABLE_SHA256:
         raise fail("loaded leaf disagrees with the Bend reference table")
+    domain(acceptor.accept)
     return acceptor
 
 
