@@ -4,13 +4,14 @@
 Standard library plus the prepared evaluator's ``tokenizers`` wheel only. Every
 record is exclusive-create canonical JSON. Nothing here starts, stops, flushes
 or reconfigures the serving container: identity uses Docker metadata, one
-read-only in-container hashing probe, authenticated GET routes and a host
-``nvidia-smi`` query. Generation requests are the measured workloads only.
+read-only in-container hashing probe, authenticated GET routes, a host
+``nvidia-smi`` query and a read-only NVML clock-offset query.
 """
 
 from __future__ import annotations
 
 import csv
+import ctypes
 import hashlib
 import http.client
 import json
@@ -46,6 +47,13 @@ BEND_IDENTITY = f"/opt/qwen/{BEND_DIRECTORY}/identity.json"
 BEND_SCHEMA = "eta-exl3-bend-accept/1"
 GPU_NAME = "NVIDIA GeForce RTX 3090"
 POWER_LIMIT_WATTS = 250.0
+# Declared clock-vs-voltage offsets (host NixOS policy, applied with the power limit at boot and
+# resume). At the 250 W cap a lower memory clock moves watts from GDDR6X to the SMs
+# (RoundBench, bit-exact: -1000 MHz -0.8 ms/round vs stock; -1500 a further -0.25..-0.46 ms;
+# -2000 no better than -1500).
+CORE_CLOCK_OFFSET_MHZ = 0
+MEMORY_CLOCK_OFFSET_MHZ = -1500
+NVML_LIBRARY = "/run/opengl-driver/lib/libnvidia-ml.so.1"
 DRAFT_PROPOSALS = 7
 MANIFEST = ROOT / "prepare/exl3-manifest.json"
 VERIFIERS_REVISION = "ef47b2e96284a00bdcfc1012b9624b0c41ee6a0e"
@@ -536,15 +544,47 @@ def _gpu() -> dict[str, object]:
         and float(enforced) == POWER_LIMIT_WATTS,
         "Measurement requires the declared RTX 3090 at 250 W; policy is never changed here",
     )
+    core_offset, memory_offset = _clock_offsets()
+    require(
+        core_offset == CORE_CLOCK_OFFSET_MHZ and memory_offset == MEMORY_CLOCK_OFFSET_MHZ,
+        f"Measurement requires clock offsets core {CORE_CLOCK_OFFSET_MHZ} / memory "
+        f"{MEMORY_CLOCK_OFFSET_MHZ} MHz, found {core_offset} / {memory_offset}; policy is never "
+        "changed here",
+    )
     return {
         "uuid": uuid,
         "name": name,
         "pci_bus_id": bus,
         "power_limit_watts": float(limit),
         "enforced_power_limit_watts": float(enforced),
+        "core_clock_offset_mhz": core_offset,
+        "memory_clock_offset_mhz": memory_offset,
         "driver_version": driver,
         "memory_total_mib": int(memory),
     }
+
+
+def _clock_offsets() -> tuple[int, int]:
+    """Read device 0's core and memory clock-vs-voltage offsets (MHz) through NVML."""
+    try:
+        nvml = ctypes.CDLL(NVML_LIBRARY)
+    except OSError as error:
+        raise ValueError(f"Cannot load NVML from {NVML_LIBRARY}") from error
+    status = int(nvml.nvmlInit_v2())
+    require(status == 0, f"nvmlInit failed: NVML error {status}")
+    try:
+        handle = ctypes.c_void_p()
+        status = int(nvml.nvmlDeviceGetHandleByIndex_v2(0, ctypes.byref(handle)))
+        require(status == 0, f"NVML device 0 lookup failed: NVML error {status}")
+        core, memory = ctypes.c_int(), ctypes.c_int()
+        status = int(nvml.nvmlDeviceGetGpcClkVfOffset(handle, ctypes.byref(core)))
+        require(status == 0, f"NVML core clock offset query failed: NVML error {status}")
+        status = int(nvml.nvmlDeviceGetMemClkVfOffset(handle, ctypes.byref(memory)))
+        require(status == 0, f"NVML memory clock offset query failed: NVML error {status}")
+        return core.value, memory.value
+    finally:
+        status = int(nvml.nvmlShutdown())
+        require(status == 0, f"nvmlShutdown failed: NVML error {status}")
 
 
 def _served(client: Client) -> dict[str, object]:
@@ -788,7 +828,8 @@ class NativeTaskset:
     """Module whose hardcoded DATASET_NAME/DATASET_REVISION must equal the lock."""
 
 
-# Frozen order of protocol exl3-native-broad-c1-request-v3; C1 runs afterwards.
+# Frozen order of protocol exl3-native-broad-c1-request-v4 (= v3 tasks; v4 adds the declared
+# clock offsets to the identity); C1 runs afterwards.
 # v3 = v2 with mmlu-pro 20 -> 10 and i3-logic 6 -> 4 tasks (the first tasks of the same
 # native shuffles): v2 took 1935-2084 s at 350 W and does not fit its 2400 s deadline at
 # the 250 W operating point.

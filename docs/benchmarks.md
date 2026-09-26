@@ -487,7 +487,13 @@ hoisted load addresses equal the per-iteration ones).
 **GPU clocks at 250 W.** Core clock offsets do nothing here: the card already runs at the
 bottom of its voltage curve (+75/+150 MHz: no change; +225 MHz: Xid 109 fault). A lower
 memory clock moves watts to the SMs: −1000 MHz cut the round by 0.77-0.90 ms (~2.3 %),
-bit-exact, SM clock 910 → 945 MHz. Not part of #58; it becomes host policy separately.
+bit-exact, SM clock 910 → 945 MHz. Not part of #58. It is host policy since 2026-09-26 14:10
+(the NixOS power-limit service applies it at boot and resume), and protocol
+`exl3-native-broad-c1-request-v4` (the v3 tasks) declares it: the lane reads the core and
+memory offsets through NVML and refuses to measure unless they are 0 / −1500 MHz: a second
+sweep on cs10 (reference −1000) gave −1500 a further −0.25 to −0.46 ms per round (two of four
+intervals clear of 0) and −2000 nothing beyond −1500, all bit-exact. v4 is a new segment; v3
+numbers do not carry over.
 
 **Measured and dropped at 250 W:** 8208 (no tail start barrier; +3.7 µs per layer); the GDN
 conv and b/a move into the m16g epilogue (probe: the remaining core is 23 µs per call,
