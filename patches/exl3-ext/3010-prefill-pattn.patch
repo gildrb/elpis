@@ -1,0 +1,470 @@
+--- a/exllamav3_ext/bindings.cpp
++++ b/exllamav3_ext/bindings.cpp
+@@ -45,6 +45,7 @@
+ #include "generator/cache.cuh"
+ 
+ #include "cache/q_cache.cuh"
++#include "pattn.cuh"
+ 
+ #include "histogram.cuh"
+ 
+@@ -259,6 +260,7 @@
+     m.def("quant_cache_paged", &quant_cache_paged, "quant_cache_paged");
+     m.def("dequant_cache_paged", &dequant_cache_paged, "dequant_cache_paged");
+     m.def("dequant_cache_paged_window", &dequant_cache_paged_window, "dequant_cache_paged_window");
++    m.def("pattn_prefill", &pattn_prefill, "pattn_prefill");
+ 
+     m.def("count_inf_nan", &count_inf_nan, "count_inf_nan");
+     m.def("histogram", &histogram, "histogram");
+--- /dev/null
++++ b/exllamav3_ext/pattn.cu
+@@ -0,0 +1,51 @@
++#include "pattn.cuh"
++#include "pattn_kernel.cuh"
++#include <c10/cuda/CUDAGuard.h>
++#include <ATen/cuda/CUDAContext.h>
++#include "util.h"
++#include "util.cuh"
++
++void pattn_prefill
++(
++    const at::Tensor& q,
++    const at::Tensor& k16,
++    const at::Tensor& v16,
++    const at::Tensor& block_table,
++    const at::Tensor& cache_seqlens,
++    const at::Tensor& out,
++    int kv_append_len,
++    float scale_log2,
++    int mode
++)
++{
++    const at::cuda::OptionalCUDAGuard device_guard(q.device());
++    cudaStream_t stream = at::cuda::getCurrentCUDAStream().stream();
++    TORCH_CHECK(q.dim() == 4 && q.size(3) == PA_HD && q.dtype() == at::kHalf && q.is_contiguous(), "pattn: q must be contiguous fp16 (bsz, q_len, heads, 256)");
++    TORCH_CHECK(out.sizes() == q.sizes() && out.dtype() == at::kHalf && out.is_contiguous(), "pattn: out must be contiguous and shaped like q");
++    TORCH_CHECK(k16.dim() == 4 && k16.size(1) == PA_PAGE && k16.size(3) == PA_HD && k16.dtype() == at::kHalf && k16.is_contiguous() &&
++                v16.sizes() == k16.sizes() && v16.dtype() == at::kHalf && v16.is_contiguous(), "pattn: k16 / v16 must be contiguous fp16 (pages, 256, kv_heads, 256)");
++    TORCH_CHECK(block_table.dtype() == at::kInt && block_table.dim() == 2 && block_table.is_contiguous() && block_table.size(0) == q.size(0), "pattn: bad block_table");
++    TORCH_CHECK(cache_seqlens.dtype() == at::kInt && cache_seqlens.numel() == q.size(0) && cache_seqlens.is_cuda(), "pattn: bad cache_seqlens");
++    TORCH_CHECK(mode == 0 || mode == 1, "pattn: mode must be 0 or 1");
++    int bsz = (int) q.size(0), q_len = (int) q.size(1), n_q_heads = (int) q.size(2), n_kv_heads = (int) k16.size(2);
++    TORCH_CHECK(n_q_heads == PA_G * n_kv_heads, "pattn: needs 6 q heads per kv head");
++    static bool init = false;
++    if (!init)
++    {
++        cuda_check(cudaFuncSetAttribute(pattn_detail::pattn_kernel<true>, cudaFuncAttributeMaxDynamicSharedMemorySize, PA_SMEM));
++        cuda_check(cudaFuncSetAttribute(pattn_detail::pattn_kernel<false>, cudaFuncAttributeMaxDynamicSharedMemorySize, PA_SMEM));
++        init = true;
++    }
++    dim3 grid((q_len + PA_BQ - 1) / PA_BQ, n_kv_heads, bsz);
++    if (mode == 1)
++        pattn_detail::pattn_kernel<true><<<grid, PA_THREADS, PA_SMEM, stream>>>(
++            (const half*) q.data_ptr(), (const half*) k16.data_ptr(), (const half*) v16.data_ptr(),
++            (const int*) block_table.data_ptr(), (const int*) cache_seqlens.data_ptr(), (half*) out.data_ptr(),
++            (int) block_table.size(1), q_len, kv_append_len, n_q_heads, n_kv_heads, scale_log2);
++    else
++        pattn_detail::pattn_kernel<false><<<grid, PA_THREADS, PA_SMEM, stream>>>(
++            (const half*) q.data_ptr(), (const half*) k16.data_ptr(), (const half*) v16.data_ptr(),
++            (const int*) block_table.data_ptr(), (const int*) cache_seqlens.data_ptr(), (half*) out.data_ptr(),
++            (int) block_table.size(1), q_len, kv_append_len, n_q_heads, n_kv_heads, scale_log2);
++    cuda_check(cudaPeekAtLastError());
++}
+--- /dev/null
++++ b/exllamav3_ext/pattn.cuh
+@@ -0,0 +1,23 @@
++#pragma once
++
++// Ext 3010: CUDA causal prefill attention over the fp16 staged K/V of the quantized-cache path
++// (triton_paged.py paged_attn_triton_prefill, qc branch, after dequant_cache_paged_window): head_dim 256,
++// 6 q heads per kv head, q_len >= 1. See pattn_kernel.cuh.
++
++#include <ATen/Tensor.h>
++
++// q (bsz, q_len, n_q_heads, 256) fp16; k16 / v16 (pages, 256, n_kv_heads, 256) fp16; block_table (bsz, pages)
++// int32; cache_seqlens (bsz) int32 (keys before the chunk); out like q. mode 1: f16-accumulated spans,
++// 0: fp32 accumulation. scale_log2 = softmax scale * log2(e)
++void pattn_prefill
++(
++    const at::Tensor& q,
++    const at::Tensor& k16,
++    const at::Tensor& v16,
++    const at::Tensor& block_table,
++    const at::Tensor& cache_seqlens,
++    const at::Tensor& out,
++    int kv_append_len,
++    float scale_log2,
++    int mode
++);
+--- /dev/null
++++ b/exllamav3_ext/pattn_kernel.cuh
+@@ -0,0 +1,332 @@
++#pragma once
++
++// Ext 3010 (pattn, design F'): causal prefill attention over the fp16 staged K/V
++// (the Triton path's dequant_cache_paged_window scratch, unrotated), head_dim 256, GQA 6.
++// CTA = (16 query positions, kv head, batch); 6 warps, warp w = q head kvh * 6 + w over the 16
++// positions (MMA rows); every 32-key K / V tile is loaded once per CTA (cp.async, K and V ping-pong:
++// V(it) lands during QK(it), K(it + 1) during PV(it)) and shared by the 6 warps (GQA packing).
++// q is pre-scaled by scale * log2(e) in fp16 smem.
++// F16 = true: QK^T accumulates each 32-dim span in fp16 (2 k16 HMMA steps) and flushes into fp32
++// scores; PV accumulates each 32-key tile in fp16 per 8-dim n-tile and flushes into the fp32 O
++// accumulator (f16-accumulate HMMA = 2x the fp32-accumulate rate on GA102).
++// F16 = false: every MMA accumulates in fp32 (the Triton kernel's arithmetic class).
++#include <cuda_fp16.h>
++#include <cuda_runtime.h>
++#include <stdint.h>
++#include <math_constants.h>
++
++#define PA_HD 256
++#define PA_G 6
++#define PA_BQ 16
++#define PA_NW 6
++#define PA_BN 32
++#define PA_PAGE 256
++#define PA_THREADS (PA_NW * 32)
++#define PA_Q_OFF 0                                         // [96][256] fp16, swizzled
++#define PA_K_OFF (PA_Q_OFF + PA_G * PA_BQ * PA_HD * 2)      // [32][256] fp16, swizzled
++#define PA_V_OFF (PA_K_OFF + PA_BN * PA_HD * 2)
++#define PA_SMEM (PA_V_OFF + PA_BN * PA_HD * 2)
++
++namespace pattn_detail {
++
++// fp16 element index of (row, col) in a swizzled [rows][256] tile: 16-byte chunk c of row r at c ^ (r & 7)
++__device__ __forceinline__ int swz(int r, int c)
++{
++    return r * PA_HD + ((((c >> 3) ^ (r & 7))) << 3) + (c & 7);
++}
++
++__device__ __forceinline__ void ldsm_x4(uint32_t* r, const void* p)
++{
++    uint32_t a = (uint32_t) __cvta_generic_to_shared(p);
++    asm volatile("ldmatrix.sync.aligned.m8n8.x4.shared.b16 {%0,%1,%2,%3}, [%4];\n"
++                 : "=r"(r[0]), "=r"(r[1]), "=r"(r[2]), "=r"(r[3]) : "r"(a));
++}
++
++__device__ __forceinline__ void ldsm_x4_t(uint32_t* r, const void* p)
++{
++    uint32_t a = (uint32_t) __cvta_generic_to_shared(p);
++    asm volatile("ldmatrix.sync.aligned.m8n8.x4.trans.shared.b16 {%0,%1,%2,%3}, [%4];\n"
++                 : "=r"(r[0]), "=r"(r[1]), "=r"(r[2]), "=r"(r[3]) : "r"(a));
++}
++
++__device__ __forceinline__ void mma_f32(float* c, const uint32_t* a, uint32_t b0, uint32_t b1)
++{
++    asm volatile(
++        "mma.sync.aligned.m16n8k16.row.col.f32.f16.f16.f32 {%0,%1,%2,%3}, {%4,%5,%6,%7}, {%8,%9}, {%0,%1,%2,%3};\n"
++        : "+f"(c[0]), "+f"(c[1]), "+f"(c[2]), "+f"(c[3])
++        : "r"(a[0]), "r"(a[1]), "r"(a[2]), "r"(a[3]), "r"(b0), "r"(b1));
++}
++
++__device__ __forceinline__ void mma_f16(uint32_t* d, const uint32_t* a, uint32_t b0, uint32_t b1)
++{
++    asm volatile(
++        "mma.sync.aligned.m16n8k16.row.col.f16.f16.f16.f16 {%0,%1}, {%2,%3,%4,%5}, {%6,%7}, {%0,%1};\n"
++        : "+r"(d[0]), "+r"(d[1])
++        : "r"(a[0]), "r"(a[1]), "r"(a[2]), "r"(a[3]), "r"(b0), "r"(b1));
++}
++
++__device__ __forceinline__ void cp_async16(void* s, const void* g, bool valid)
++{
++    uint32_t a = (uint32_t) __cvta_generic_to_shared(s);
++    int n = valid ? 16 : 0;
++    asm volatile("cp.async.cg.shared.global [%0], [%1], 16, %2;\n" :: "r"(a), "l"(g), "r"(n));
++}
++__device__ __forceinline__ void cp_commit() { asm volatile("cp.async.commit_group;\n" ::); }
++__device__ __forceinline__ void cp_wait0() { asm volatile("cp.async.wait_group 0;\n" ::); }
++
++__device__ __forceinline__ float ex2(float x)
++{
++    float y;
++    asm("ex2.approx.ftz.f32 %0, %1;" : "=f"(y) : "f"(x));
++    return y;
++}
++
++__device__ __forceinline__ uint32_t pack_h2(float lo, float hi)
++{
++    half2 h = __floats2half2_rn(lo, hi);
++    return *reinterpret_cast<uint32_t*>(&h);
++}
++
++
++template <bool F16>
++__global__ void __launch_bounds__(PA_THREADS, 1) pattn_kernel(
++    const half* __restrict__ q,            // (bsz, q_len, n_q_heads, 256)
++    const half* __restrict__ k16,          // (pages, 256, n_kv_heads, 256) fp16 staged K
++    const half* __restrict__ v16,
++    const int* __restrict__ block_table,   // (bsz, num_pages_per_seq)
++    const int* __restrict__ cache_seqlens, // (bsz): keys before the chunk
++    half* __restrict__ out,                // like q
++    int num_pages_per_seq, int q_len, int kv_append_len, int n_q_heads, int n_kv_heads, float scale_log2)
++{
++    extern __shared__ __align__(16) unsigned char smem[];
++    half* qs = (half*) (smem + PA_Q_OFF);
++    half* ks = (half*) (smem + PA_K_OFF);
++    half* vs = (half*) (smem + PA_V_OFF);
++
++    const int qb = gridDim.x - 1 - blockIdx.x;   // longest (latest) query blocks first
++    const int kvh = blockIdx.y, b = blockIdx.z;
++    const int tid = threadIdx.x, warp = tid >> 5, lane = tid & 31, gid = lane >> 2, t = lane & 3;
++    const int p0 = qb * PA_BQ;
++    const int total = cache_seqlens[b] + kv_append_len;
++    const int q_abs0 = total - q_len + p0;        // absolute position of the CTA's first row
++    const int n_hi = min(q_abs0 + PA_BQ, total);  // keys [0, n_hi) are visible to some row
++    const int ntiles = (n_hi + PA_BN - 1) / PA_BN;
++    const int* bt = block_table + (size_t) b * num_pages_per_seq;
++
++    // one 32-key x 256-dim fp16 tile of K or V (512 B per key: 32 chunks of 16 B); keys >= total zero-filled
++    auto issue = [&] (const half* src, half* dst, int it)
++    {
++        const int n0 = it * PA_BN;
++        const size_t row0 = (size_t) bt[n0 / PA_PAGE] * PA_PAGE + (n0 % PA_PAGE);
++        #pragma unroll
++        for (int i = 0; i < (PA_BN * 32 + PA_THREADS - 1) / PA_THREADS; ++i)
++        {
++            int c = tid + i * PA_THREADS;
++            if (c < PA_BN * 32)
++            {
++                int tok = c >> 5, ch = c & 31;
++                bool valid = n0 + tok < total;
++                const half* g = src + (((row0 + (valid ? tok : 0)) * n_kv_heads + kvh) * PA_HD + ch * 8);
++                cp_async16(dst + swz(tok, ch * 8), g, valid);
++            }
++        }
++    };
++
++    if (ntiles > 0) issue(k16, ks, 0);
++    cp_commit();
++    if (ntiles > 0) issue(v16, vs, 0);
++    cp_commit();
++
++    // q rows, scaled into the log2 domain, fp16
++    for (int c = tid; c < PA_G * PA_BQ * 32; c += PA_THREADS)
++    {
++        int row = c >> 5, ch = c & 31, hl = row / PA_BQ, pos = row - hl * PA_BQ;
++        bool valid = p0 + pos < q_len;
++        uint4 u = make_uint4(0, 0, 0, 0);
++        if (valid)
++            u = *reinterpret_cast<const uint4*>(q + (((size_t) b * q_len + p0 + pos) * n_q_heads + kvh * PA_G + hl) * PA_HD + ch * 8);
++        half2* h2 = reinterpret_cast<half2*>(&u);
++        uint32_t w[4];
++        #pragma unroll
++        for (int j = 0; j < 4; ++j)
++        {
++            float2 f = __half22float2(h2[j]);
++            w[j] = pack_h2(f.x * scale_log2, f.y * scale_log2);
++        }
++        *reinterpret_cast<uint4*>(qs + swz(row, ch * 8)) = make_uint4(w[0], w[1], w[2], w[3]);
++    }
++
++    float acc[32][4];
++    #pragma unroll
++    for (int j = 0; j < 32; ++j)
++        #pragma unroll
++        for (int e = 0; e < 4; ++e) acc[j][e] = 0.f;
++    float m[2] = {-INFINITY, -INFINITY}, l[2] = {0.f, 0.f};
++    const int qrow = warp * PA_BQ;
++    const int q_abs_r0 = q_abs0 + gid, q_abs_r1 = q_abs0 + gid + 8;
++
++    #pragma unroll 1
++    for (int it = 0; it < ntiles; ++it)
++    {
++        asm volatile("cp.async.wait_group 1;\n" ::);   // K(it) landed (V(it) may be in flight)
++        __syncthreads();                              // (A) K(it) visible; qs stored
++        const int n0 = it * PA_BN;
++
++        // S = Q K^T (log2 domain)
++        float sc[4][4];
++        #pragma unroll
++        for (int nt = 0; nt < 4; ++nt)
++            #pragma unroll
++            for (int e = 0; e < 4; ++e) sc[nt][e] = 0.f;
++        #pragma unroll
++        for (int g = 0; g < 8; ++g)
++        {
++            uint32_t a[2][4];
++            #pragma unroll
++            for (int s = 0; s < 2; ++s)
++                ldsm_x4(a[s], qs + swz(qrow + (lane & 15), 32 * g + 16 * s + (lane >> 4) * 8));
++            #pragma unroll
++            for (int nt = 0; nt < 4; ++nt)
++            {
++                uint32_t bk[4];
++                ldsm_x4(bk, ks + swz(8 * nt + (lane & 7), 32 * g + (lane >> 3) * 8));
++                if constexpr (F16)
++                {
++                    uint32_t d[2] = {0u, 0u};
++                    mma_f16(d, a[0], bk[0], bk[1]);
++                    mma_f16(d, a[1], bk[2], bk[3]);
++                    float2 f0 = __half22float2(*reinterpret_cast<half2*>(&d[0]));
++                    float2 f1 = __half22float2(*reinterpret_cast<half2*>(&d[1]));
++                    sc[nt][0] += f0.x; sc[nt][1] += f0.y; sc[nt][2] += f1.x; sc[nt][3] += f1.y;
++                }
++                else
++                {
++                    mma_f32(sc[nt], a[0], bk[0], bk[1]);
++                    mma_f32(sc[nt], a[1], bk[2], bk[3]);
++                }
++            }
++        }
++
++        // Causal / length mask (tiles reaching past the CTA's first row only)
++        if (n0 + PA_BN - 1 > q_abs0)
++        {
++            #pragma unroll
++            for (int nt = 0; nt < 4; ++nt)
++                #pragma unroll
++                for (int e = 0; e < 4; ++e)
++                {
++                    int key = n0 + 8 * nt + 2 * t + (e & 1);
++                    int qa = (e & 2) ? q_abs_r1 : q_abs_r0;
++                    if (key > qa || key >= total) sc[nt][e] = -INFINITY;
++                }
++        }
++
++        // Online softmax (per-thread partial row sums; quad-reduced at the end)
++        float alpha[2];
++        #pragma unroll
++        for (int r = 0; r < 2; ++r)
++        {
++            float mx = -INFINITY;
++            #pragma unroll
++            for (int nt = 0; nt < 4; ++nt) mx = fmaxf(mx, fmaxf(sc[nt][2 * r], sc[nt][2 * r + 1]));
++            mx = fmaxf(mx, __shfl_xor_sync(0xffffffffu, mx, 1));
++            mx = fmaxf(mx, __shfl_xor_sync(0xffffffffu, mx, 2));
++            float m_new = fmaxf(m[r], mx);
++            float m_use = m_new == -INFINITY ? 0.f : m_new;
++            alpha[r] = m[r] == -INFINITY ? 0.f : ex2(m[r] - m_use);
++            float sum = 0.f;
++            #pragma unroll
++            for (int nt = 0; nt < 4; ++nt)
++                #pragma unroll
++                for (int e = 0; e < 2; ++e)
++                {
++                    float p = ex2(sc[nt][2 * r + e] - m_use);   // -inf -> 0
++                    sc[nt][2 * r + e] = p;
++                    sum += p;
++                }
++            l[r] = l[r] * alpha[r] + sum;
++            m[r] = m_new;
++        }
++        if (__any_sync(0xffffffffu, alpha[0] != 1.f || alpha[1] != 1.f))
++        {
++            #pragma unroll
++            for (int j = 0; j < 32; ++j)
++            {
++                acc[j][0] *= alpha[0]; acc[j][1] *= alpha[0];
++                acc[j][2] *= alpha[1]; acc[j][3] *= alpha[1];
++            }
++        }
++        uint32_t pa[2][4];
++        #pragma unroll
++        for (int kk = 0; kk < 2; ++kk)
++        {
++            pa[kk][0] = pack_h2(sc[2 * kk][0], sc[2 * kk][1]);
++            pa[kk][1] = pack_h2(sc[2 * kk][2], sc[2 * kk][3]);
++            pa[kk][2] = pack_h2(sc[2 * kk + 1][0], sc[2 * kk + 1][1]);
++            pa[kk][3] = pack_h2(sc[2 * kk + 1][2], sc[2 * kk + 1][3]);
++        }
++
++        cp_wait0();
++        __syncthreads();                              // (B) V(it) visible; every warp done with K(it)
++        if (it + 1 < ntiles) issue(k16, ks, it + 1);
++        cp_commit();
++
++        // O += P V
++        #pragma unroll
++        for (int dn = 0; dn < 16; ++dn)
++        {
++            uint32_t bv[2][4];
++            #pragma unroll
++            for (int kk = 0; kk < 2; ++kk)
++                ldsm_x4_t(bv[kk], vs + swz(16 * kk + (lane & 7) + ((lane >> 3) & 1) * 8, 16 * dn + (lane >> 4) * 8));
++            #pragma unroll
++            for (int hn = 0; hn < 2; ++hn)
++            {
++                float* o = acc[2 * dn + hn];
++                if constexpr (F16)
++                {
++                    uint32_t d[2] = {0u, 0u};
++                    mma_f16(d, pa[0], bv[0][2 * hn], bv[0][2 * hn + 1]);
++                    mma_f16(d, pa[1], bv[1][2 * hn], bv[1][2 * hn + 1]);
++                    float2 f0 = __half22float2(*reinterpret_cast<half2*>(&d[0]));
++                    float2 f1 = __half22float2(*reinterpret_cast<half2*>(&d[1]));
++                    o[0] += f0.x; o[1] += f0.y; o[2] += f1.x; o[3] += f1.y;
++                }
++                else
++                {
++                    mma_f32(o, pa[0], bv[0][2 * hn], bv[0][2 * hn + 1]);
++                    mma_f32(o, pa[1], bv[1][2 * hn], bv[1][2 * hn + 1]);
++                }
++            }
++        }
++
++        asm volatile("cp.async.wait_group 1;\n" ::);   // K(it + 1) may still be in flight
++        __syncthreads();                              // (C) every warp done with V(it)
++        if (it + 1 < ntiles) issue(v16, vs, it + 1);
++        cp_commit();
++    }
++    cp_wait0();
++
++    // out = acc / l, fp16
++    #pragma unroll
++    for (int r = 0; r < 2; ++r)
++    {
++        l[r] += __shfl_xor_sync(0xffffffffu, l[r], 1);
++        l[r] += __shfl_xor_sync(0xffffffffu, l[r], 2);
++        l[r] = l[r] == 0.f ? 0.f : 1.f / l[r];
++    }
++    const int hq = kvh * PA_G + warp;
++    #pragma unroll
++    for (int r = 0; r < 2; ++r)
++    {
++        int pos = p0 + gid + 8 * r;
++        if (pos >= q_len) continue;
++        half* orow = out + (((size_t) b * q_len + pos) * n_q_heads + hq) * PA_HD;
++        #pragma unroll
++        for (int j = 0; j < 32; ++j)
++            *reinterpret_cast<uint32_t*>(orow + 8 * j + 2 * t) = pack_h2(acc[j][2 * r] * l[r], acc[j][2 * r + 1] * l[r]);
++    }
++}
++
++} // namespace pattn_detail
++
+--- a/modules/attention_fn/triton_paged.py
++++ b/modules/attention_fn/triton_paged.py
+@@ -2118,6 +2118,15 @@
+     return best[1]
+ 
+ 
++# Ext 3010: prefill attention kernel for the quantized-cache two-pass path (chunks of >= _pattn_min_q rows):
++# "pattn" (CUDA, default) or "triton". Read once at import; any other value is an error. The module attribute
++# `prefill_attn` may be reassigned at runtime (A/B harnesses)
++prefill_attn = os.environ.get("EXL3_PREFILL_ATTN", "pattn")
++if prefill_attn not in ("pattn", "triton"):
++    raise ValueError(f"EXL3_PREFILL_ATTN must be 'pattn' or 'triton', got {prefill_attn!r}")
++_pattn_min_q = 256
++
++
+ def paged_attn_triton_prefill(
+     q: torch.Tensor,
+     k: torch.Tensor | None,
+@@ -2254,6 +2263,18 @@
+             )
+             k_cache, v_cache = kd, vd
+             block_table = torch.arange(bsz * npps_w, dtype = torch.int32, device = q.device).view(bsz, npps_w)
++            # Ext 3010: CUDA prefill attention over the staged fp16 K/V (exllamav3_ext/pattn_kernel.cuh):
++            # GQA-packed CTAs, f16-accumulated 32-wide spans flushed into fp32. EXL3_PREFILL_ATTN=triton
++            # keeps the Triton kernel below
++            if (prefill_attn == "pattn" and head_dim == 256 and n_q_heads == 6 * n_kvh
++                    and q_len >= _pattn_min_q and window_left < 0 and window_right < 0 and softcap == 0.0
++                    and not has_sinks):
++                o = out if out.is_contiguous() else torch.empty_like(q)
++                ext.pattn_prefill(q.contiguous(), kd, vd, block_table, cache_seqlens.to(torch.int32), o,
++                                  kv_append_len, float(softmax_scale) * 1.4426950408889634, 1)
++                if o is not out:
++                    out.copy_(o)
++                return out
+             qc = None
+             k_scales, v_scales, qck, qcv = q, q, 0, 0
+             h32 = q

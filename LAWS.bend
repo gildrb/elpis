@@ -87,3 +87,45 @@ import ./bend/gdn_ba_ksplit_laws.bend as GdnBaKsplitLaws
 # largest b with start(b) <= x, exactly-once ownership, (w, w) = v2, host guard, contributor slots and
 # max_contrib bounds; served GDN / attention bundles at (100, 91): guard holds, max_contrib 7 / 8, launch fits.
 import ./bend/gemm_m16_wpart_laws.bend as GemmM16WpartLaws
+# ext 8205 slot-weighted 8201 MLP / 8202 tail schedule (bend/m16_wsched.bend over bend/gemm_m16_wpart.bend,
+# per-phase weights, both table kinds, under the host guard): every phase's slices partition [0, T) exactly once
+# (start 0, contiguous, non-empty, last end T); fc / nc are exactly each group's contributors, slots below nc <= mc;
+# counter targets = signalled totals (8 per contributor / finisher warp), waiter passes, wait lists cover the slice
+# without duplicates, finish ranks unique, levels stratified, 8204 program order; ring offsets = the phase-start
+# tile's slot < PF; every partial slot inside its phase region and, under the host workspace check, below the
+# workspace size; equal weights = the 8201 / 8202 tables and tail program; the tail's split boundaries, barriers
+# and counter events independent of the token-row count m.
+import ./bend/m16_wsched_laws.bend as M16WschedLaws
+import ./bend/m16_wsched_tables_laws.bend as M16WschedTablesLaws
+# ext 9005c pruned int4 draft head (dflash2_head_blocks.py, Q4DraftHead, dflash2_head.cu epilogue; bend/draft_head_idmap.bend,
+# reference bend/draft_head_idmap_spec.bend): the column -> token id map is a bijection on [0, V) whose first 128 N columns are
+# exactly the kept blocks' ids, strictly increasing; kept blocks = sorted(order[:N]) and every invalid table is rejected; top-k
+# by (value desc, token id asc) does not depend on column order (full call on the permuted copy = identity call, prefix call =
+# full ranking restricted to kept ids); the switch-back policy: valid initial state selecting pruned, validity preserved by
+# every call, reset() = initial state, exactly FALLBACK_HOLD full rounds, out-of-range anchors not evidence, never pruned
+# during a hold.
+import ./bend/draft_head_idmap_laws.bend as DraftHeadIdmapLaws
+# ext 3010 CUDA prefill attention (pattn_kernel.cuh; bend/pattn_sched.bend): lanes cover each tile key once, every causal (row, key) pair
+# attended exactly once in its tile p / 32 and never elsewhere, no key past the row or the chunk, tiles inside one page,
+# GQA (kv head, warp, block, row) <-> (q head, position) bijective, QK / PV span flush boundaries.
+import ./bend/pattn_sched_laws.bend as PattnSchedLaws
+# ext 3011 wide-tile prefill GEMM (hgemm_f16acc_wide.cuh + the sm86 route in hgemm_f16acc.cu; bend/hgemm_wide.bend): grouped raster a bijection
+# between block ids and tiles, in-tile stores a bijection onto the 128 x 128 tile, composed: every output element (partial last M-stripe
+# included) stored exactly once; per-element fp16 partials / fp32 add order equal to the served f16acc kernel's (the bit-exactness argument);
+# A / B cp.async stage writes cover each stage exactly once; the route is the served-shape table (sm86, unbatched, M >= 1024, switch 0/1).
+import ./bend/hgemm_wide_laws.bend as HgemmWideLaws
+# ext 2106 instruction diet of the decode m16 main loops (8202 tail, 8201 MLP, 2102/2105 m16g; bend/m16_diet.bend
+# DIET = true vs bend/m16_diet_spec.bend DIET = false), generic in every segment bound (all 8205b weighted slices),
+# KT >= 1, ring override < PF and PF, XR, FOLD, W_STAGE, X_ITER >= 1 with FOLD | 2 XR (served Exl3M16Cfg<1,2> one instance):
+# the countdown loop runs v2's iterations exactly (no extra / missing); per iteration the ring and activation byte
+# offsets, x-chunk, fold and weight-issue decision / source equal DIET = false's; phase exit cursor and slots and the
+# whole 8201 / tail / m16g traces are equal; every ring / ldmatrix offset inside its buffer; every weight tile copied
+# exactly once in stream order (no skipped or duplicated issue).
+import ./bend/m16_diet_laws.bend as M16DietLaws
+# ext 2107 EXL3_M16_DIET mode 2 of the decode m16 kernels (bend/m16_diet2.bend vs bend/m16_diet2_spec.bend; with
+# 2106's laws, which give mode 2's loop trace): the byte-permute window extraction equals the funnel-shift / bfe one and
+# the windows at bit offsets 0..28 for every word pair; the hoisted per-lane word addresses + ring offset + t * 128 are
+# the per-iteration ones; the mode-2 tile step equals mma_tile for every shared-memory content and every iteration of any
+# trace; every word read stays in its ring slot and, in every iteration of the 8201 / tail / m16g traces, in the ring;
+# EXL3_M16_DIET parses to 0 / 1 / 2 (default 2, else refused), diet(x) keeps 0..2, launchers run instance DIET = mode.
+import ./bend/m16_diet2_laws.bend as M16Diet2Laws

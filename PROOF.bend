@@ -27,3 +27,10 @@ import ./bend/mlp_m16_defer_proof.bend as MlpM16DeferProof
 import ./bend/attn_pre_proof.bend as AttnPreProof
 import ./bend/gdn_ba_ksplit_proof.bend as GdnBaKsplitProof
 import ./bend/gemm_m16_wpart_proof.bend as GemmM16WpartProof
+import ./bend/m16_wsched_tables_proof.bend as M16WschedTablesProof
+import ./bend/m16_wsched_proof.bend as M16WschedProof
+import ./bend/draft_head_idmap_proof.bend as DraftHeadIdmapProof
+import ./bend/pattn_sched_proof.bend as PattnSchedProof
+import ./bend/hgemm_wide_proof.bend as HgemmWideProof
+import ./bend/m16_diet_proof.bend as M16DietProof
+import ./bend/m16_diet2_proof.bend as M16Diet2Proof

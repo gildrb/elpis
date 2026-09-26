@@ -1,0 +1,761 @@
+--- a/exllamav3_ext/quant/exl3_gemm_m16.cu
++++ b/exllamav3_ext/quant/exl3_gemm_m16.cu
+@@ -92,6 +92,20 @@
+ size_t exl3_gemm_m16_ws_bytes()
+ {
+     return EXL3_M16_WS_BYTES;
++}
++
++// ext 2106 instruction diet of the decode m16 loops (m16g, 8201 MLP, 8202/8205 layer tail): bit-identical
++// leaner loop bookkeeping; on unless EXL3_M16_DIET=0; torch.ops.exl3_m16.diet(mode) overrides it at run time
++// (read at launch / graph capture)
++int exl3_m16_diet(int set)
++{
++    static int mode = []
++    {
++        const char* env = std::getenv("EXL3_M16_DIET");
++        return (env && env[0] == '0' && !env[1]) ? 0 : 1;
++    }();
++    if (set >= 0) mode = set ? 1 : 0;
++    return mode;
+ }
+ 
+ bool exl3_gemm_m16_enabled()
+--- a/exllamav3_ext/quant/exl3_gemm_m16.cuh
++++ b/exllamav3_ext/quant/exl3_gemm_m16.cuh
+@@ -8,6 +8,9 @@
+ // exl3_gemm_m16_supported; the launcher raises on anything else.
+ 
+ bool exl3_gemm_m16_enabled();
++
++// ext 2106: diet mode of the m16g / MLP / tail kernels (1 on, 0 off; set < 0 = query); returns the mode
++int exl3_m16_diet(int set = -1);
+ 
+ bool exl3_gemm_m16_supported(int size_m, int size_k, int size_n, int K, bool mcg, bool mul1);
+ 
+--- a/exllamav3_ext/quant/exl3_gemm_m16_op.cpp
++++ b/exllamav3_ext/quant/exl3_gemm_m16_op.cpp
+@@ -49,8 +49,16 @@
+     return exl3_gemm_m16_launch(A, B0, C0_, suh0, xh0_, svh0, B1, C1, suh1, xh1, svh1, nullptr, (int) mode, prof);
+ }
+ 
++static int64_t exl3_m16_diet_op(int64_t mode)
++{
++    const int prev = exl3_m16_diet();
++    exl3_m16_diet((int) mode);
++    return prev;
++}
++
+ TORCH_LIBRARY(exl3_m16, m)
+ {
++    m.def("diet", &exl3_m16_diet_op);   // ext 2106: set diet mode (0/1; -1 query), returns the previous one
+     m.def("gemm", &exl3_gemm_m16_op);
+     m.def("gemm_dbg", &exl3_gemm_m16_dbg_op);
+ }
+--- a/exllamav3_ext/quant/exl3_gemm_m16g.cu
++++ b/exllamav3_ext/quant/exl3_gemm_m16g.cu
+@@ -46,18 +46,26 @@
+     int blocks_per_sm;
+ };
+ 
+-template <int MT, bool c_fp32>
+-void* kernel_ptr() { return (void*) exl3_gemm_m16g_kernel<MT, c_fp32, 2>; }
+-
++template <int MT, bool c_fp32, bool DIET>
++void* kernel_ptr() { return (void*) exl3_gemm_m16g_kernel<MT, c_fp32, 2, DIET>; }
++
++template <bool DIET>
++void* kernel_ptr_d(int MT, bool c_fp32)
++{
++    return MT == 1 ? (c_fp32 ? kernel_ptr<1, true, DIET>() : kernel_ptr<1, false, DIET>())
++                   : (c_fp32 ? kernel_ptr<2, true, DIET>() : kernel_ptr<2, false, DIET>());
++}
++
++// ext 2106: the diet instance when exl3_m16_diet() is on (bit-identical)
+ M16GLaunch get_launch(int MT, bool c_fp32, int device)
+ {
+-    static M16GLaunch cache[MAX_DEVICES][2][2] = {};
++    static M16GLaunch cache[MAX_DEVICES][2][2][2] = {};
++    const int diet = exl3_m16_diet();
+     std::lock_guard<std::mutex> lock(g_mtx);
+-    M16GLaunch& l = cache[device][MT - 1][c_fp32 ? 1 : 0];
++    M16GLaunch& l = cache[device][MT - 1][c_fp32 ? 1 : 0][diet];
+     if (!l.kernel)
+     {
+-        void* k = MT == 1 ? (c_fp32 ? kernel_ptr<1, true>() : kernel_ptr<1, false>())
+-                          : (c_fp32 ? kernel_ptr<2, true>() : kernel_ptr<2, false>());
++        void* k = diet ? kernel_ptr_d<true>(MT, c_fp32) : kernel_ptr_d<false>(MT, c_fp32);
+         int sm = MT == 1 ? Exl3M16Cfg<1>::SMEM : Exl3M16Cfg<2>::SMEM;
+         cuda_check(cudaFuncSetAttribute(k, cudaFuncAttributeMaxDynamicSharedMemorySize, sm));
+         cuda_check(cudaFuncSetAttribute(k, cudaFuncAttributePreferredSharedMemoryCarveout, (int) cudaSharedmemCarveoutMaxShared));
+--- a/exllamav3_ext/quant/exl3_gemm_m16g_kernel.cuh
++++ b/exllamav3_ext/quant/exl3_gemm_m16g_kernel.cuh
+@@ -101,7 +101,12 @@
+     return mat;
+ }
+ 
+-template <int MT, bool c_fp32, int cb>
++// DIET (ext 2106): the same main loop with leaner bookkeeping: byte offsets for the ring slots and
++// the activation double buffer instead of slot indices, a per-run issue countdown instead of the
++// per-issue k-tile wrap test, a segment countdown for the loop exit and the fold test on the
++// activation offset. Same cp.async issue sequence, commit groups, waits, ldmatrix
++// addresses, decode, MMA order and fold points, so outputs are bit-identical to DIET = false
++template <int MT, bool c_fp32, int cb, bool DIET = false>
+ __global__ __launch_bounds__(EXL3_M16_THREADS, 2)
+ void exl3_gemm_m16g_kernel(const half* __restrict__ A, void* C0, Exl3M16GArgs p)
+ {
+@@ -293,68 +298,136 @@
+ 
+     // Main loop, rolled (2001's body): one segment per group touched by this block, one k-tile per
+     // iteration, runtime ring slots
+-    int cur_slot = 0;
+-    int iss_slot = PF - 1;
++    auto mma_tile = [&] (uint32_t sa, const uint8_t* st)
++    {
++        uint32_t bx[MT][2];
++        if constexpr (MT == 2)
++            asm volatile ("ldmatrix.sync.aligned.m8n8.x4.shared.b16 {%0,%1,%2,%3}, [%4];\n"
++                : "=r"(bx[0][0]), "=r"(bx[0][1]), "=r"(bx[1][0]), "=r"(bx[1][1]) : "r"(sa));
++        else
++            asm volatile ("ldmatrix.sync.aligned.m8n8.x2.shared.b16 {%0,%1}, [%2];\n"
++                : "=r"(bx[0][0]), "=r"(bx[0][1]) : "r"(sa));
++
++        #pragma unroll
++        for (int t = 0; t < EXL3_M16_TILES_W; ++t)
++        {
++            FragB f0, f1;
++            dq8_aligned_4bits<cb>((const uint32_t*) (st + t * 128), lane * 8, f0, f1);
++            FragA a;
++            a[0] = f0[0];
++            a[1] = f1[0];
++            a[2] = f0[1];
++            a[3] = f1[1];
++            #pragma unroll
++            for (int mt = 0; mt < MT; ++mt)
++            {
++                FragB bb;
++                bb[0] = *reinterpret_cast<half2*>(&bx[mt][0]);
++                bb[1] = *reinterpret_cast<half2*>(&bx[mt][1]);
++                ptx_mma_m16n8k16(a, bb, hacc[t][mt]);
++            }
++        }
++    };
++
+     int j = 0;
+-    for (int g_cur = s_b / KT; j < n_iter; ++g_cur)
+-    {
+-        const int seg_end = min(e_b, (g_cur + 1) * KT) - s_b;
+-
+-        #pragma unroll 1
+-        for (; j < seg_end; ++j)
+-        {
+-            if ((j & (XR - 1)) == 0)
+-            {
+-                if (j > 0) __syncthreads();
+-                issue_x_chunk(j / XR + 1);
+-            }
+-            if (iss_j < n_iter) issue_w(iss_slot);
+-            iss_slot = iss_slot == PF - 1 ? 0 : iss_slot + 1;
+-            cp_async_fence();
+-            cp_async_wait<PF - 1>();
+-            __syncwarp();
+-
+-            {
+-                const uint8_t* st = ring + cur_slot * W_STAGE;
+-                uint32_t bx[MT][2];
++    if constexpr (!DIET)
++    {
++        int cur_slot = 0;
++        int iss_slot = PF - 1;
++        for (int g_cur = s_b / KT; j < n_iter; ++g_cur)
++        {
++            const int seg_end = min(e_b, (g_cur + 1) * KT) - s_b;
++
++            #pragma unroll 1
++            for (; j < seg_end; ++j)
++            {
++                if ((j & (XR - 1)) == 0)
+                 {
+-                    uint32_t sa = xbuf_sa + (((j / XR) & 1) * XR + (j & (XR - 1))) * X_ITER;
+-                    if constexpr (MT == 2)
+-                        asm volatile ("ldmatrix.sync.aligned.m8n8.x4.shared.b16 {%0,%1,%2,%3}, [%4];\n"
+-                            : "=r"(bx[0][0]), "=r"(bx[0][1]), "=r"(bx[1][0]), "=r"(bx[1][1]) : "r"(sa));
+-                    else
+-                        asm volatile ("ldmatrix.sync.aligned.m8n8.x2.shared.b16 {%0,%1}, [%2];\n"
+-                            : "=r"(bx[0][0]), "=r"(bx[0][1]) : "r"(sa));
++                    if (j > 0) __syncthreads();
++                    issue_x_chunk(j / XR + 1);
+                 }
+-
+-                #pragma unroll
+-                for (int t = 0; t < EXL3_M16_TILES_W; ++t)
++                if (iss_j < n_iter) issue_w(iss_slot);
++                iss_slot = iss_slot == PF - 1 ? 0 : iss_slot + 1;
++                cp_async_fence();
++                cp_async_wait<PF - 1>();
++                __syncwarp();
++                mma_tile(xbuf_sa + (((j / XR) & 1) * XR + (j & (XR - 1))) * X_ITER, ring + cur_slot * W_STAGE);
++                __syncwarp();
++                cur_slot = cur_slot == PF - 1 ? 0 : cur_slot + 1;
++
++                if ((j & (Cfg::FOLD - 1)) == Cfg::FOLD - 1) fold();
++            }
++
++            fold();
++            flush(g_cur);
++        }
++    }
++    else
++    {
++        // Ring slot k of this warp at byte offset k * W_STAGE (PF * W_STAGE is a power of two); the
++        // activation piece of iteration j at ((j / XR) & 1) * XR + (j & (XR - 1)) = j mod 2 XR, times
++        // X_ITER (2 XR X_ITER is a power of two). iss_left = issues left before the issue cursor's
++        // next group wrap (the only place 2102's issue_w re-derives the pointer), 0 when done
++        static_assert(((PF * W_STAGE) & (PF * W_STAGE - 1)) == 0 && ((2 * XR * X_ITER) & (2 * XR * X_ITER - 1)) == 0, "ring sizes");
++        static_assert((2 * XR) % Cfg::FOLD == 0, "fold cadence divides the activation ring");
++        constexpr uint32_t RING_MASK = PF * W_STAGE - 1;
++        constexpr uint32_t XBUF_MASK = 2 * XR * X_ITER - 1;
++        uint32_t cur_off = 0;
++        uint32_t iss_off = (PF - 1) * W_STAGE;
++        uint32_t x_off = 0;
++        int iss_left = min(KT - iss_kt, n_iter - iss_j);
++        for (int g_cur = s_b / KT; j < n_iter; ++g_cur)
++        {
++            const int seg_end = min(e_b, (g_cur + 1) * KT) - s_b;
++
++            // left = iterations left in this segment (>= 1: j < n_iter and seg_end > j); the
++            // iteration index j = seg_end - left is only needed on the activation-chunk path
++            int left = seg_end - j;
++            #pragma unroll 1
++            do
++            {
++                if ((x_off & (XR * X_ITER - 1)) == 0)
+                 {
+-                    FragB f0, f1;
+-                    dq8_aligned_4bits<cb>((const uint32_t*) (st + t * 128), lane * 8, f0, f1);
+-                    FragA a;
+-                    a[0] = f0[0];
+-                    a[1] = f1[0];
+-                    a[2] = f0[1];
+-                    a[3] = f1[1];
+-                    #pragma unroll
+-                    for (int mt = 0; mt < MT; ++mt)
++                    const int jc = seg_end - left;
++                    if (jc > 0) __syncthreads();
++                    issue_x_chunk(jc / XR + 1);
++                }
++                if (iss_left > 0)
++                {
++                    cp_async_stream(ring_lane + iss_off, iss_ptr);
++                    if (--iss_left == 0)
+                     {
+-                        FragB bb;
+-                        bb[0] = *reinterpret_cast<half2*>(&bx[mt][0]);
+-                        bb[1] = *reinterpret_cast<half2*>(&bx[mt][1]);
+-                        ptx_mma_m16n8k16(a, bb, hacc[t][mt]);
++                        // 2102's wrap: iss_j and iss_kt advance to the next group's first k-tile
++                        iss_j += KT - iss_kt;
++                        iss_kt = 0;
++                        iss_g++;
++                        if (iss_j < n_iter)
++                        {
++                            iss_ptr = w_src(iss_g);
++                            iss_left = min(KT, n_iter - iss_j);
++                        }
+                     }
++                    else iss_ptr += row_bytes;
+                 }
+-            }
+-            __syncwarp();
+-            cur_slot = cur_slot == PF - 1 ? 0 : cur_slot + 1;
+-
+-            if ((j & (Cfg::FOLD - 1)) == Cfg::FOLD - 1) fold();
+-        }
+-
+-        fold();
+-        flush(g_cur);
++                iss_off = (iss_off + W_STAGE) & RING_MASK;
++                cp_async_fence();
++                cp_async_wait<PF - 1>();
++                __syncwarp();
++                mma_tile(xbuf_sa + x_off, ring + cur_off);
++                __syncwarp();
++                cur_off = (cur_off + W_STAGE) & RING_MASK;
++                x_off = (x_off + X_ITER) & XBUF_MASK;
++
++                // x_off = (j + 1) X_ITER mod 2 XR X_ITER and FOLD divides 2 XR, so this is
++                // (j & (FOLD - 1)) == FOLD - 1
++                if ((x_off & (Cfg::FOLD * X_ITER - 1)) == 0) fold();
++            }
++            while (--left > 0);
++            j = seg_end;
++
++            fold();
++            flush(g_cur);
++        }
+     }
+     cp_async_wait<0>();
+     stamp(2);
+--- a/exllamav3_ext/quant/exl3_mlp_m16.cu
++++ b/exllamav3_ext/quant/exl3_mlp_m16.cu
+@@ -121,8 +121,15 @@
+     g_weights_init = true;
+ }
+ 
+-template <int MT, bool d_fp32>
+-void* kernel_ptr() { return (void*) exl3_mlp_m16_kernel<MT, d_fp32>; }
++template <int MT, bool d_fp32, bool DIET>
++void* kernel_ptr() { return (void*) exl3_mlp_m16_kernel<MT, d_fp32, DIET>; }
++
++template <bool DIET>
++void* kernel_ptr_d(int MT, bool d_fp32)
++{
++    return MT == 1 ? (d_fp32 ? kernel_ptr<1, true, DIET>() : kernel_ptr<1, false, DIET>())
++                   : (d_fp32 ? kernel_ptr<2, true, DIET>() : kernel_ptr<2, false, DIET>());
++}
+ 
+ struct Launch
+ {
+@@ -133,13 +140,13 @@
+ 
+ Launch get_launch(int MT, bool d_fp32, int device)
+ {
+-    static Launch cache[MAX_DEVICES][2][2] = {};
++    static Launch cache[MAX_DEVICES][2][2][2] = {};
++    const int diet = exl3_m16_diet();   // ext 2106 (bit-identical instance)
+     std::lock_guard<std::mutex> lock(g_mtx);
+-    Launch& l = cache[device][MT - 1][d_fp32 ? 1 : 0];
++    Launch& l = cache[device][MT - 1][d_fp32 ? 1 : 0][diet];
+     if (!l.kernel)
+     {
+-        void* k = MT == 1 ? (d_fp32 ? kernel_ptr<1, true>() : kernel_ptr<1, false>())
+-                          : (d_fp32 ? kernel_ptr<2, true>() : kernel_ptr<2, false>());
++        void* k = diet ? kernel_ptr_d<true>(MT, d_fp32) : kernel_ptr_d<false>(MT, d_fp32);
+         int sm = MT == 1 ? Exl3M16Cfg<1>::SMEM : Exl3M16Cfg<2>::SMEM;
+         cuda_check(cudaFuncSetAttribute(k, cudaFuncAttributeMaxDynamicSharedMemorySize, sm));
+         cuda_check(cudaFuncSetAttribute(k, cudaFuncAttributePreferredSharedMemoryCarveout, (int) cudaSharedmemCarveoutMaxShared));
+--- a/exllamav3_ext/quant/exl3_mlp_m16_kernel.cuh
++++ b/exllamav3_ext/quant/exl3_mlp_m16_kernel.cuh
+@@ -215,7 +215,12 @@
+     __syncthreads();
+ }
+ 
+-template <int MT, bool d_fp32>
++// DIET (ext 2106): the same main loops with leaner bookkeeping (byte offsets for the ring slots and
++// the activation double buffer, the issue guarded by the run countdown iss_rem > 0, which equals
++// iss_j < n_tot, a segment countdown for the loop exit, the fold test on the activation offset);
++// same cp.async sequence, commit groups, waits, addresses, MMA order and folds, so
++// bit-identical to DIET = false
++template <int MT, bool d_fp32, bool DIET = false>
+ __global__ __launch_bounds__(EXL3_M16_THREADS, 2)
+ void exl3_mlp_m16_kernel(const half* __restrict__ A, half* Cg, half* Cu, void* D, Exl3MlpM16Args p)
+ {
+@@ -324,6 +329,7 @@
+         else iss_ptr += iss_row;
+     };
+     if (n_tot > 0) iss_seek();
++    uint8_t* const ring_lane = ring + lane * 16;
+ 
+     // Activation chunk c of a phase = phase-relative iterations [c * XR, c * XR + XR) (v2's
+     // issue_x_chunk with the phase's xh); rows past size_m replicate the last row
+@@ -508,6 +514,39 @@
+         }
+     };
+ 
++    auto mma_tile = [&] (uint32_t sa, const uint8_t* st)
++    {
++        uint32_t bx[MT][2];
++        {
++            if constexpr (MT == 2)
++                asm volatile ("ldmatrix.sync.aligned.m8n8.x4.shared.b16 {%0,%1,%2,%3}, [%4];\n"
++                    : "=r"(bx[0][0]), "=r"(bx[0][1]), "=r"(bx[1][0]), "=r"(bx[1][1]) : "r"(sa));
++            else
++                asm volatile ("ldmatrix.sync.aligned.m8n8.x2.shared.b16 {%0,%1}, [%2];\n"
++                    : "=r"(bx[0][0]), "=r"(bx[0][1]) : "r"(sa));
++        }
++
++        #pragma unroll
++        for (int t = 0; t < EXL3_M16_TILES_W; ++t)
++        {
++            FragB f0, f1;
++            dq8_aligned_4bits<2>((const uint32_t*) (st + t * 128), lane * 8, f0, f1);
++            FragA a;
++            a[0] = f0[0];
++            a[1] = f1[0];
++            a[2] = f0[1];
++            a[3] = f1[1];
++            #pragma unroll
++            for (int mt = 0; mt < MT; ++mt)
++            {
++                FragB bb;
++                bb[0] = *reinterpret_cast<half2*>(&bx[mt][0]);
++                bb[1] = *reinterpret_cast<half2*>(&bx[mt][1]);
++                ptx_mma_m16n8k16(a, bb, hacc[t][mt]);
++            }
++        }
++    };
++
+     // v2 main loop (rolled) over one phase's slice; the ring slots continue across phases
+     int cur_slot = 0;
+     int iss_slot = PF - 1;
+@@ -519,65 +558,97 @@
+         const int n = PH == 1 ? n1 : n2;
+         const int e = s + n;
+         int j = 0;
++        // DIET: slot k of the warp ring at byte k * W_STAGE, activation piece of iteration j at
++        // (j mod 2 XR) * X_ITER (both ring sizes are powers of two)
++        static_assert(((PF * W_STAGE) & (PF * W_STAGE - 1)) == 0 && ((2 * XR * X_ITER) & (2 * XR * X_ITER - 1)) == 0, "ring sizes");
++        static_assert((2 * XR) % Cfg::FOLD == 0, "fold cadence divides the activation ring");
++        constexpr uint32_t RING_MASK = PF * W_STAGE - 1;
++        constexpr uint32_t XBUF_MASK = 2 * XR * X_ITER - 1;
++        uint32_t cur_off = cur_slot * W_STAGE;
++        uint32_t iss_off = iss_slot * W_STAGE;
++        uint32_t x_off = 0;
++        // DIET: inside the loop iss_j holds the end of the current issue run (the cursor + iss_rem),
++        // so the hot path only counts iss_rem down
++        if constexpr (DIET) iss_j += iss_rem;
+         for (int g_cur = s / KT; j < n; ++g_cur)
+         {
+             const int seg_end = min(e, (g_cur + 1) * KT) - s;
+ 
+-            #pragma unroll 1
+-            for (; j < seg_end; ++j)
+-            {
+-                if ((j & (XR - 1)) == 0)
++            if constexpr (DIET)
++            {
++                // left = iterations left in this segment (>= 1: j < n and seg_end > j); the
++                // iteration index j = seg_end - left is only needed on the activation-chunk path
++                int left = seg_end - j;
++                #pragma unroll 1
++                do
+                 {
+-                    if (j > 0) __syncthreads();
+-                    issue_x_chunk(j / XR + 1, ph);
++                    if ((x_off & (XR * X_ITER - 1)) == 0)
++                    {
++                        const int jc = seg_end - left;
++                        if (jc > 0) __syncthreads();
++                        issue_x_chunk(jc / XR + 1, ph);
++                    }
++                    if (iss_rem > 0)
++                    {
++                        cp_async_stream(ring_lane + iss_off, iss_ptr);
++                        if (--iss_rem == 0)
++                        {
++                            // iss_j (run end) is the issue cursor here
++                            if (iss_j < n_tot)
++                            {
++                                iss_seek();
++                                iss_j += iss_rem;
++                            }
++                        }
++                        else iss_ptr += iss_row;
++                    }
++                    iss_off = (iss_off + W_STAGE) & RING_MASK;
++                    cp_async_fence();
++                    cp_async_wait<PF - 1>();
++                    __syncwarp();
++                    mma_tile(xbuf_sa + x_off, ring + cur_off);
++                    __syncwarp();
++                    cur_off = (cur_off + W_STAGE) & RING_MASK;
++                    x_off = (x_off + X_ITER) & XBUF_MASK;
++
++                    // x_off = (j + 1) X_ITER mod 2 XR X_ITER and FOLD divides 2 XR, so this is
++                    // (j & (FOLD - 1)) == FOLD - 1
++                    if ((x_off & (Cfg::FOLD * X_ITER - 1)) == 0) fold();
+                 }
+-                if (iss_j < n_tot) issue_w(iss_slot);
+-                iss_slot = iss_slot == PF - 1 ? 0 : iss_slot + 1;
+-                cp_async_fence();
+-                cp_async_wait<PF - 1>();
+-                __syncwarp();
+-
++                while (--left > 0);
++                j = seg_end;
++            }
++            else
++            {
++                #pragma unroll 1
++                for (; j < seg_end; ++j)
+                 {
+-                    const uint8_t* st = ring + cur_slot * W_STAGE;
+-                    uint32_t bx[MT][2];
++                    if ((j & (XR - 1)) == 0)
+                     {
+-                        uint32_t sa = xbuf_sa + (((j / XR) & 1) * XR + (j & (XR - 1))) * X_ITER;
+-                        if constexpr (MT == 2)
+-                            asm volatile ("ldmatrix.sync.aligned.m8n8.x4.shared.b16 {%0,%1,%2,%3}, [%4];\n"
+-                                : "=r"(bx[0][0]), "=r"(bx[0][1]), "=r"(bx[1][0]), "=r"(bx[1][1]) : "r"(sa));
+-                        else
+-                            asm volatile ("ldmatrix.sync.aligned.m8n8.x2.shared.b16 {%0,%1}, [%2];\n"
+-                                : "=r"(bx[0][0]), "=r"(bx[0][1]) : "r"(sa));
++                        if (j > 0) __syncthreads();
++                        issue_x_chunk(j / XR + 1, ph);
+                     }
+-
+-                    #pragma unroll
+-                    for (int t = 0; t < EXL3_M16_TILES_W; ++t)
+-                    {
+-                        FragB f0, f1;
+-                        dq8_aligned_4bits<2>((const uint32_t*) (st + t * 128), lane * 8, f0, f1);
+-                        FragA a;
+-                        a[0] = f0[0];
+-                        a[1] = f1[0];
+-                        a[2] = f0[1];
+-                        a[3] = f1[1];
+-                        #pragma unroll
+-                        for (int mt = 0; mt < MT; ++mt)
+-                        {
+-                            FragB bb;
+-                            bb[0] = *reinterpret_cast<half2*>(&bx[mt][0]);
+-                            bb[1] = *reinterpret_cast<half2*>(&bx[mt][1]);
+-                            ptx_mma_m16n8k16(a, bb, hacc[t][mt]);
+-                        }
+-                    }
++                    if (iss_j < n_tot) issue_w(iss_slot);
++                    iss_slot = iss_slot == PF - 1 ? 0 : iss_slot + 1;
++                    cp_async_fence();
++                    cp_async_wait<PF - 1>();
++                    __syncwarp();
++                    mma_tile(xbuf_sa + (((j / XR) & 1) * XR + (j & (XR - 1))) * X_ITER, ring + cur_slot * W_STAGE);
++                    __syncwarp();
++                    cur_slot = cur_slot == PF - 1 ? 0 : cur_slot + 1;
++
++                    if ((j & (Cfg::FOLD - 1)) == Cfg::FOLD - 1) fold();
+                 }
+-                __syncwarp();
+-                cur_slot = cur_slot == PF - 1 ? 0 : cur_slot + 1;
+-
+-                if ((j & (Cfg::FOLD - 1)) == Cfg::FOLD - 1) fold();
+             }
+ 
+             fold();
+             flush(g_cur, ph);
++        }
++        if constexpr (DIET)
++        {
++            iss_j -= iss_rem;
++            cur_slot = cur_off / W_STAGE;
++            iss_slot = iss_off / W_STAGE;
+         }
+     };
+ 
+--- a/exllamav3_ext/quant/exl3_tail_m16.cu
++++ b/exllamav3_ext/quant/exl3_tail_m16.cu
+@@ -61,12 +61,13 @@
+ 
+ Launch get_launch(int device)
+ {
+-    static Launch cache[MAX_DEVICES] = {};
++    static Launch cache[MAX_DEVICES][2] = {};
++    const int diet = exl3_m16_diet();   // ext 2106 (bit-identical instance)
+     std::lock_guard<std::mutex> lock(g_mtx);
+-    Launch& l = cache[device];
++    Launch& l = cache[device][diet];
+     if (!l.kernel)
+     {
+-        void* k = (void*) exl3_tail_m16_kernel<0>;
++        void* k = diet ? (void*) exl3_tail_m16_kernel<0, true> : (void*) exl3_tail_m16_kernel<0, false>;
+         int sm = Exl3M16Cfg<1>::SMEM;
+         cuda_check(cudaFuncSetAttribute(k, cudaFuncAttributeMaxDynamicSharedMemorySize, sm));
+         cuda_check(cudaFuncSetAttribute(k, cudaFuncAttributePreferredSharedMemoryCarveout, (int) cudaSharedmemCarveoutMaxShared));
+--- a/exllamav3_ext/quant/exl3_tail_m16_kernel.cuh
++++ b/exllamav3_ext/quant/exl3_tail_m16_kernel.cuh
+@@ -64,7 +64,12 @@
+     Exl3MlpM16Args mlp;              // 8201's arguments (phases 1/2); prof/size_m/act_limit/l2pf/start_order used
+ };
+ 
+-template <int dummy>
++// DIET (ext 2106): the same main loops with leaner bookkeeping (byte offsets for the ring slots and
++// the activation double buffer, the issue guarded by the run countdown iss_rem > 0, which equals
++// iss_j < n_tot, a segment countdown for the loop exit, the fold test on the activation offset);
++// same cp.async sequence, commit groups, waits, addresses, MMA order and folds, so
++// bit-identical to DIET = false
++template <int dummy, bool DIET = false>
+ __global__ __launch_bounds__(EXL3_M16_THREADS, 2)
+ void exl3_tail_m16_kernel(const half* __restrict__ Ao, float* X, float* D, Exl3TailM16Args p)
+ {
+@@ -199,6 +204,7 @@
+         else iss_ptr += iss_row;
+     };
+     if (n_tot > 0) iss_seek();
++    uint8_t* const ring_lane = ring + lane * 16;
+ 
+     // Activation chunk c of a phase = phase-relative iterations [c * XR, c * XR + XR); rows past
+     // size_m replicate the last row (MMA columns are independent: no row reads another)
+@@ -380,6 +386,35 @@
+         }
+     };
+ 
++    auto mma_tile = [&] (uint32_t sa, const uint8_t* st)
++    {
++        uint32_t bx[MT][2];
++        {
++            asm volatile ("ldmatrix.sync.aligned.m8n8.x2.shared.b16 {%0,%1}, [%2];\n"
++                : "=r"(bx[0][0]), "=r"(bx[0][1]) : "r"(sa));
++        }
++
++        #pragma unroll
++        for (int t = 0; t < EXL3_M16_TILES_W; ++t)
++        {
++            FragB f0, f1;
++            dq8_aligned_4bits<2>((const uint32_t*) (st + t * 128), lane * 8, f0, f1);
++            FragA a;
++            a[0] = f0[0];
++            a[1] = f1[0];
++            a[2] = f0[1];
++            a[3] = f1[1];
++            #pragma unroll
++            for (int mt = 0; mt < MT; ++mt)
++            {
++                FragB bb;
++                bb[0] = *reinterpret_cast<half2*>(&bx[mt][0]);
++                bb[1] = *reinterpret_cast<half2*>(&bx[mt][1]);
++                ptx_mma_m16n8k16(a, bb, hacc[t][mt]);
++            }
++        }
++    };
++
+     // v2 main loop (rolled) over one phase's slice; the ring slots continue across phases
+     int cur_slot = 0;
+     int iss_slot = PF - 1;
+@@ -391,61 +426,97 @@
+         const int n = PH == 0 ? n0 : PH == 1 ? n1 : n2;
+         const int e = s + n;
+         int j = 0;
++        // DIET: slot k of the warp ring at byte k * W_STAGE, activation piece of iteration j at
++        // (j mod 2 XR) * X_ITER (both ring sizes are powers of two)
++        static_assert(((PF * W_STAGE) & (PF * W_STAGE - 1)) == 0 && ((2 * XR * X_ITER) & (2 * XR * X_ITER - 1)) == 0, "ring sizes");
++        static_assert((2 * XR) % Cfg::FOLD == 0, "fold cadence divides the activation ring");
++        constexpr uint32_t RING_MASK = PF * W_STAGE - 1;
++        constexpr uint32_t XBUF_MASK = 2 * XR * X_ITER - 1;
++        uint32_t cur_off = cur_slot * W_STAGE;
++        uint32_t iss_off = iss_slot * W_STAGE;
++        uint32_t x_off = 0;
++        // DIET: inside the loop iss_j holds the end of the current issue run (the cursor + iss_rem),
++        // so the hot path only counts iss_rem down
++        if constexpr (DIET) iss_j += iss_rem;
+         for (int g_cur = s / KT; j < n; ++g_cur)
+         {
+             const int seg_end = min(e, (g_cur + 1) * KT) - s;
+ 
+-            #pragma unroll 1
+-            for (; j < seg_end; ++j)
+-            {
+-                if ((j & (XR - 1)) == 0)
++            if constexpr (DIET)
++            {
++                // left = iterations left in this segment (>= 1: j < n and seg_end > j); the
++                // iteration index j = seg_end - left is only needed on the activation-chunk path
++                int left = seg_end - j;
++                #pragma unroll 1
++                do
+                 {
+-                    if (j > 0) __syncthreads();
+-                    issue_x_chunk(j / XR + 1, ph);
++                    if ((x_off & (XR * X_ITER - 1)) == 0)
++                    {
++                        const int jc = seg_end - left;
++                        if (jc > 0) __syncthreads();
++                        issue_x_chunk(jc / XR + 1, ph);
++                    }
++                    if (iss_rem > 0)
++                    {
++                        cp_async_stream(ring_lane + iss_off, iss_ptr);
++                        if (--iss_rem == 0)
++                        {
++                            // iss_j (run end) is the issue cursor here
++                            if (iss_j < n_tot)
++                            {
++                                iss_seek();
++                                iss_j += iss_rem;
++                            }
++                        }
++                        else iss_ptr += iss_row;
++                    }
++                    iss_off = (iss_off + W_STAGE) & RING_MASK;
++                    cp_async_fence();
++                    cp_async_wait<PF - 1>();
++                    __syncwarp();
++                    mma_tile(xbuf_sa + x_off, ring + cur_off);
++                    __syncwarp();
++                    cur_off = (cur_off + W_STAGE) & RING_MASK;
++                    x_off = (x_off + X_ITER) & XBUF_MASK;
++
++                    // x_off = (j + 1) X_ITER mod 2 XR X_ITER and FOLD divides 2 XR, so this is
++                    // (j & (FOLD - 1)) == FOLD - 1
++                    if ((x_off & (Cfg::FOLD * X_ITER - 1)) == 0) fold();
+                 }
+-                if (iss_j < n_tot) issue_w(iss_slot);
+-                iss_slot = iss_slot == PF - 1 ? 0 : iss_slot + 1;
+-                cp_async_fence();
+-                cp_async_wait<PF - 1>();
+-                __syncwarp();
+-
++                while (--left > 0);
++                j = seg_end;
++            }
++            else
++            {
++                #pragma unroll 1
++                for (; j < seg_end; ++j)
+                 {
+-                    const uint8_t* st = ring + cur_slot * W_STAGE;
+-                    uint32_t bx[MT][2];
++                    if ((j & (XR - 1)) == 0)
+                     {
+-                        uint32_t sa = xbuf_sa + (((j / XR) & 1) * XR + (j & (XR - 1))) * X_ITER;
+-                        asm volatile ("ldmatrix.sync.aligned.m8n8.x2.shared.b16 {%0,%1}, [%2];\n"
+-                            : "=r"(bx[0][0]), "=r"(bx[0][1]) : "r"(sa));
++                        if (j > 0) __syncthreads();
++                        issue_x_chunk(j / XR + 1, ph);
+                     }
+-
+-                    #pragma unroll
+-                    for (int t = 0; t < EXL3_M16_TILES_W; ++t)
+-                    {
+-                        FragB f0, f1;
+-                        dq8_aligned_4bits<2>((const uint32_t*) (st + t * 128), lane * 8, f0, f1);
+-                        FragA a;
+-                        a[0] = f0[0];
+-                        a[1] = f1[0];
+-                        a[2] = f0[1];
+-                        a[3] = f1[1];
+-                        #pragma unroll
+-                        for (int mt = 0; mt < MT; ++mt)
+-                        {
+-                            FragB bb;
+-                            bb[0] = *reinterpret_cast<half2*>(&bx[mt][0]);
+-                            bb[1] = *reinterpret_cast<half2*>(&bx[mt][1]);
+-                            ptx_mma_m16n8k16(a, bb, hacc[t][mt]);
+-                        }
+-                    }
++                    if (iss_j < n_tot) issue_w(iss_slot);
++                    iss_slot = iss_slot == PF - 1 ? 0 : iss_slot + 1;
++                    cp_async_fence();
++                    cp_async_wait<PF - 1>();
++                    __syncwarp();
++                    mma_tile(xbuf_sa + (((j / XR) & 1) * XR + (j & (XR - 1))) * X_ITER, ring + cur_slot * W_STAGE);
++                    __syncwarp();
++                    cur_slot = cur_slot == PF - 1 ? 0 : cur_slot + 1;
++
++                    if ((j & (Cfg::FOLD - 1)) == Cfg::FOLD - 1) fold();
+                 }
+-                __syncwarp();
+-                cur_slot = cur_slot == PF - 1 ? 0 : cur_slot + 1;
+-
+-                if ((j & (Cfg::FOLD - 1)) == Cfg::FOLD - 1) fold();
+             }
+ 
+             fold();
+             flush(g_cur, ph);
++        }
++        if constexpr (DIET)
++        {
++            iss_j -= iss_rem;
++            cur_slot = cur_off / W_STAGE;
++            iss_slot = iss_off / W_STAGE;
+         }
+     };
+ 

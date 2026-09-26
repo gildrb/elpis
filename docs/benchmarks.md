@@ -431,3 +431,67 @@ committed 8202 patch and compares it byte for byte with the Bend table output.
 - 8205, the same slot weighting for the 8201/8202 kernels. Correct, and the per-block
   stamps move barrier D ~6 µs earlier per tail launch, but the 64-layer chain measured
   +1.2 µs per launch at every weighted setting. Not kept until that gap is explained.
+
+## 6. Segment 6: 250 W, protocol `exl3-native-broad-c1-request-v3`
+
+The declared power limit is 250 W (the user's host policy; 350 W was too loud). v3 is v2
+with mmlu-pro cut to 10 tasks and i3-logic to 4, the first ones of the same seed-0
+shuffles, so the run fits its deadline at the lower clock. Nothing here compares with
+segment 5.
+
+| Run | Image | Primary tok/s | tok/J | aime25 / mmlu-pro / i3-logic / lcb tok/s | Rewards | Note |
+|---|---|---|---|---|---|---|
+| #57 | c0 | 101.46 | 0.411 | 114.69 / 94.12 / 116.15 / 83.87 | 3/3, 0.8, 1/4, 1/3 | baseline (the cs5 stack) |
+| #58 | cs10 | 106.13 | 0.432 | 116.24 / 103.83 / 119.65 / 87.93 | 3/3, 0.8, 2/4, 1/3 | 8205b, 9005c, 3010, 3011, 2106, 2107 |
+
+tok/J for both rows comes from the guardian's 5 s power samples of each window (the
+250 ms sampler was down during #58); the same method gives #57's earlier 0.410.
+
+**The 250 W regime.** At 250 W the card sits at the cap for the whole run and serves at
+~0.9-1.05 GHz. A kernel trace of the same image at 250 vs 350 W (kernel-trace-9 vs 8):
+the round grows ×1.27; compute-bound kernels (attention split, norms, GDN conv) ×1.32-1.42;
+the m16 weight-streaming loops ×1.21-1.24; the int4 draft head, DRAM-bound, ×1.04. The
+m16 hot loops turn issue-bound: ~205 instructions per 512 B warp-iteration need ~1.19 GHz
+to keep DRAM busy. Replacing the trellis decode with a trivial one saves ~7 ms of a
+~36 ms round. At the cap, time tracks energy per round (~9 J): removing idle time barely
+helps (a 3.4 ms per-round sleep costs 1.9 ms; dropping the draft-id host sync, 0).
+
+**#58 (cs10).** On c0:
+- 8205b: weighted slot partition for the 8201/8202 kernels. Bit-exact.
+- 9005c: pruned int4 draft head (896 of 1940 blocks, adaptive switch-back). Draft only;
+  target text is draft-independent. `bend/draft_head_idmap*`.
+- 3010: CUDA prefill attention with fp16-accumulated PV. Numerics change: teacher-forced
+  KL below the chunk-size noise floor at 32K and 131K. At 250 W a 262136-token prompt
+  prefills in 537 s instead of 722 s. Attention alone is 1.55-1.65× faster, under the
+  pre-registered 1.8× bar; kept on the time-to-first-token result.
+- 3011: wide-tile fp16-accumulate GEMM route for prefill linears, bit-exact, −21.6 % per
+  2048-row chunk.
+- 2106 / 2107: instruction diets of the m16 hot loops (loop bookkeeping as masked
+  offsets and countdowns; trellis bit extraction as byte permutes; per-lane load
+  addresses hoisted). Bit-exact. Tail 211-226 → 201-202 instructions per iteration;
+  64-layer tail chain −13.3 µs per layer at the cap.
+
+C1 regression against #57: 35.27 → 33.82 ms at 1K (−4.1 % ± 1.5), 37.92 → 32.99 ms at 8K
+(−13.0 % ± 7.3); 32K is dominated by its prefill intercept (3010/3011) and not separable.
+Invariance 45/45. Rewards differ by one i3-logic task (a numerics change via 3010's
+prefill).
+
+**Bend coverage (2.0.29).** Wired with this keep: `bend/m16_wsched*` (8205b),
+`bend/draft_head_idmap*` (9005c), `bend/pattn_sched*` (3010), `bend/hgemm_wide*` (3011),
+`bend/m16_diet*` (2106: iteration skeleton, ring/x offsets, fold and chunk tests, issue
+countdowns and phase-exit cursor equal to the undieted kernels'; no out-of-ring offset,
+every weight tile issued once) and
+`bend/m16_diet2*` (2107: permute extraction equals the shift reference for every offset;
+hoisted load addresses equal the per-iteration ones).
+
+**GPU clocks at 250 W.** Core clock offsets do nothing here: the card already runs at the
+bottom of its voltage curve (+75/+150 MHz: no change; +225 MHz: Xid 109 fault). A lower
+memory clock moves watts to the SMs: −1000 MHz cut the round by 0.77-0.90 ms (~2.3 %),
+bit-exact, SM clock 910 → 945 MHz. Not part of #58; it becomes host policy separately.
+
+**Measured and dropped at 250 W:** 8208 (no tail start barrier; +3.7 µs per layer); the GDN
+conv and b/a move into the m16g epilogue (probe: the remaining core is 23 µs per call,
+realistic gain 0.2-0.4 ms per round); fp16-accumulated PV in decode attention (0.2 % at
+8K); dequantizing the 3-bit cache once per round (11× the traffic); the draft-id handoff
+without host sync and graphing the draft preamble (idle removal gives nothing at the cap);
+producer-aligned split-K for the MLP tail; the 2109 lm_head instruction trim (−1.2 %).

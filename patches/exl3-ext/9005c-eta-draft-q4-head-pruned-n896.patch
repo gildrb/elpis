@@ -1,0 +1,513 @@
+--- a/architecture/dflash2.py
++++ b/architecture/dflash2.py
+@@ -11,6 +11,7 @@
+ from ..modules.arch_specific.dflash import DFlashInputLayer
+ from ..modules.arch_specific.dflash2 import DFlash2Block, DFlash2DynConv, DFlash2Selector
+ from ..modules.arch_specific.dflash2_q4_head import Q4DraftHead
++from ..modules.arch_specific import dflash2_head_blocks as head_blocks
+ from ..modules.attn import prepare_for_attn
+ from .dflash import DFlashConfig, dflash_update_kv_from_target
+ from ..util.tensor import get_for_device
+@@ -354,6 +355,7 @@
+ 
+         self.attached_model = None
+         self.q4_head = None
++        self.head_policy = None
+         self.draft_graphs = _DraftGraphs()
+ 
+         self.draft_verifier_params.update({
+@@ -388,13 +390,22 @@
+         # Draft-only int4 copy of the target head with the selector's top-k fused into its GEMM (0.66 GB
+         # read per round instead of the 6-bit head's 0.95 GB plus a logits round trip). Built here, after
+         # both models and caches are loaded, so a failure surfaces before serving. Heads the kernel does not
+-        # take (Q4DraftHead.supported) keep proposing through the shared target head
++        # take (Q4DraftHead.supported) keep proposing through the shared target head. Pruned draft head (ext
++        # 9005, dflash2_head_blocks): for a vocabulary with a block table the same head is packed kept-blocks
++        # first, and head_policy picks the pruned prefix or the full head per round
+         self.q4_head = None
++        self.head_policy = None
+         lm_inner = getattr(target.modules[target.logit_layer_idx], "inner", None)
+         scale = float(self.config.output_multiplier)
+         softcap = float(self.config.final_logit_softcapping or 0.0)
+-        if Q4DraftHead.supported(lm_inner, target.config.vocab_size, self.config.selector_top_k, scale, softcap):
+-            self.q4_head = Q4DraftHead(lm_inner, target.config.vocab_size, self.config.selector_top_k, scale, softcap)
++        vocab = target.config.vocab_size
++        if Q4DraftHead.supported(lm_inner, vocab, self.config.selector_top_k, scale, softcap):
++            blocks = head_blocks.kept_blocks(vocab)
++            self.q4_head = Q4DraftHead(lm_inner, vocab, self.config.selector_top_k, scale, softcap,
++                                       kept_blocks = blocks)
++            if blocks is not None:
++                self.head_policy = head_blocks.PrunedHeadPolicy(
++                    blocks, vocab, adaptive = head_blocks.pruned_mode() == "adaptive")
+ 
+ 
+     @override
+@@ -427,7 +438,15 @@
+     def unload(self):
+         self.draft_graphs.clear()
+         self.q4_head = None
++        self.head_policy = None
+         super().unload()
++
++
++    def begin_job(self):
++        """Per-job draft state reset, called by the job at each prefill chunk (ext 9005c): the pruned-head policy
++        returns to its initial state, so no fallback hold carries over from the previous request"""
++        if self.head_policy is not None:
++            self.head_policy.reset()
+ 
+ 
+     def update_kv_from_target(
+@@ -458,8 +477,10 @@
+         export_conf = params.get("export_draft_conf", False)
+         q4 = self.q4_head
+         if q4 is not None and state.shape[0] == 1 and 1 < state.shape[1] <= 8:
+-            # Rows 1.. only (row 0 is the anchor); top-16 straight from the int4 head's GEMM epilogue
+-            unary, cands = q4.topk(state, 1)
++            # Rows 1.. only (row 0 is the anchor); top-16 straight from the int4 head's GEMM epilogue, over the
++            # kept blocks when the pruned head is in use this round (ext 9005)
++            pruned = self.head_policy is not None and self.head_policy.use_pruned
++            unary, cands = q4.topk(state, 1, pruned)
+             out, confidence = self.selector.walk_cands(
+                 to_device(state[:, 1:], dev), to_device(unary, dev), to_device(cands, dev), anchor,
+                 return_confidence = export_conf,
+@@ -501,6 +522,10 @@
+         assert input_ids.shape[-1] == 1, \
+             "DFlash2 expects one verified anchor token per draft block"
+         params["dflash2_anchor_ids"] = input_ids
++        # Pruned draft head policy (ext 9005): the anchor is the last committed token; the generator stages it
++        # on the host, so reading it costs no device sync
++        if self.head_policy is not None and input_ids.shape[0] == 1 and input_ids.device.type == "cpu":
++            self.head_policy.observe_anchor(int(input_ids[0, -1]))
+         # The draft block attends to itself bidirectionally; causality on the sliding-window
+         # layers is expressed through their window (left sw, right 0) instead
+         params["causal"] = False
+--- a/exllamav3_ext/dflash2_head.cu
++++ b/exllamav3_ext/dflash2_head.cu
+@@ -210,7 +210,8 @@
+     int* __restrict__ part_ix,
+     int* __restrict__ counter,
+     float* __restrict__ values,
+-    int64_t* __restrict__ indices
++    int64_t* __restrict__ indices,
++    const int* __restrict__ id_map
+ )
+ {
+     extern __shared__ uint4 smem4[];
+@@ -299,6 +300,10 @@
+             }
+         }
+ 
++        // Column -> token id (ext 9005): with id_map, column id of this head is token id_map[id], and every list
++        // below (warp, block, grid merge) ranks by (value, then lower TOKEN id), so the result depends only on
++        // the set of columns, not on their order: a column-permuted copy of the full head returns exactly the
++        // full head's top-16, and a prefix of it the top-16 of that column subset
+         float tv[4]; int ti[4];
+         #pragma unroll
+         for (int e = 0; e < 4; ++e)
+@@ -307,7 +312,7 @@
+             float val = acc[e] * scale;
+             if (softcap > 0.0f) val = tanhf(val / softcap) * softcap;
+             tv[e] = id < vocab ? val : -INFINITY;
+-            ti[e] = id < vocab ? id : INT_MAX;
++            ti[e] = id < vocab ? (id_map ? id_map[id] : id) : INT_MAX;
+         }
+         bitonic_sort16<false>(tv, ti, g);
+         merge_asc(rv, ri, tv, ti, g);
+@@ -357,10 +362,13 @@
+ 
+ /*
+ x:        (m, K) fp16 contiguous, m <= 8, K % 512 == 0 (the rotated draft state: had_r_128(state, suh))
+-wq:       (n_tiles, K / 64, 32, 4) int32, see above; n_tiles = ceil(vocab / 16)
++wq:       (n_tiles, K / 64, 32, 4) int32, see above; n_tiles = ceil(vocab / 16); vocab = columns of this call
+ scales:   (n_tiles, K / 128, 8, 2) fp16
+ row0:     first token row written; values / indices (rows_out, 16) row r <- token row0 + r
+ part_v:   (>= grid * 8 * 16) fp32, part_ix: same int32; counter: (1,) int32, zero on entry, zero on exit
++id_map:   optional (vocab,) int32, contiguous, on x's device: column j is token id_map[j] (distinct, non-negative
++          ids; ext 9005: a column-permuted head or a prefix of one); ranking and the returned indices use the
++          token ids. Absent = identity (column j is token j)
+ Grid: one block of 512 threads per SM (grid = part_v.numel() / 128)
+ */
+ 
+@@ -377,7 +385,8 @@
+     at::Tensor& part_ix,
+     at::Tensor& counter,
+     at::Tensor& values,
+-    at::Tensor& indices
++    at::Tensor& indices,
++    const c10::optional<at::Tensor>& id_map
+ )
+ {
+     const at::cuda::OptionalCUDAGuard device_guard(x.device());
+@@ -423,6 +432,15 @@
+                 "dflash2_q4_head_topk: partial buffers");
+     const int grid = part_v.numel() / (HEAD_TOKENS * HEAD_TOPK);
+     TORCH_CHECK(grid >= 1 && grid <= n_tiles, "dflash2_q4_head_topk: grid out of range");
++    if (id_map.has_value())
++    {
++        const at::Tensor& im = id_map.value();
++        TORCH_CHECK_DTYPE(im, kInt);
++        TORCH_CHECK_DIM(im, 1);
++        TORCH_CHECK(im.is_contiguous() && im.size(0) == vocab && im.device() == x.device(),
++                    "dflash2_q4_head_topk: id_map must be (vocab,) int32, contiguous, on x's device");
++    }
++    const int* id_map_ptr = id_map.has_value() ? (const int*) id_map.value().data_ptr() : nullptr;
+ 
+     const int smem = K * HEAD_TOKENS * 2;   // x in fragment order; >= 16 KiB of warp lists since K >= 1024
+     static int configured = 0;
+@@ -437,7 +455,7 @@
+         (const uint4*) wq.data_ptr(), (const uint32_t*) scales.data_ptr(),
+         n_tiles, (int) vocab, (int) row0, rows_out, (float) scale, (float) softcap,
+         (float*) part_v.data_ptr(), (int*) part_ix.data_ptr(), (int*) counter.data_ptr(),
+-        (float*) values.data_ptr(), (int64_t*) indices.data_ptr()
++        (float*) values.data_ptr(), (int64_t*) indices.data_ptr(), id_map_ptr
+     );
+     cuda_check(cudaPeekAtLastError());
+ }
+--- a/exllamav3_ext/dflash2_head.cuh
++++ b/exllamav3_ext/dflash2_head.cuh
+@@ -2,7 +2,8 @@
+ 
+ #include <ATen/Tensor.h>
+ 
+-// Draft-only int4 LM head with fused top-16 for DFlash2 at M <= 8 rows (see dflash2_head.cu)
++// Draft-only int4 LM head with fused top-16 for DFlash2 at M <= 8 rows (see dflash2_head.cu); id_map
++// (ext 9005) maps a pruned head's columns to token ids
+ 
+ void dflash2_q4_head_topk
+ (
+@@ -17,5 +18,6 @@
+     at::Tensor& part_ix,
+     at::Tensor& counter,
+     at::Tensor& values,
+-    at::Tensor& indices
++    at::Tensor& indices,
++    const c10::optional<at::Tensor>& id_map
+ );
+--- a/generator/job.py
++++ b/generator/job.py
+@@ -1399,6 +1399,11 @@
+                     self.generator.model.prefill(input_ids = prefill_ids, params = params)
+ 
+                 if self.generator.dflash_draft:
++                    # Per-job draft state (ext 9005c: the pruned-head policy) starts fresh with the job's prefill;
++                    # host-only, eager, outside every captured graph
++                    begin_job = getattr(self.generator.draft_model, "begin_job", None)
++                    if begin_job is not None:
++                        begin_job()
+                     self.generator.draft_model.update_kv_from_target(
+                         target_hidden = params.get("export_states"),
+                         cache = self.generator.draft_cache,
+--- /dev/null
++++ b/modules/arch_specific/dflash2_head_blocks.py
+@@ -0,0 +1,171 @@
++"""
++Block table and runtime policy of the DFlash2 pruned int4 draft head (eta ext patch 9005).
++
++The pruned head proposes only from the first N entries of DRAFT_HEAD_BLOCK_ORDER, whole 128-id blocks of the
++target vocabulary (N = 896 by default, 1024 selectable). EXL3 rotates the head's outputs in 128-column Hadamard
++groups, so an aligned 128-column block slices exactly out of the head (Q4DraftHead packs it first).
++
++Ranking recipe (offline, deterministic; no benchmark prompt, answer or trace is read; tools and corpus in the
++DraftProj q4p work directory: select_order.py):
++  1. Forced, first: blocks 0..127 (ids 0..16383, the lowest BPE merge ranks) and the added/special-token blocks
++     1937, 1938, then, in id order, every block holding a single-token encoding (bare or space-prefixed) of a
++     character from the Unicode Mathematical Operators, Arrows, Greek, Super/Subscripts and Number Forms blocks,
++     angle brackets, primes, ellipsis or the Latin-1 math signs: 252 blocks. Disclosure: inspecting aime eval
++     traces motivated that character class; its selection reads only Unicode ranges and the tokenizer.
++  2. Then blocks by token mass in a general local corpus of five equally weighted families: Python stdlib,
++     sympy/mpmath/networkx/numpy sources, man pages, system docs, and source code (Rust crates, the Go standard
++     library, JavaScript/TypeScript packages, libstdc++/glibc/linux C/C++ headers; the four languages weighted
++     equally), each over the files whose sha1(path) is even; ties to the lower block index.
++Tokenizer: the Qwen3.5/3.6/3.8 family (vocab 248320). Only this vocabulary has a table; any other target keeps
++the full q4 head. Full-order sha256 (json of all 1940 blocks): 0e63632f3cb376ca3fbaf1a432e33809dd3cfe8b157dfbcace4404ec18173a10
++
++Held-out coverage at N = 1024 (eval only): general text 99.77 %, independent source code 99.96 %. Non-English
++text is much lower (Danish 95 %, German 93 %, Chinese 63 %), hence the runtime fallback below.
++
++Committed tokens are always the target's greedy verify argmax, so pruning changes only which proposals are made
++(acceptance), never which token a verified position commits.
++
++Runtime policy (per draft model; the server runs one sequence at a time): EXL3_DRAFT_HEAD_PRUNED
++  "1" (default)  adaptive: propose from the pruned head; a token the pruned head cannot propose can only be
++                 committed as the round's last token, i.e. the next round's anchor, so the anchors observed while
++                 pruned are exactly the out-of-subset committed tokens. When FALLBACK_TRIGGER of the last
++                 FALLBACK_WINDOW pruned rounds were anchored on an out-of-subset token (non-English text, rare
++                 scripts), propose from the full head for FALLBACK_HOLD rounds, then try the pruned head again.
++  "static"       always the pruned head (measurement)
++  "0"            the full q4 head (the pre-9005 path)
++EXL3_DRAFT_HEAD_BLOCKS: "896" (default) or "1024". Any other value of either raises at attach (fail closed).
++"""
++
++import os
++
++DRAFT_HEAD_VOCAB = 248320
++DRAFT_HEAD_BLOCK = 128
++DRAFT_HEAD_FORCED_BLOCKS = 252
++DRAFT_HEAD_BLOCKS_ALLOWED = (896, 1024)
++DRAFT_HEAD_BLOCKS_DEFAULT = 896
++FALLBACK_WINDOW = 32
++FALLBACK_TRIGGER = 2
++FALLBACK_HOLD = 128
++PRUNED_ENV = "EXL3_DRAFT_HEAD_PRUNED"
++BLOCKS_ENV = "EXL3_DRAFT_HEAD_BLOCKS"
++
++# The table holds the first 1024 entries of the order (the largest selectable N)
++DRAFT_HEAD_BLOCK_ORDER = (
++    0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29,
++    30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56, 57,
++    58, 59, 60, 61, 62, 63, 64, 65, 66, 67, 68, 69, 70, 71, 72, 73, 74, 75, 76, 77, 78, 79, 80, 81, 82, 83, 84, 85,
++    86, 87, 88, 89, 90, 91, 92, 93, 94, 95, 96, 97, 98, 99, 100, 101, 102, 103, 104, 105, 106, 107, 108, 109, 110,
++    111, 112, 113, 114, 115, 116, 117, 118, 119, 120, 121, 122, 123, 124, 125, 126, 127, 1937, 1938, 133, 143, 144,
++    153, 163, 183, 187, 197, 208, 222, 224, 227, 234, 240, 248, 250, 251, 252, 270, 274, 279, 281, 287, 290, 299,
++    312, 316, 317, 325, 326, 331, 344, 350, 358, 360, 364, 365, 385, 386, 390, 403, 408, 412, 429, 443, 446, 448,
++    449, 468, 469, 474, 508, 523, 540, 542, 550, 551, 558, 559, 575, 585, 587, 596, 599, 612, 619, 635, 641, 644,
++    667, 672, 676, 711, 725, 738, 744, 1163, 1164, 1165, 1168, 1170, 1172, 1173, 1174, 1180, 1182, 1183, 1195, 1196,
++    1202, 1206, 1209, 1213, 1218, 1225, 1228, 1233, 1240, 1244, 1259, 1268, 1282, 1319, 1320, 1321, 1322, 1323,
++    1324, 1325, 1326, 1340, 1361, 1372, 1377, 1393, 1407, 1454, 1627, 1648, 1653, 1657, 1862, 241, 335, 210, 171,
++    140, 149, 162, 695, 136, 130, 229, 137, 141, 135, 682, 191, 150, 371, 147, 201, 151, 132, 159, 200, 134, 138,
++    576, 232, 216, 145, 185, 131, 155, 244, 189, 158, 139, 174, 164, 148, 182, 583, 152, 129, 217, 202, 204, 146,
++    173, 205, 165, 157, 128, 401, 334, 233, 199, 142, 223, 179, 336, 196, 212, 243, 177, 207, 487, 175, 168, 235,
++    193, 288, 203, 178, 176, 192, 167, 213, 156, 186, 209, 190, 161, 289, 549, 379, 195, 188, 423, 263, 154, 170,
++    172, 247, 272, 198, 219, 306, 169, 230, 269, 166, 397, 160, 228, 285, 215, 259, 296, 238, 440, 266, 218, 211,
++    181, 260, 543, 305, 242, 237, 286, 420, 180, 332, 314, 414, 184, 214, 280, 194, 373, 236, 321, 292, 245, 278,
++    424, 231, 226, 337, 435, 262, 239, 351, 295, 413, 265, 246, 391, 297, 298, 457, 277, 465, 206, 249, 453, 301,
++    268, 220, 411, 345, 318, 450, 372, 271, 313, 221, 419, 225, 343, 359, 282, 643, 311, 273, 291, 355, 294, 422,
++    712, 300, 257, 254, 324, 418, 347, 256, 394, 315, 495, 261, 567, 253, 405, 387, 492, 511, 356, 264, 404, 328,
++    276, 396, 409, 283, 255, 307, 455, 376, 258, 441, 319, 389, 377, 436, 354, 417, 349, 267, 1636, 320, 309, 504,
++    303, 426, 329, 304, 275, 357, 348, 352, 322, 649, 375, 430, 338, 512, 368, 527, 388, 369, 327, 362, 383, 410,
++    400, 302, 353, 330, 398, 284, 628, 496, 685, 342, 402, 565, 514, 503, 560, 310, 479, 490, 406, 680, 534, 341,
++    363, 489, 483, 361, 673, 478, 382, 370, 671, 415, 339, 340, 333, 466, 293, 473, 603, 393, 588, 374, 608, 421,
++    670, 323, 384, 434, 367, 392, 499, 459, 438, 507, 439, 445, 532, 454, 498, 718, 684, 407, 544, 378, 563, 602,
++    462, 548, 509, 346, 484, 472, 399, 451, 538, 581, 442, 520, 547, 506, 460, 425, 444, 431, 632, 702, 381, 416,
++    519, 1158, 594, 480, 562, 517, 1771, 308, 427, 475, 433, 463, 497, 481, 545, 723, 366, 456, 536, 477, 655, 701,
++    580, 533, 1621, 525, 687, 546, 529, 500, 571, 610, 518, 724, 553, 502, 572, 589, 586, 663, 557, 494, 630, 609,
++    706, 432, 528, 720, 674, 713, 564, 627, 555, 486, 659, 510, 613, 633, 521, 692, 566, 488, 485, 611, 631, 690,
++    616, 622, 458, 606, 696, 428, 505, 515, 541, 726, 526, 691, 729, 660, 650, 464, 493, 617, 614, 561, 524, 625,
++    537, 593, 452, 535, 747, 395, 741, 615, 597, 470, 491, 636, 467, 666, 447, 591, 590, 607, 501, 657, 437, 736,
++    668, 574, 569, 624, 707, 745, 482, 598, 604, 530, 471, 708, 573, 669, 531, 556, 626, 522, 662, 579, 461, 568,
++    577, 689, 647, 735, 742, 743, 678, 704, 697, 380, 654, 731, 637, 1515, 584, 727, 698, 652, 683, 621, 675, 634,
++    623, 737, 618, 539, 595, 601, 715, 699, 661, 686, 714, 656, 746, 1159, 710, 578, 677, 516, 703, 719, 642, 552,
++    688, 705, 605, 694, 645, 582, 1161, 513, 653, 570, 592, 700, 600, 554, 658, 638, 728, 679, 639, 620, 1160, 681,
++    693, 722, 646, 733, 716, 1169, 640, 665, 476, 739, 648, 629, 651, 1162, 740, 721, 717, 732, 664, 730, 734, 1171,
++    1344, 709, 1166, 1761, 1194, 1343, 1205, 1349, 1351, 1211, 1210, 1318, 1246, 1353, 1406, 1167, 1280, 1204, 1264,
++    1212, 1222, 1176, 1198, 1242, 1188, 1252, 1179, 752, 1502, 1352, 1581, 1562, 1345, 748, 1175, 1860, 1285, 1178,
++    1197, 1384, 1243, 1248, 1586, 1736, 1513, 1516, 1332, 1640, 1330, 1554, 1734, 1363, 1793, 1201, 1187, 1263,
++    1517, 1388, 1395, 1549, 1878, 1245, 1442, 1189, 1177, 1732, 1378, 1544, 1396, 1239, 1777, 1615, 751, 1453, 1260,
++    1181, 1369, 1419, 1334, 1241, 1610, 1737, 1400, 1845, 1844, 1540, 1191, 1421, 1247, 1446, 1287, 1362, 1628,
++    1397, 1503, 1743, 1467, 1251, 1350, 1728, 1565, 1418, 750, 1827, 1782, 1273, 1214, 1768, 1471, 1392, 1256, 1683,
++    759, 1249, 1491, 1483, 1376, 1472, 1336, 1445, 1481, 1354, 1822, 1726, 1776, 1250, 1261, 1272, 1764, 1231, 1414,
++    1591, 1801, 1192, 1639, 1464, 1420, 753, 1283, 762, 1333, 1538, 1327, 1459, 1217, 1190, 1389, 1717, 1422, 1267,
++    1184, 1613, 1348, 1383, 1655, 1834, 1405, 1506, 1774, 1588, 1359, 1338, 1200, 1886, 1431, 1450, 1356, 1599,
++    1632, 1561, 1461, 1842, 1342, 1800, 1535, 1692, 1394, 1443, 1216, 1638, 1883, 1876, 1534, 1337, 1866, 1265,
++    1221, 1521, 1656, 1370, 1399, 1258, 1271, 1329, 1865, 1277, 1413, 1720, 1417, 1255, 1207, 1292, 1611, 1537,
++    1477, 1346, 1788, 1510, 1341, 1186, 1462, 1199, 1533, 786, 1536, 1301, 1364, 1711,
++)
++
++
++def pruned_mode() -> str:
++    """'off', 'adaptive' or 'static' from EXL3_DRAFT_HEAD_PRUNED"""
++    v = os.environ.get(PRUNED_ENV, "1")
++    modes = {"0": "off", "1": "adaptive", "static": "static"}
++    if v not in modes:
++        raise ValueError(f"{PRUNED_ENV} must be 0, 1 or static, got {v!r}")
++    return modes[v]
++
++
++def kept_blocks(vocab: int) -> list[int] | None:
++    """The kept blocks (ascending) for a target vocabulary, or None: pruning off, or no table for this vocabulary"""
++    if pruned_mode() == "off" or vocab != DRAFT_HEAD_VOCAB:
++        return None
++    raw = os.environ.get(BLOCKS_ENV, str(DRAFT_HEAD_BLOCKS_DEFAULT))
++    if not raw.isdigit() or int(raw) not in DRAFT_HEAD_BLOCKS_ALLOWED:
++        raise ValueError(f"{BLOCKS_ENV} must be one of {DRAFT_HEAD_BLOCKS_ALLOWED}, got {raw!r}")
++    n = int(raw)
++    blocks = sorted(DRAFT_HEAD_BLOCK_ORDER[:n])
++    if len(set(blocks)) != n or blocks[0] < 0 or (blocks[-1] + 1) * DRAFT_HEAD_BLOCK > vocab:
++        raise ValueError("draft head block table is inconsistent")
++    return blocks
++
++
++class PrunedHeadPolicy:
++    """Per-round choice between the pruned and the full head (adaptive mode, see the module docstring)"""
++
++    def __init__(self, blocks: list[int], vocab: int, adaptive: bool):
++        self.kept = bytearray(vocab // DRAFT_HEAD_BLOCK)
++        for b in blocks:
++            self.kept[b] = 1
++        self.adaptive = adaptive
++        self.recent = []            # out-of-subset flags of the last FALLBACK_WINDOW pruned rounds' anchors
++        self.hold = 0               # rounds left on the full head
++        self.use_pruned = True
++        self.rounds_pruned = 0
++        self.rounds_full = 0
++        self.fallbacks = 0
++
++    def reset(self):
++        """Start of a new job (ext 9005c): back to the initial state (empty window, no hold, pruned head), so a
++        hold left by the previous request never carries over. Counters are statistics and are kept"""
++        self.recent = []
++        self.hold = 0
++        self.use_pruned = True
++
++    def observe_anchor(self, token: int):
++        """Called once per draft round with the round's anchor (the last committed token), before proposing. A
++        fallback uses the full head for FALLBACK_HOLD rounds counting the triggering round. Anchors outside
++        [0, vocab) (not token ids) are not evidence and count as in-subset"""
++        if not self.adaptive:
++            self.use_pruned = True
++        elif self.hold > 0:
++            self.hold -= 1
++            self.use_pruned = self.hold == 0
++        else:
++            b = token // DRAFT_HEAD_BLOCK
++            self.recent.append(0 <= b < len(self.kept) and not self.kept[b])
++            del self.recent[:-FALLBACK_WINDOW]
++            if sum(self.recent) >= FALLBACK_TRIGGER:
++                self.hold, self.use_pruned, self.recent = FALLBACK_HOLD, False, []
++                self.fallbacks += 1
++            else:
++                self.use_pruned = True
++        if self.use_pruned:
++            self.rounds_pruned += 1
++        else:
++            self.rounds_full += 1
+--- a/modules/arch_specific/dflash2_q4_head.py
++++ b/modules/arch_specific/dflash2_q4_head.py
+@@ -10,6 +10,13 @@
+ Weights are repacked into per-lane mma.m16n8k16 A-fragment order (see dflash2_head.cu). The packing
+ functions are pure torch and run on any device, so the layout is checked on the CPU against the
+ kernel's own index expressions (fragment_rows_cols, unpack_q4).
++
++Pruned draft head (ext 9005): with kept_blocks the same full head is packed with its columns permuted, the
++kept 128-id blocks first (ascending), then every other block (ascending), and an int32 column -> token id map.
++A call over the first 128 * len(kept_blocks) columns is the pruned head: about half the weight bytes for
++N = 1024 kept blocks of 1940. The kernel ranks by token id, so the full call on the permuted copy returns
++exactly the unpermuted head's top-16, and the prefix call returns the top-16 of the kept columns with every
++value bit-identical to that column's value in the full head. One copy serves both (no extra VRAM).
+ """
+ 
+ from __future__ import annotations
+@@ -104,7 +111,8 @@
+ 
+ 
+ class Q4DraftHead:
+-    """int4 copy of an EXL3 LM head with fused top-16 (draft proposals only)"""
++    """int4 copy of an EXL3 LM head with fused top-16 (draft proposals only); with kept_blocks, a column-permuted
++    copy whose kept-block prefix is the pruned draft head (ext 9005, see the module docstring)"""
+ 
+     @staticmethod
+     def supported(lm_inner, vocab: int, top_k: int, scale: float, softcap: float) -> bool:
+@@ -118,7 +126,12 @@
+         return (top_k == HEAD_TOP_K and K % HEAD_K_MULTIPLE == 0 and 1024 <= K <= 6144 and N % 128 == 0
+                 and HEAD_TOP_K <= vocab <= N and scale > 0.0 and softcap >= 0.0)
+ 
+-    def __init__(self, lm_inner, vocab: int, top_k: int, scale: float, softcap: float):
++    def __init__(self, lm_inner, vocab: int, top_k: int, scale: float, softcap: float,
++                 kept_blocks: list[int] | None = None):
++        """kept_blocks: None for today's full head in id order, else the kept 128-id blocks (strictly increasing,
++        vocab % 128 == 0). Every column is packed from the same 2048-column reconstruct slice and the same per-row
++        int4 search as in the full head, so its weights and scales are bit-identical to the full head's; only the
++        column order differs"""
+         from ...modules.quant.exl3_lib.quantize import get_hadamard_dt
+         if not Q4DraftHead.supported(lm_inner, vocab, top_k, scale, softcap):
+             raise ValueError("Q4DraftHead: unsupported LM head (see Q4DraftHead.supported)")
+@@ -130,45 +143,85 @@
+         self.K = K
+         self.vocab = vocab
+         self.suh = lm_inner.suh
++        self.kept_blocks = None if kept_blocks is None else [int(b) for b in kept_blocks]
++        kept = None
++        if self.kept_blocks is not None:
++            kb = self.kept_blocks
++            if (vocab % 128 or not kb or len(kb) * 128 < HEAD_TOP_K or kb[0] < 0 or 128 * (kb[-1] + 1) > vocab
++                    or any(b1 <= b0 for b0, b1 in zip(kb, kb[1:]))):
++                raise ValueError("Q4DraftHead: kept blocks must be strictly increasing whole blocks of a "
++                                 "vocabulary that is a multiple of 128")
++            kept = set(kb)
+         had = get_hadamard_dt(128, dev, torch.float, 1 / math.sqrt(128))
+         n_used = (vocab + 127) // 128 * 128
+         tiles = (vocab + 15) // 16
+         self.wq = torch.empty((tiles, K // 64, 32, 4), dtype = torch.int32, device = dev)
+         self.scales = torch.empty((tiles, K // 128, 8, 2), dtype = torch.half, device = dev)
++        # Tile cursors: kept columns fill tiles [0, keep_tiles), the other columns [keep_tiles, tiles)
++        self.keep_cols = vocab if kept is None else 128 * len(kept)
++        keep_tiles = (self.keep_cols + 15) // 16
++        cur = [0, keep_tiles]
+         w = torch.empty((K, HEAD_SLICE_N), dtype = torch.half, device = dev)
+         for n0 in range(0, n_used, HEAD_SLICE_N):
+             n1 = min(n0 + HEAD_SLICE_N, n_used)
+             ws = w[:, : n1 - n0]
+             ext.reconstruct_slice(ws, lm_inner.trellis, lm_inner.K, lm_inner.mcg, lm_inner.mul1, n0)
+             wr = (ws.float().view(K, -1, 128) @ had).view(K, n1 - n0) * lm_inner.svh[n0:n1].float()
+-            v1 = min(n1, vocab)
+-            wq, sc = pack_q4(wr[:, : v1 - n0].T.contiguous())
+-            t0 = n0 // 16
+-            self.wq[t0 : t0 + wq.shape[0]] = wq
+-            self.scales[t0 : t0 + sc.shape[0]] = sc
+-            del wr, wq, sc
++            if kept is None:
++                parts = [(0, wr[:, : min(n1, vocab) - n0])]
++            else:
++                blocks = range(n0 // 128, n1 // 128)
++                parts = []
++                for side, sel in ((0, [b for b in blocks if b in kept]), (1, [b for b in blocks if b not in kept])):
++                    if sel:
++                        cols = torch.tensor([128 * b - n0 + c for b in sel for c in range(128)], device = dev)
++                        parts.append((side, wr.index_select(1, cols)))
++            for side, wp in parts:
++                wq, sc = pack_q4(wp.T.contiguous())
++                t0 = cur[side]
++                self.wq[t0 : t0 + wq.shape[0]] = wq
++                self.scales[t0 : t0 + sc.shape[0]] = sc
++                cur[side] += wq.shape[0]
++            del wr
+         del w
++        if (kept is None and cur[0] != tiles) or (kept is not None and cur != [keep_tiles, tiles]):
++            raise RuntimeError(f"Q4DraftHead: packed tile cursors {cur}, expected {keep_tiles} / {tiles}")
++        # Column -> token id: kept blocks' ids ascending, then every other id ascending (None: identity)
++        self.id_map = None
++        if kept is not None:
++            ids = torch.arange(vocab, dtype = torch.int64).view(-1, 128)
++            mask = torch.zeros(vocab // 128, dtype = torch.bool)
++            mask[torch.tensor(self.kept_blocks)] = True
++            self.id_map = torch.cat((ids[mask].flatten(), ids[~mask].flatten())).to(device = dev, dtype = torch.int32)
+         sms = torch.cuda.get_device_properties(dev).multi_processor_count
+-        grid = min(sms, tiles)
++        grid = min(sms, keep_tiles)
+         self.part_v = torch.empty((grid * 8 * 16,), dtype = torch.float, device = dev)
+         self.part_ix = torch.empty((grid * 8 * 16,), dtype = torch.int, device = dev)
+         self.counter = torch.zeros((1,), dtype = torch.int, device = dev)
+         torch.cuda.synchronize(dev)
+ 
+     def vram_bytes(self) -> int:
+-        return self.wq.numel() * 4 + self.scales.numel() * 2 + self.part_v.numel() * 8 + 4
+-
+-    def topk(self, state: torch.Tensor, row0: int) -> tuple[torch.Tensor, torch.Tensor]:
++        return (self.wq.numel() * 4 + self.scales.numel() * 2 + self.part_v.numel() * 8 + 4
++                + (self.id_map.numel() * 4 if self.id_map is not None else 0))
++
++    def topk(self, state: torch.Tensor, row0: int, pruned: bool = False) -> tuple[torch.Tensor, torch.Tensor]:
+         """state [1, m, K] -> (unary fp32 [1, m - row0, 16], cands int64 [1, m - row0, 16]): per row the 16
+-        best of softcap(scale * logit), descending by value, then lower id, rows row0.. of the block"""
++        best of softcap(scale * logit), descending by value, then lower token id, rows row0.. of the block. pruned
++        (a head built with kept_blocks) restricts the candidates to the kept blocks' ids"""
+         if state.dim() != 3 or state.shape[0] != 1 or not row0 < state.shape[1] <= 8:
+             raise ValueError("Q4DraftHead.topk: needs one sequence of <= 8 rows")
++        if pruned and self.kept_blocks is None:
++            raise ValueError("Q4DraftHead.topk: pruned call on a head built without kept blocks")
+         x = state[0].to(self.device).half().contiguous()
+         xr = torch.empty_like(x)
+         ext.had_r_128(x, xr, self.suh, None, 1.0)
+         rows = x.shape[0] - row0
+         values = torch.empty((rows, HEAD_TOP_K), dtype = torch.float, device = self.device)
+         indices = torch.empty((rows, HEAD_TOP_K), dtype = torch.long, device = self.device)
+-        ext.dflash2_q4_head_topk(xr, self.wq, self.scales, self.vocab, row0, self.scale, self.softcap,
+-                                 self.part_v, self.part_ix, self.counter, values, indices)
++        n = self.keep_cols if pruned else self.vocab
++        wq, sc, im = self.wq, self.scales, self.id_map
++        if n != self.vocab:
++            wq, sc, im = wq[: n // 16], sc[: n // 16], im[:n]
++        ext.dflash2_q4_head_topk(xr, wq, sc, n, row0, self.scale, self.softcap,
++                                 self.part_v, self.part_ix, self.counter, values, indices, im)
+         return values.unsqueeze(0), indices.unsqueeze(0)

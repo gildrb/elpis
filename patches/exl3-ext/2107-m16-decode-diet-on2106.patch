@@ -1,0 +1,395 @@
+--- a/exllamav3_ext/quant/exl3_gemm_m16.cu
++++ b/exllamav3_ext/quant/exl3_gemm_m16.cu
+@@ -95,16 +95,19 @@
+ }
+ 
+ // ext 2106 instruction diet of the decode m16 loops (m16g, 8201 MLP, 8202/8205 layer tail): bit-identical
+-// leaner loop bookkeeping; on unless EXL3_M16_DIET=0; torch.ops.exl3_m16.diet(mode) overrides it at run time
+-// (read at launch / graph capture)
++// leaner loop bookkeeping (mode 1); ext 2107 mode 2 = 2106 + the hoisted-address / byte-permute decode and the
++// hoisted L2 policy (bit-identical). EXL3_M16_DIET = 0 / 1 / 2 (default 2); torch.ops.exl3_m16.diet(mode)
++// overrides it at run time (read at launch / graph capture: set it before the model captures its graphs)
+ int exl3_m16_diet(int set)
+ {
+     static int mode = []
+     {
+         const char* env = std::getenv("EXL3_M16_DIET");
+-        return (env && env[0] == '0' && !env[1]) ? 0 : 1;
++        if (!env || !env[0]) return 2;
++        TORCH_CHECK((env[0] == '0' || env[0] == '1' || env[0] == '2') && !env[1], "EXL3_M16_DIET must be 0, 1 or 2, got '", env, "'");
++        return env[0] - '0';
+     }();
+-    if (set >= 0) mode = set ? 1 : 0;
++    if (set >= 0) mode = set > 2 ? 2 : set;
+     return mode;
+ }
+ 
+--- a/exllamav3_ext/quant/exl3_gemm_m16.cuh
++++ b/exllamav3_ext/quant/exl3_gemm_m16.cuh
+@@ -9,7 +9,7 @@
+ 
+ bool exl3_gemm_m16_enabled();
+ 
+-// ext 2106: diet mode of the m16g / MLP / tail kernels (1 on, 0 off; set < 0 = query); returns the mode
++// ext 2106: diet mode of the m16g / MLP / tail kernels (0 off, 1 = 2106, 2 = 2106 + 2107; set < 0 = query); returns the mode
+ int exl3_m16_diet(int set = -1);
+ 
+ bool exl3_gemm_m16_supported(int size_m, int size_k, int size_n, int K, bool mcg, bool mul1);
+--- a/exllamav3_ext/quant/exl3_gemm_m16_op.cpp
++++ b/exllamav3_ext/quant/exl3_gemm_m16_op.cpp
+@@ -58,7 +58,7 @@
+ 
+ TORCH_LIBRARY(exl3_m16, m)
+ {
+-    m.def("diet", &exl3_m16_diet_op);   // ext 2106: set diet mode (0/1; -1 query), returns the previous one
++    m.def("diet", &exl3_m16_diet_op);   // ext 2106: set diet mode (0/1/2; -1 query), returns the previous one
+     m.def("gemm", &exl3_gemm_m16_op);
+     m.def("gemm_dbg", &exl3_gemm_m16_dbg_op);
+ }
+--- a/exllamav3_ext/quant/exl3_gemm_m16g.cu
++++ b/exllamav3_ext/quant/exl3_gemm_m16g.cu
+@@ -46,10 +46,10 @@
+     int blocks_per_sm;
+ };
+ 
+-template <int MT, bool c_fp32, bool DIET>
++template <int MT, bool c_fp32, int DIET>
+ void* kernel_ptr() { return (void*) exl3_gemm_m16g_kernel<MT, c_fp32, 2, DIET>; }
+ 
+-template <bool DIET>
++template <int DIET>
+ void* kernel_ptr_d(int MT, bool c_fp32)
+ {
+     return MT == 1 ? (c_fp32 ? kernel_ptr<1, true, DIET>() : kernel_ptr<1, false, DIET>())
+@@ -59,13 +59,13 @@
+ // ext 2106: the diet instance when exl3_m16_diet() is on (bit-identical)
+ M16GLaunch get_launch(int MT, bool c_fp32, int device)
+ {
+-    static M16GLaunch cache[MAX_DEVICES][2][2][2] = {};
++    static M16GLaunch cache[MAX_DEVICES][2][2][3] = {};
+     const int diet = exl3_m16_diet();
+     std::lock_guard<std::mutex> lock(g_mtx);
+     M16GLaunch& l = cache[device][MT - 1][c_fp32 ? 1 : 0][diet];
+     if (!l.kernel)
+     {
+-        void* k = diet ? kernel_ptr_d<true>(MT, c_fp32) : kernel_ptr_d<false>(MT, c_fp32);
++        void* k = diet == 2 ? kernel_ptr_d<2>(MT, c_fp32) : diet == 1 ? kernel_ptr_d<1>(MT, c_fp32) : kernel_ptr_d<0>(MT, c_fp32);
+         int sm = MT == 1 ? Exl3M16Cfg<1>::SMEM : Exl3M16Cfg<2>::SMEM;
+         cuda_check(cudaFuncSetAttribute(k, cudaFuncAttributeMaxDynamicSharedMemorySize, sm));
+         cuda_check(cudaFuncSetAttribute(k, cudaFuncAttributePreferredSharedMemoryCarveout, (int) cudaSharedmemCarveoutMaxShared));
+--- a/exllamav3_ext/quant/exl3_gemm_m16g_kernel.cuh
++++ b/exllamav3_ext/quant/exl3_gemm_m16g_kernel.cuh
+@@ -25,6 +25,7 @@
+ 
+ #include <cooperative_groups.h>
+ #include "exl3_gemm_m16_kernel.cuh"
++#include "exl3_m16_decode.cuh"
+ 
+ #define EXL3_M16G_MAX_MATS 4
+ 
+@@ -106,7 +107,7 @@
+ // per-issue k-tile wrap test, a segment countdown for the loop exit and the fold test on the
+ // activation offset. Same cp.async issue sequence, commit groups, waits, ldmatrix
+ // addresses, decode, MMA order and fold points, so outputs are bit-identical to DIET = false
+-template <int MT, bool c_fp32, int cb, bool DIET = false>
++template <int MT, bool c_fp32, int cb, int DIET = 0>
+ __global__ __launch_bounds__(EXL3_M16_THREADS, 2)
+ void exl3_gemm_m16g_kernel(const half* __restrict__ A, void* C0, Exl3M16GArgs p)
+ {
+@@ -246,6 +247,19 @@
+     }
+     uint32_t xbuf_sa = static_cast<uint32_t>(__cvta_generic_to_shared(xbuf)) + ldsm_off;
+     asm volatile ("" : "+r"(xbuf_sa));
++
++    // ext 2107 (DIET 2): this lane's weight-word shared addresses in ring slot 0 (words lane - 1 and lane of
++    // a 128-byte tile), the pinned activation ldmatrix base and the weight stream's L2 policy, all hoisted
++    uint32_t dw0 = 0, dw1 = 0, dxs = xbuf_sa;
++    uint64_t dpol = 0;
++    if constexpr (DIET >= 2)
++    {
++        const uint32_t rs = static_cast<uint32_t>(__cvta_generic_to_shared(ring));
++        dw0 = rs + ((lane + 31) & 31) * 4;
++        dw1 = rs + lane * 4;
++        asm volatile ("" : "+r"(dw0), "+r"(dw1), "+r"(dxs));
++        dpol = m16_stream_policy();
++    }
+ 
+     FragC_h hacc[EXL3_M16_TILES_W][MT];
+     FragC acc[EXL3_M16_TILES_W][MT];
+@@ -394,7 +408,8 @@
+                 }
+                 if (iss_left > 0)
+                 {
+-                    cp_async_stream(ring_lane + iss_off, iss_ptr);
++                    if constexpr (DIET >= 2) cp_async_stream_pol(ring_lane + iss_off, iss_ptr, dpol);
++                    else cp_async_stream(ring_lane + iss_off, iss_ptr);
+                     if (--iss_left == 0)
+                     {
+                         // 2102's wrap: iss_j and iss_kt advance to the next group's first k-tile
+@@ -413,7 +428,8 @@
+                 cp_async_fence();
+                 cp_async_wait<PF - 1>();
+                 __syncwarp();
+-                mma_tile(xbuf_sa + x_off, ring + cur_off);
++                if constexpr (DIET >= 2) m16_tile_diet<MT, cb>(dxs + x_off, dw0 + cur_off, dw1 + cur_off, hacc);
++                else mma_tile(xbuf_sa + x_off, ring + cur_off);
+                 __syncwarp();
+                 cur_off = (cur_off + W_STAGE) & RING_MASK;
+                 x_off = (x_off + X_ITER) & XBUF_MASK;
+--- /dev/null
++++ b/exllamav3_ext/quant/exl3_m16_decode.cuh
+@@ -0,0 +1,95 @@
++#pragma once
++
++// ext 2107 (diet mode 2 of torch.ops.exl3_m16.diet / EXL3_M16_DIET): bit-identical decode diet of the m16 hot
++// loops (layer tail, 8201 MLP, m16g). Same weight words, same trellis windows, same codebook (decode_3inst_2),
++// same fragment order and MMA sequence as dq8_aligned_4bits; only how the words are addressed and the windows
++// extracted changes:
++// - the two words of a lane (word lane - 1 and word lane of each 128-byte tile) are read with ld.shared at a
++//   per-lane shared address computed once per kernel plus the ring-slot offset (+ t * 128 as an immediate),
++//   instead of re-deriving the generic address per tile;
++// - the eight 16-bit windows at bit offsets 0, 4, ..., 28 of {a:b}: the byte-aligned ones (0, 8, 16 of b and
++//   of u = {a:b} >> 4, 8 of s = {a:b} >> 20) are each one byte permute with zero fill, window 24 is one funnel
++//   shift + mask (whatif/extract_check.cpp: identical windows on 5e7 word pairs);
++// - the weight cp.async uses an L2 evict-first policy created once per kernel (the same policy
++//   dq/cp_async_stream creates per call).
++
++__device__ __forceinline__ uint64_t m16_stream_policy()
++{
++    uint64_t p;
++    asm volatile ("createpolicy.fractional.L2::evict_first.b64 %0, 1.0;\n" : "=l"(p));
++    return p;
++}
++
++__device__ __forceinline__ void cp_async_stream_pol(void* smem_ptr, const void* glob_ptr, uint64_t pol)
++{
++    uint32_t smem = static_cast<uint32_t>(__cvta_generic_to_shared(smem_ptr));
++    asm volatile ("cp.async.cg.shared.global.L2::cache_hint [%0], [%1], 16, %2;\n" :: "r"(smem), "l"(glob_ptr), "l"(pol));
++}
++
++template <int OFF>
++__device__ __forceinline__ uint32_t m16_lds(uint32_t addr)
++{
++    uint32_t v;
++    asm volatile ("ld.shared.u32 %0, [%1+%2];\n" : "=r"(v) : "r"(addr), "n"(OFF));
++    return v;
++}
++
++template <int cb>
++__device__ __forceinline__ void dq8_m16_regs(uint32_t a, uint32_t b, FragB& frag0, FragB& frag1)
++{
++    const uint32_t u = __funnelshift_r(b, a, 4);
++    const uint32_t s = __funnelshift_r(b, a, 20);
++    const uint32_t t = __funnelshift_r(b, a, 24);
++    const uint32_t w7 = __byte_perm(b, 0, 0x4410);
++    const uint32_t w5 = __byte_perm(b, 0, 0x4421);
++    const uint32_t w3 = __byte_perm(b, 0, 0x4432);
++    const uint32_t w6 = __byte_perm(u, 0, 0x4410);
++    const uint32_t w4 = __byte_perm(u, 0, 0x4421);
++    const uint32_t w2 = __byte_perm(u, 0, 0x4432);
++    const uint32_t w1 = t & 0xffff;
++    const uint32_t w0 = __byte_perm(s, 0, 0x4421);
++    frag0[0] = decode_3inst_2<cb>(w0, w1);
++    frag0[1] = decode_3inst_2<cb>(w2, w3);
++    frag1[0] = decode_3inst_2<cb>(w4, w5);
++    frag1[1] = decode_3inst_2<cb>(w6, w7);
++}
++
++// The m16 tile step of the diet: ldmatrix of the activation piece at sa, the 4 weight tiles of the ring slot
++// at byte offset off (words at w0 + off + t * 128 and w1 + off + t * 128), decode, MMA into hacc -- the same
++// operations in the same order as the loops' mma_tile with dq8_aligned_4bits
++template <int MT, int cb, typename Acc>
++__device__ __forceinline__ void m16_tile_diet(uint32_t sa, uint32_t w0, uint32_t w1, Acc& hacc)
++{
++    static_assert(EXL3_M16_TILES_W == 4, "4 weight tiles per warp");
++    uint32_t bx[MT][2];
++    if constexpr (MT == 2)
++        asm volatile ("ldmatrix.sync.aligned.m8n8.x4.shared.b16 {%0,%1,%2,%3}, [%4];\n"
++            : "=r"(bx[0][0]), "=r"(bx[0][1]), "=r"(bx[1][0]), "=r"(bx[1][1]) : "r"(sa));
++    else
++        asm volatile ("ldmatrix.sync.aligned.m8n8.x2.shared.b16 {%0,%1}, [%2];\n"
++            : "=r"(bx[0][0]), "=r"(bx[0][1]) : "r"(sa));
++    uint32_t wa[4], wb[4];
++    wa[0] = m16_lds<0>(w0);   wb[0] = m16_lds<0>(w1);
++    wa[1] = m16_lds<128>(w0); wb[1] = m16_lds<128>(w1);
++    wa[2] = m16_lds<256>(w0); wb[2] = m16_lds<256>(w1);
++    wa[3] = m16_lds<384>(w0); wb[3] = m16_lds<384>(w1);
++    #pragma unroll
++    for (int t = 0; t < 4; ++t)
++    {
++        FragB f0, f1;
++        dq8_m16_regs<cb>(wa[t], wb[t], f0, f1);
++        FragA a;
++        a[0] = f0[0];
++        a[1] = f1[0];
++        a[2] = f0[1];
++        a[3] = f1[1];
++        #pragma unroll
++        for (int mt = 0; mt < MT; ++mt)
++        {
++            FragB bb;
++            bb[0] = *reinterpret_cast<half2*>(&bx[mt][0]);
++            bb[1] = *reinterpret_cast<half2*>(&bx[mt][1]);
++            ptx_mma_m16n8k16(a, bb, hacc[t][mt]);
++        }
++    }
++}
+--- a/exllamav3_ext/quant/exl3_mlp_m16.cu
++++ b/exllamav3_ext/quant/exl3_mlp_m16.cu
+@@ -121,10 +121,10 @@
+     g_weights_init = true;
+ }
+ 
+-template <int MT, bool d_fp32, bool DIET>
++template <int MT, bool d_fp32, int DIET>
+ void* kernel_ptr() { return (void*) exl3_mlp_m16_kernel<MT, d_fp32, DIET>; }
+ 
+-template <bool DIET>
++template <int DIET>
+ void* kernel_ptr_d(int MT, bool d_fp32)
+ {
+     return MT == 1 ? (d_fp32 ? kernel_ptr<1, true, DIET>() : kernel_ptr<1, false, DIET>())
+@@ -140,13 +140,13 @@
+ 
+ Launch get_launch(int MT, bool d_fp32, int device)
+ {
+-    static Launch cache[MAX_DEVICES][2][2][2] = {};
++    static Launch cache[MAX_DEVICES][2][2][3] = {};
+     const int diet = exl3_m16_diet();   // ext 2106 (bit-identical instance)
+     std::lock_guard<std::mutex> lock(g_mtx);
+     Launch& l = cache[device][MT - 1][d_fp32 ? 1 : 0][diet];
+     if (!l.kernel)
+     {
+-        void* k = diet ? kernel_ptr_d<true>(MT, d_fp32) : kernel_ptr_d<false>(MT, d_fp32);
++        void* k = diet == 2 ? kernel_ptr_d<2>(MT, d_fp32) : diet == 1 ? kernel_ptr_d<1>(MT, d_fp32) : kernel_ptr_d<0>(MT, d_fp32);
+         int sm = MT == 1 ? Exl3M16Cfg<1>::SMEM : Exl3M16Cfg<2>::SMEM;
+         cuda_check(cudaFuncSetAttribute(k, cudaFuncAttributeMaxDynamicSharedMemorySize, sm));
+         cuda_check(cudaFuncSetAttribute(k, cudaFuncAttributePreferredSharedMemoryCarveout, (int) cudaSharedmemCarveoutMaxShared));
+--- a/exllamav3_ext/quant/exl3_mlp_m16_kernel.cuh
++++ b/exllamav3_ext/quant/exl3_mlp_m16_kernel.cuh
+@@ -42,6 +42,7 @@
+ //   fence and the adds of all the slice's groups after its last flush. vperm (diagnostic): see below.
+ 
+ #include "exl3_gemm_m16_kernel.cuh"
++#include "exl3_m16_decode.cuh"
+ #include "exl3_mlp_m16_sched.h"
+ 
+ #define EXL3_MLP_M16_NCNT (5 * EXL3_MLP_SCHED_PAIRS + 1)
+@@ -220,7 +221,7 @@
+ // iss_j < n_tot, a segment countdown for the loop exit, the fold test on the activation offset);
+ // same cp.async sequence, commit groups, waits, addresses, MMA order and folds, so
+ // bit-identical to DIET = false
+-template <int MT, bool d_fp32, bool DIET = false>
++template <int MT, bool d_fp32, int DIET = 0>
+ __global__ __launch_bounds__(EXL3_M16_THREADS, 2)
+ void exl3_mlp_m16_kernel(const half* __restrict__ A, half* Cg, half* Cu, void* D, Exl3MlpM16Args p)
+ {
+@@ -441,6 +442,19 @@
+         ldsm_off = ((i & 1) * ROWS + (i >> 1) * 8 + (lane & 7)) * 16;
+     }
+     const uint32_t xbuf_sa = static_cast<uint32_t>(__cvta_generic_to_shared(xbuf)) + ldsm_off;
++
++    // ext 2107 (DIET 2): this lane's weight-word shared addresses in ring slot 0 (words lane - 1 and lane of
++    // a 128-byte tile), the pinned activation ldmatrix base and the weight stream's L2 policy, all hoisted
++    uint32_t dw0 = 0, dw1 = 0, dxs = xbuf_sa;
++    uint64_t dpol = 0;
++    if constexpr (DIET >= 2)
++    {
++        const uint32_t rs = static_cast<uint32_t>(__cvta_generic_to_shared(ring));
++        dw0 = rs + ((lane + 31) & 31) * 4;
++        dw1 = rs + lane * 4;
++        asm volatile ("" : "+r"(dw0), "+r"(dw1), "+r"(dxs));
++        dpol = m16_stream_policy();
++    }
+ 
+     FragC_h hacc[EXL3_M16_TILES_W][MT];
+     FragC acc[EXL3_M16_TILES_W][MT];
+@@ -590,7 +604,8 @@
+                     }
+                     if (iss_rem > 0)
+                     {
+-                        cp_async_stream(ring_lane + iss_off, iss_ptr);
++                        if constexpr (DIET >= 2) cp_async_stream_pol(ring_lane + iss_off, iss_ptr, dpol);
++                        else cp_async_stream(ring_lane + iss_off, iss_ptr);
+                         if (--iss_rem == 0)
+                         {
+                             // iss_j (run end) is the issue cursor here
+@@ -606,7 +621,8 @@
+                     cp_async_fence();
+                     cp_async_wait<PF - 1>();
+                     __syncwarp();
+-                    mma_tile(xbuf_sa + x_off, ring + cur_off);
++                    if constexpr (DIET >= 2) m16_tile_diet<MT, 2>(dxs + x_off, dw0 + cur_off, dw1 + cur_off, hacc);
++                    else mma_tile(xbuf_sa + x_off, ring + cur_off);
+                     __syncwarp();
+                     cur_off = (cur_off + W_STAGE) & RING_MASK;
+                     x_off = (x_off + X_ITER) & XBUF_MASK;
+--- a/exllamav3_ext/quant/exl3_tail_m16.cu
++++ b/exllamav3_ext/quant/exl3_tail_m16.cu
+@@ -61,13 +61,13 @@
+ 
+ Launch get_launch(int device)
+ {
+-    static Launch cache[MAX_DEVICES][2] = {};
++    static Launch cache[MAX_DEVICES][3] = {};
+     const int diet = exl3_m16_diet();   // ext 2106 (bit-identical instance)
+     std::lock_guard<std::mutex> lock(g_mtx);
+     Launch& l = cache[device][diet];
+     if (!l.kernel)
+     {
+-        void* k = diet ? (void*) exl3_tail_m16_kernel<0, true> : (void*) exl3_tail_m16_kernel<0, false>;
++        void* k = diet == 2 ? (void*) exl3_tail_m16_kernel<0, 2> : diet == 1 ? (void*) exl3_tail_m16_kernel<0, 1> : (void*) exl3_tail_m16_kernel<0, 0>;
+         int sm = Exl3M16Cfg<1>::SMEM;
+         cuda_check(cudaFuncSetAttribute(k, cudaFuncAttributeMaxDynamicSharedMemorySize, sm));
+         cuda_check(cudaFuncSetAttribute(k, cudaFuncAttributePreferredSharedMemoryCarveout, (int) cudaSharedmemCarveoutMaxShared));
+--- a/exllamav3_ext/quant/exl3_tail_m16_kernel.cuh
++++ b/exllamav3_ext/quant/exl3_tail_m16_kernel.cuh
+@@ -69,7 +69,7 @@
+ // iss_j < n_tot, a segment countdown for the loop exit, the fold test on the activation offset);
+ // same cp.async sequence, commit groups, waits, addresses, MMA order and folds, so
+ // bit-identical to DIET = false
+-template <int dummy, bool DIET = false>
++template <int dummy, int DIET = 0>
+ __global__ __launch_bounds__(EXL3_M16_THREADS, 2)
+ void exl3_tail_m16_kernel(const half* __restrict__ Ao, float* X, float* D, Exl3TailM16Args p)
+ {
+@@ -313,6 +313,19 @@
+     }
+     const uint32_t xbuf_sa = static_cast<uint32_t>(__cvta_generic_to_shared(xbuf)) + ldsm_off;
+ 
++    // ext 2107 (DIET 2): this lane's weight-word shared addresses in ring slot 0 (words lane - 1 and lane of
++    // a 128-byte tile), the pinned activation ldmatrix base and the weight stream's L2 policy, all hoisted
++    uint32_t dw0 = 0, dw1 = 0, dxs = xbuf_sa;
++    uint64_t dpol = 0;
++    if constexpr (DIET >= 2)
++    {
++        const uint32_t rs = static_cast<uint32_t>(__cvta_generic_to_shared(ring));
++        dw0 = rs + ((lane + 31) & 31) * 4;
++        dw1 = rs + lane * 4;
++        asm volatile ("" : "+r"(dw0), "+r"(dw1), "+r"(dxs));
++        dpol = m16_stream_policy();
++    }
++
+     FragC_h hacc[EXL3_M16_TILES_W][MT];
+     FragC acc[EXL3_M16_TILES_W][MT];
+     const half2 hzero = __half2half2(__ushort_as_half(0));
+@@ -458,7 +471,8 @@
+                     }
+                     if (iss_rem > 0)
+                     {
+-                        cp_async_stream(ring_lane + iss_off, iss_ptr);
++                        if constexpr (DIET >= 2) cp_async_stream_pol(ring_lane + iss_off, iss_ptr, dpol);
++                        else cp_async_stream(ring_lane + iss_off, iss_ptr);
+                         if (--iss_rem == 0)
+                         {
+                             // iss_j (run end) is the issue cursor here
+@@ -474,7 +488,8 @@
+                     cp_async_fence();
+                     cp_async_wait<PF - 1>();
+                     __syncwarp();
+-                    mma_tile(xbuf_sa + x_off, ring + cur_off);
++                    if constexpr (DIET >= 2) m16_tile_diet<MT, 2>(dxs + x_off, dw0 + cur_off, dw1 + cur_off, hacc);
++                    else mma_tile(xbuf_sa + x_off, ring + cur_off);
+                     __syncwarp();
+                     cur_off = (cur_off + W_STAGE) & RING_MASK;
+                     x_off = (x_off + X_ITER) & XBUF_MASK;

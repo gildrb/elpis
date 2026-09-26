@@ -1,0 +1,316 @@
+--- a/exllamav3_ext/hgemm_f16acc.cu
++++ b/exllamav3_ext/hgemm_f16acc.cu
+@@ -17,6 +17,7 @@
+ #include "util.h"
+ #include "util.cuh"
+ #include "quant/exl3_devctx.cuh"
++#include "hgemm_f16acc_wide.cuh"
+ #include <mutex>
+ #include <cstdlib>
+ #include <cstring>
+@@ -485,10 +486,79 @@
+     cuda_check(cudaPeekAtLastError());
+ }
+ 
++// Ampere wide-warp tiles for the prefill reconstruct GEMMs (sm86 only: measured on the RTX 3090 at its
++// 350 W cap, -21.6 % per 2048-row chunk of 408 linears, reconstruct included). Every output element
++// gets exactly gemm_kernel's sequence (per 32-wide K slice, in order: two fp16-accumulator k16 MMAs
++// from +0, then one fp32 add), so the result is bit-identical; only the tiling differs: 128x128x32
++// blocks of 4 warps with 64x64 warp tiles, 3 swizzled cp.async stages, 2 blocks per SM.
++// Route: exactly the served (K, N, output dtype) shapes of Qwen3.8-27B + its DFlash2 draft, M >= 1024,
++// unbatched; everything else keeps the untuned layout. Kill switch EXL3_HGEMM_F16ACC_WIDE: unset or
++// "1" = on, "0" = off, anything else is an error (read per call, so one process can A/B it).
++//                                  BM   BN  BK WM WN ST  G MINB
++using Wide = f16acc_wide::Cfg<128, 128, 32, 2, 2, 3,  8, 2>;
++
++struct WideShape { int K, N; bool out_f32; };
++static constexpr WideShape wide_shapes[] = {
++    {  5120,  1024, false },    // attention k/v proj, draft k/v proj
++    {  5120,  6144, true  },    // GDN in_proj_z
++    {  5120, 10240, true  },    // GDN in_proj_qkv
++    {  5120, 12288, false },    // attention q_proj (q|gate)
++    {  5120, 17408, false },    // MLP gate/up
++    {  6144,  5120, true  },    // GDN out_proj, attention o_proj
++    { 17408,  5120, true  },    // MLP down
++    { 25600,  5120, false },    // draft fc
++};
++
++static bool wide_enabled()
++{
++    const char* env = std::getenv("EXL3_HGEMM_F16ACC_WIDE");
++    if (!env || std::strcmp(env, "1") == 0) return true;
++    TORCH_CHECK(std::strcmp(env, "0") == 0, "EXL3_HGEMM_F16ACC_WIDE must be 0 or 1");
++    return false;
++}
++
++// true = launch the wide kernel for this GEMM
++static bool wide_route(const at::Tensor& a, const at::Tensor& b, const at::Tensor& c)
++{
++    if (!wide_enabled()) return false;
++    const auto* props = at::cuda::getDeviceProperties(a.device().index());
++    if (props->major != 8 || props->minor != 6) return false;
++    if (a.dim() == 3 && a.size(0) != 1) return false;
++    const int64_t M = a.size(-2), K = a.size(-1), N = b.size(-1);
++    if (M < 1024) return false;
++    const bool out_f32 = c.dtype() == at::kFloat;
++    for (const WideShape& s : wide_shapes)
++        if (s.K == K && s.N == N && s.out_f32 == out_f32) return true;
++    return false;
++}
++static_assert(Wide::BN == 128 && Wide::BK == 32, "every wide_shapes N is a multiple of BN and K of BK");
++
++template <bool OUT_F32>
++static void launch_wide(const at::Tensor& a, const at::Tensor& b, const at::Tensor& c, cudaStream_t stream)
++{
++    auto kern = f16acc_wide::gemm_wide_kernel<OUT_F32, Wide>;
++    static std::once_flag attr_set[MAX_DEVICES];
++    int device = a.device().index();
++    TORCH_CHECK(device >= 0 && device < MAX_DEVICES, "hgemm_f16acc: device index");
++    std::call_once(attr_set[device], [&]()
++    {
++        cuda_check(cudaFuncSetAttribute(kern, cudaFuncAttributeMaxDynamicSharedMemorySize, (int) Wide::SMEM_BYTES));
++    });
++    int M = a.size(-2), K = a.size(-1), N = b.size(-1);
++    dim3 grid(N / Wide::BN, (M + Wide::BM - 1) / Wide::BM, 1);
++    kern<<<grid, Wide::THREADS, Wide::SMEM_BYTES, stream>>>(
++        (const half*) a.data_ptr(), (const half*) b.data_ptr(), c.data_ptr(), M, N, K, (int) c.stride(-2));
++    cuda_check(cudaPeekAtLastError());
++}
++
+ template <bool OUT_F32>
+ static void launch(const at::Tensor& a, const at::Tensor& b, const at::Tensor& c, cudaStream_t stream)
+ {
+-    if (!tuned_device(a.device().index())) launch_config<OUT_F32, 128, false>(a, b, c, stream);
++    if (!tuned_device(a.device().index()))
++    {
++        if (wide_route(a, b, c)) launch_wide<OUT_F32>(a, b, c, stream);
++        else launch_config<OUT_F32, 128, false>(a, b, c, stream);
++    }
+     else if (narrow_tile(a, b)) launch_config<OUT_F32, 64, true>(a, b, c, stream);
+     else launch_config<OUT_F32, 128, true>(a, b, c, stream);
+ }
+--- /dev/null
++++ b/exllamav3_ext/hgemm_f16acc_wide.cuh
+@@ -0,0 +1,222 @@
++// Wide-tile fp16-accumulator GEMM for Ampere (sm80/86/89), bit-exact with
++// f16acc::gemm_kernel. Every output element is computed exactly as there: for each 32-wide K
++// slice s (in increasing order), h = +0 (fp16x2); h = mma(A[:, 32s:32s+16], B[32s:32s+16, :], h);
++// h = mma(A[:, 32s+16:32s+32], B[..], h); acc += float(h) (fp32, per element, slice order). Only the
++// tile partition, smem layout (XOR swizzle instead of padding), pipeline depth and warp tile change.
++//
++// C = A @ B, row-major, A [M, K], B [K, N], C [M, N] (ldc), fp16 or fp32 output.
++// Requires K % BK == 0, N % BN == 0, 16-byte aligned rows; M arbitrary (rows >= M predicated).
++#pragma once
++#include <cuda_fp16.h>
++#include <stdint.h>
++
++namespace f16acc_wide
++{
++
++__device__ __forceinline__ uint32_t smem_u32(const void* p)
++{
++    return static_cast<uint32_t>(__cvta_generic_to_shared(p));
++}
++__device__ __forceinline__ void cp_async16(void* smem, const void* gmem, bool pred)
++{
++    int src_size = pred ? 16 : 0;
++    asm volatile("cp.async.cg.shared.global [%0], [%1], 16, %2;\n"
++                 :: "r"(smem_u32(smem)), "l"(gmem), "r"(src_size));
++}
++__device__ __forceinline__ void cp_async_commit() { asm volatile("cp.async.commit_group;\n" ::); }
++template <int N> __device__ __forceinline__ void cp_async_wait() { asm volatile("cp.async.wait_group %0;\n" :: "n"(N)); }
++__device__ __forceinline__ void ldsm_x4(uint32_t* r, const void* p)
++{
++    asm volatile("ldmatrix.sync.aligned.m8n8.x4.shared.b16 {%0,%1,%2,%3}, [%4];\n"
++                 : "=r"(r[0]), "=r"(r[1]), "=r"(r[2]), "=r"(r[3]) : "r"(smem_u32(p)));
++}
++__device__ __forceinline__ void ldsm_x4_t(uint32_t* r, const void* p)
++{
++    asm volatile("ldmatrix.sync.aligned.m8n8.x4.trans.shared.b16 {%0,%1,%2,%3}, [%4];\n"
++                 : "=r"(r[0]), "=r"(r[1]), "=r"(r[2]), "=r"(r[3]) : "r"(smem_u32(p)));
++}
++__device__ __forceinline__ void mma_h(uint32_t* c, const uint32_t* a, const uint32_t* b)
++{
++    asm volatile("mma.sync.aligned.m16n8k16.row.col.f16.f16.f16.f16 {%0,%1}, {%2,%3,%4,%5}, {%6,%7}, {%0,%1};\n"
++                 : "+r"(c[0]), "+r"(c[1]) : "r"(a[0]), "r"(a[1]), "r"(a[2]), "r"(a[3]), "r"(b[0]), "r"(b[1]));
++}
++
++template <int BM_, int BN_, int BK_, int WARPS_M_, int WARPS_N_, int STAGES_, int GROUP_M_, int MINB_>
++struct Cfg
++{
++    static constexpr int BM = BM_, BN = BN_, BK = BK_, WARPS_M = WARPS_M_, WARPS_N = WARPS_N_;
++    static constexpr int STAGES = STAGES_, GROUP_M = GROUP_M_, MINB = MINB_;
++    static constexpr int THREADS = WARPS_M * WARPS_N * 32;
++    static constexpr int WM = BM / WARPS_M, WN = BN / WARPS_N, MT = WM / 16, NT = WN / 8;
++    static constexpr int A_CPR = BK / 8, B_CPR = BN / 8;
++    static constexpr int A_STAGE = BM * BK, B_STAGE = BK * BN;
++    static constexpr size_t SMEM_BYTES = (size_t) STAGES * (A_STAGE + B_STAGE) * sizeof(half);
++    static_assert(BK % 32 == 0, "K slices of 32 must not straddle tiles");
++    static_assert(WM % 16 == 0 && WN % 16 == 0, "warp tile");
++    static_assert(A_CPR == 4 || A_CPR % 8 == 0, "A swizzle");
++    static_assert(B_CPR % 8 == 0, "B swizzle");
++    static_assert((BM * A_CPR) % THREADS == 0 && (BK * B_CPR) % THREADS == 0, "load split");
++    static_assert(STAGES >= 2, "stages");
++};
++
++// Swizzled element offsets: 8 consecutive rows at one logical 16-byte chunk hit 8 distinct
++// 16-byte bank groups (ldmatrix phases), and the cp.async writes of 8 threads stay conflict-free
++template <int A_CPR, int BK> __device__ __forceinline__ int a_off(int row, int chunk)
++{
++    int pc;
++    if constexpr (A_CPR == 4) pc = chunk ^ ((row >> 1) & 3);
++    else pc = chunk ^ (row & 7);
++    return row * BK + pc * 8;
++}
++template <int BN> __device__ __forceinline__ int b_off(int row, int chunk)
++{
++    return row * BN + (chunk ^ (row & 7)) * 8;
++}
++
++template <bool OUT_F32, class CF>
++__global__ void __launch_bounds__(CF::THREADS, CF::MINB)
++gemm_wide_kernel(const half* __restrict__ A, const half* __restrict__ B, void* __restrict__ C,
++                 int M, int N, int K, int ldc)
++{
++    constexpr int BM = CF::BM, BN = CF::BN, BK = CF::BK, THREADS = CF::THREADS;
++    constexpr int STAGES = CF::STAGES, GROUP_M = CF::GROUP_M, WARPS_N = CF::WARPS_N;
++    constexpr int WM = CF::WM, WN = CF::WN, MT = CF::MT, NT = CF::NT;
++    constexpr int A_CPR = CF::A_CPR, B_CPR = CF::B_CPR, A_STAGE = CF::A_STAGE, B_STAGE = CF::B_STAGE;
++
++    extern __shared__ __align__(128) half smem[];
++    half* As = smem;
++    half* Bs = smem + STAGES * A_STAGE;
++
++    // Grouped raster (as f16acc): GROUP_M M-stripes walk one N column before the next
++    const int grid_n = gridDim.x, grid_m = gridDim.y;
++    const int bid = blockIdx.y * grid_n + blockIdx.x;
++    const int group_size = GROUP_M * grid_n;
++    const int group = bid / group_size;
++    const int first_m = group * GROUP_M;
++    const int gm_eff = min(GROUP_M, grid_m - first_m);
++    const int in_group = bid - group * group_size;
++    const int bm = (first_m + in_group % gm_eff) * BM;
++    const int bn = (in_group / gm_eff) * BN;
++
++    const int tid = threadIdx.x, warp = tid >> 5, lane = tid & 31;
++    const int wm = warp / WARPS_N, wn = warp % WARPS_N;
++
++    auto load_tile = [&](int stage, int kt)
++    {
++        const int k0 = kt * BK;
++        half* as = As + stage * A_STAGE;
++        half* bs = Bs + stage * B_STAGE;
++        #pragma unroll
++        for (int i = 0; i < BM * A_CPR / THREADS; ++i)
++        {
++            int c = tid + i * THREADS;
++            int row = c / A_CPR, chunk = c % A_CPR;
++            int grow = bm + row;
++            bool pred = grow < M;
++            const half* src = A + (long long) (pred ? grow : 0) * K + k0 + chunk * 8;
++            cp_async16(as + a_off<A_CPR, BK>(row, chunk), src, pred);
++        }
++        #pragma unroll
++        for (int i = 0; i < BK * B_CPR / THREADS; ++i)
++        {
++            int c = tid + i * THREADS;
++            int row = c / B_CPR, chunk = c % B_CPR;
++            const half* src = B + (long long) (k0 + row) * N + bn + chunk * 8;
++            cp_async16(bs + b_off<BN>(row, chunk), src, true);
++        }
++    };
++
++    float acc[MT][NT][4];
++    #pragma unroll
++    for (int i = 0; i < MT; ++i)
++        #pragma unroll
++        for (int j = 0; j < NT; ++j)
++            acc[i][j][0] = acc[i][j][1] = acc[i][j][2] = acc[i][j][3] = 0.f;
++
++    const int KT = K / BK;
++    #pragma unroll
++    for (int s = 0; s < STAGES - 1; ++s)
++    {
++        if (s < KT) load_tile(s, s);
++        cp_async_commit();
++    }
++
++    const int a_row = wm * WM + (lane & 15), a_ch = lane >> 4;
++    const int b_row = (lane & 7) + ((lane >> 3) & 1) * 8, b_ch = (wn * WN) / 8 + (lane >> 4);
++
++    for (int kt = 0; kt < KT; ++kt)
++    {
++        cp_async_wait<STAGES - 2>();
++        __syncthreads();
++        {
++            int nk = kt + STAGES - 1;
++            if (nk < KT) load_tile(nk % STAGES, nk);
++            cp_async_commit();
++        }
++        const half* as = As + (kt % STAGES) * A_STAGE;
++        const half* bs = Bs + (kt % STAGES) * B_STAGE;
++
++        #pragma unroll
++        for (int kk = 0; kk < BK / 16; kk += 2)
++        {
++            uint32_t af[2][MT][4];
++            uint32_t bf[2][NT][2];
++            #pragma unroll
++            for (int s = 0; s < 2; ++s)
++            {
++                #pragma unroll
++                for (int i = 0; i < MT; ++i)
++                    ldsm_x4(af[s][i], as + a_off<A_CPR, BK>(a_row + i * 16, (kk + s) * 2 + a_ch));
++                #pragma unroll
++                for (int j = 0; j < NT; j += 2)
++                {
++                    uint32_t r[4];
++                    ldsm_x4_t(r, bs + b_off<BN>((kk + s) * 16 + b_row, b_ch + j));
++                    bf[s][j][0] = r[0]; bf[s][j][1] = r[1]; bf[s][j + 1][0] = r[2]; bf[s][j + 1][1] = r[3];
++                }
++            }
++            // One 32-wide K slice: two fp16-accumulator MMAs from +0, then the fp32 add
++            #pragma unroll
++            for (int i = 0; i < MT; ++i)
++                #pragma unroll
++                for (int j = 0; j < NT; ++j)
++                {
++                    uint32_t h[2] = {0u, 0u};
++                    mma_h(h, af[0][i], bf[0][j]);
++                    mma_h(h, af[1][i], bf[1][j]);
++                    float2 f0 = __half22float2(*reinterpret_cast<half2*>(&h[0]));
++                    float2 f1 = __half22float2(*reinterpret_cast<half2*>(&h[1]));
++                    acc[i][j][0] += f0.x; acc[i][j][1] += f0.y;
++                    acc[i][j][2] += f1.x; acc[i][j][3] += f1.y;
++                }
++        }
++    }
++
++    const int g = lane >> 2, t = lane & 3;
++    #pragma unroll
++    for (int i = 0; i < MT; ++i)
++        #pragma unroll
++        for (int j = 0; j < NT; ++j)
++        {
++            int col = bn + wn * WN + j * 8 + t * 2;
++            #pragma unroll
++            for (int h = 0; h < 2; ++h)
++            {
++                int row = bm + wm * WM + i * 16 + g + h * 8;
++                if (row >= M) continue;
++                float v0 = acc[i][j][h * 2], v1 = acc[i][j][h * 2 + 1];
++                if constexpr (OUT_F32)
++                {
++                    float* c = reinterpret_cast<float*>(C) + (long long) row * ldc + col;
++                    *reinterpret_cast<float2*>(c) = make_float2(v0, v1);
++                }
++                else
++                {
++                    half* c = reinterpret_cast<half*>(C) + (long long) row * ldc + col;
++                    *reinterpret_cast<half2*>(c) = __floats2half2_rn(v0, v1);
++                }
++            }
++        }
++}
++
++} // namespace f16acc_wide
