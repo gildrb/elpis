@@ -1,0 +1,187 @@
+--- a/exllamav3_ext/quant/exl3_gemm_m16.cu
++++ b/exllamav3_ext/quant/exl3_gemm_m16.cu
+@@ -108,6 +108,22 @@
+         return env[0] - '0';
+     }();
+     if (set >= 0) mode = set > 2 ? 2 : set;
++    return mode;
++}
++
++// ext 2113: discard.global.L2 of dead split-K partial-slot lines after each finish's last read (m16g, 8201
++// MLP, layer tail); bit-identical outputs. EXL3_SPLITK_DISCARD = 0 / 1 (default 1);
++// torch.ops.exl3_m16.discard(mode) overrides it (read at launch / graph capture, like the diet mode)
++int exl3_m16_discard(int set)
++{
++    static int mode = []
++    {
++        const char* env = std::getenv("EXL3_SPLITK_DISCARD");
++        if (!env || !env[0]) return 1;
++        TORCH_CHECK((env[0] == '0' || env[0] == '1') && !env[1], "EXL3_SPLITK_DISCARD must be 0 or 1, got '", env, "'");
++        return env[0] - '0';
++    }();
++    if (set >= 0) mode = set > 0 ? 1 : 0;
+     return mode;
+ }
+ 
+--- a/exllamav3_ext/quant/exl3_gemm_m16.cuh
++++ b/exllamav3_ext/quant/exl3_gemm_m16.cuh
+@@ -11,6 +11,9 @@
+ 
+ // ext 2106: diet mode of the m16g / MLP / tail kernels (0 off, 1 = 2106, 2 = 2106 + 2107; set < 0 = query); returns the mode
+ int exl3_m16_diet(int set = -1);
++
++// ext 2113: discard dead split-K slot lines (0 off, 1 on; set < 0 = query); returns the mode
++int exl3_m16_discard(int set = -1);
+ 
+ bool exl3_gemm_m16_supported(int size_m, int size_k, int size_n, int K, bool mcg, bool mul1);
+ 
+--- a/exllamav3_ext/quant/exl3_gemm_m16_kernel.cuh
++++ b/exllamav3_ext/quant/exl3_gemm_m16_kernel.cuh
+@@ -39,6 +39,25 @@
+ #define EXL3_M16_SLOT_FLOATS (16 * EXL3_M16_GW)
+ #define EXL3_M16_PROF_WORDS 16
+ 
++// ext 2113 (torch.ops.exl3_m16.discard / EXL3_SPLITK_DISCARD, default on): a split-K finish job (row r,
++// 128-column chunk ch of one group) is the only reader of its nc partial slots' 512 B at s0 + c * SLOT
++// (c < nc), 4 x 128 B lines each, slot 0 included (its sum is re-read by the output Hadamard). Once
++// every lane of the warp has made that last read, the lines are dead: the next reader of any slot cell
++// is a finish of a later launch (or a later phase of the same launch, after a grid barrier), and each
++// finish reads only cells that its own launch's contributors wrote before its counter wait or barrier.
++// discard.global.L2 drops the lines from L2 without writing them back to DRAM. Values are unchanged:
++// only the cache state of lines nobody reads again. All 32 lanes call it (warp-uniform job loop);
++// s0 is 512 B aligned (slot bases and chunk offsets are multiples of 512 B on a 128 B aligned ws).
++__device__ __forceinline__ void exl3_m16_discard_slots(const float* s0, int nc, int lane)
++{
++    __syncwarp();
++    for (int i = lane; i < 4 * nc; i += 32)
++    {
++        const float* a = s0 + (size_t) (i >> 2) * EXL3_M16_SLOT_FLOATS + (i & 3) * 32;
++        asm volatile ("discard.global.L2 [%0], 128;\n" :: "l"(a) : "memory");
++    }
++}
++
+ struct Exl3M16Args
+ {
+     const uint16_t* B[EXL3_M16_MAX_MATS];
+--- a/exllamav3_ext/quant/exl3_gemm_m16_op.cpp
++++ b/exllamav3_ext/quant/exl3_gemm_m16_op.cpp
+@@ -56,8 +56,16 @@
+     return prev;
+ }
+ 
++static int64_t exl3_m16_discard_op(int64_t mode)
++{
++    const int prev = exl3_m16_discard();
++    exl3_m16_discard((int) mode);
++    return prev;
++}
++
+ TORCH_LIBRARY(exl3_m16, m)
+ {
++    m.def("discard", &exl3_m16_discard_op);   // ext 2113: set discard mode (0/1; -1 query), returns the previous one
+     m.def("diet", &exl3_m16_diet_op);   // ext 2106: set diet mode (0/1/2; -1 query), returns the previous one
+     m.def("gemm", &exl3_gemm_m16_op);
+     m.def("gemm_dbg", &exl3_gemm_m16_dbg_op);
+--- a/exllamav3_ext/quant/exl3_gemm_m16g.cu
++++ b/exllamav3_ext/quant/exl3_gemm_m16g.cu
+@@ -370,6 +370,8 @@
+     args.w0 = w.w0;
+     args.w1 = w.w1;
+     args.nsm = w.nsm;
++    args.discard = exl3_m16_discard();
++    TORCH_CHECK(!args.discard || ((uintptr_t) ws & 127) == 0, "exl3_gemm_m16g: split-K workspace not 128 B aligned");
+     args.prof = prof;
+ 
+     const half* A_ptr = (const half*) A.data_ptr();
+--- a/exllamav3_ext/quant/exl3_gemm_m16g_kernel.cuh
++++ b/exllamav3_ext/quant/exl3_gemm_m16g_kernel.cuh
+@@ -45,6 +45,7 @@
+     int w0;                               // ext 2105 partition weights (>= 1) and SM count
+     int w1;
+     int nsm;
++    int discard;                          // ext 2113: discard dead slot lines after the finish reads
+     unsigned long long* prof;             // optional per-block stamps (bench op only), else null:
+                                           // start, xs ready, loop end, finish done (ns); smid, n_iter
+ };
+@@ -495,6 +496,7 @@
+                     svh,
+                     0.088388347648f  // 1/sqrt(128)
+                 );
++            if (p.discard) exl3_m16_discard_slots(s0, nc, lane);
+         }
+     }
+     stamp(3);
+--- a/exllamav3_ext/quant/exl3_mlp_m16.cu
++++ b/exllamav3_ext/quant/exl3_mlp_m16.cu
+@@ -392,6 +392,8 @@
+     args.start_order = exl3_m16_start_order(-1);
+     args.defer_pub = exl3_m16_defer_pub(-1);
+     args.vperm = exl3_m16_vperm(-1);
++    args.discard = exl3_m16_discard();
++    TORCH_CHECK(!args.discard || ((uintptr_t) args.ws & 127) == 0, "exl3_mlp_m16: split-K workspace not 128 B aligned");
+ 
+     const half* A_ptr = (const half*) x.data_ptr();
+     half* g_ptr = (half*) g.data_ptr();
+--- a/exllamav3_ext/quant/exl3_mlp_m16_kernel.cuh
++++ b/exllamav3_ext/quant/exl3_mlp_m16_kernel.cuh
+@@ -84,6 +84,7 @@
+     int start_order;                 // 1: input-transform loads issued before the weight ring prologue (8204)
+     int defer_pub;                   // 1: phase-1 counter publish once after the slice's last flush (8204)
+     int vperm;                       // 1: diagnostic, CTA runs virtual block (blockIdx + G/2) mod G (8204)
++    int discard;                     // 1: discard dead split-K slot lines after the finish reads (2113)
+ };
+ 
+ // had_hf_r_128_inner<true, false> (hadamard_inner.cuh) split into its loads and its arithmetic, so a
+@@ -730,6 +731,7 @@
+                     (mat ? p.svh_u : p.svh_g) + col0,
+                     0.088388347648f  // 1/sqrt(128)
+                 );
++                if (p.discard) exl3_m16_discard_slots(s0, nc, lane);
+             }
+             // act_mul_kernel_h<ACT_SILU> on the half2 pairs this lane's had_fh stored (4 lane .. + 3)
+             {
+@@ -812,6 +814,7 @@
+                 had_ff_r_128_inner<false, true>(s0, ((float*) D) + (size_t) r * N2 + col0, svh, 0.088388347648f);
+             else
+                 had_fh_r_128_inner<false, true>(s0, ((half*) D) + (size_t) r * N2 + col0, svh, 0.088388347648f);
++            if (p.discard) exl3_m16_discard_slots(s0, nc, lane);
+         }
+     }
+     stamp(7);
+--- a/exllamav3_ext/quant/exl3_tail_m16.cu
++++ b/exllamav3_ext/quant/exl3_tail_m16.cu
+@@ -255,6 +255,8 @@
+     m.start_order = exl3_m16_start_order(-1);
+     m.defer_pub = exl3_m16_defer_pub(-1);
+     m.vperm = exl3_m16_vperm(-1);
++    m.discard = exl3_m16_discard();
++    TORCH_CHECK(!m.discard || ((uintptr_t) dev.ws & 127) == 0, "exl3_tail_m16: split-K workspace not 128 B aligned");
+ 
+     const half* A_ptr = (const half*) a.data_ptr();
+     float* X_ptr = (float*) x.data_ptr();
+--- a/exllamav3_ext/quant/exl3_tail_m16_kernel.cuh
++++ b/exllamav3_ext/quant/exl3_tail_m16_kernel.cuh
+@@ -596,6 +596,7 @@
+             const int col0 = g * GW + ch * 128;
+             float* yo = p.yo + (size_t) r * N0 + col0;
+             had_ff_r_128_inner<false, true>(sl0, yo, p.svh_o + col0, 0.088388347648f);
++            if (q.discard) exl3_m16_discard_slots(sl0, nc, lane);
+ 
+             // This lane's 4 outputs (4 lane .. + 3, stored by this lane), + residual (rms_norm RES_IN:
+             // x4 = sublayer output, x4 += r4, written back to the residual)
+@@ -736,6 +737,7 @@
+                     (mat ? q.svh_u : q.svh_g) + col0,
+                     0.088388347648f  // 1/sqrt(128)
+                 );
++                if (q.discard) exl3_m16_discard_slots(sl0, nc, lane);
+             }
+             {
+                 const size_t o = (size_t) r * N1 + col0 + lane * 4;
+@@ -810,6 +812,7 @@
+ 
+             const int col0 = g * GW + ch * 128;
+             had_ff_r_128_inner<false, true>(sl0, D + (size_t) r * N2 + col0, q.svh_d + col0, 0.088388347648f);
++            if (q.discard) exl3_m16_discard_slots(sl0, nc, lane);
+         }
+     }
+     stamp(11);

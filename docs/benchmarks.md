@@ -495,6 +495,40 @@ parses as 0 or 1 (default 1). `bend/gdn_replay_gather_diff.py` checks that the k
 source still contains the 18 transcribed expressions (conformance of the transcription,
 not a proof of the CUDA code).
 
+2113 (cs12, #63: 111.85 vs cs11's 109.65 / 109.81, identical accept length and rewards) adds
+`discard.global.L2` of the split-K partial-slot lines after each finish has
+read them for the last time: m16g, the 8201 draft MLP (pair and down finishes) and the layer
+tail (F0, pair and down finishes). Once summed, those lines are dead, but L2 would otherwise
+write them back to DRAM. Nothing arithmetic moves, so the change is bit-exact. The bx2113
+check (PASS) compared on and off bit for bit:
+- all 64 layers of tail, 8201 and m16g, plus the draft m16g shapes;
+- every row count 1-8;
+- back-to-back launches;
+- 64-layer graph chains captured with the discard on and replayed 30 times.
+
+RoundBench on − off, 4 reps in fresh processes: −0.496 [−0.608, −0.384] ms per round at 1K
+and −0.396 [−0.717, −0.075] at 8K in normal mode, −0.506 / −0.378 in wrong0. Ids and
+committed tokens per round are identical. `EXL3_SPLITK_DISCARD` is 0 or 1 (default 1,
+anything else refused); `torch.ops.exl3_m16.discard` sets it before graph capture.
+
+`bend/m16_discard*` proves the following about its Nat model of the discard loop, the
+finish loads, the contributor stores and a per-line event timeline:
+- each finish discards exactly the 128-byte lines of its own chunk in the slots it summed;
+- every element it loads lies in those lines;
+- a line and a slot name one job (rows < 16, chunks < 4, contributors < mc, the workspaces
+  laid out apart);
+- every cell of such a line is stored again by the next launch's contributors before any load;
+- the loads come before the warp barrier and the discard, and each load observes its own
+  launch's store (or its slot-0 sum) with the discard on or off;
+- the switch parses to 0 or 1, default 1.
+
+Premises, not modelled: the kernels' synchronisation (grid.sync, the cnt1 counters,
+`__syncwarp`, stream order) orders the steps as the model lists them; PTX discard semantics;
+the 128-byte workspace alignment (a host TORCH_CHECK); and nc ≤ mc from the partition
+models. `bend/m16_discard_diff.py` checks that the patched sources still contain the 39
+transcribed expressions and one discard call per finish (m16g 1, 8201 2, tail 3). That is
+conformance of the transcription, not a proof of the CUDA code.
+
 **GPU clocks at 250 W.** Core clock offsets do nothing here: the card already runs at the
 bottom of its voltage curve (+75/+150 MHz: no change; +225 MHz: Xid 109 fault). A lower
 memory clock moves watts to the SMs: −1000 MHz cut the round by 0.77-0.90 ms (~2.3 %),

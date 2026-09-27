@@ -133,3 +133,10 @@ import ./bend/m16_diet2_laws.bend as M16Diet2Laws
 # cells RULE_COMMIT reads (each once, every S <= 16, every v chunk), from the conv_out elements the old loader read, widened
 # to the same fp32 bits; EXL3_GDN_REPLAY_GATHER parses 0 / 1 (default 1, else refused).
 import ./bend/gdn_replay_gather_laws.bend as GdnReplayGatherLaws
+# ext 2113 split-K slot discard (bend/m16_discard.bend vs bend/m16_discard_spec.bend): each m16g / 8201 / tail finish job
+# discards exactly the 128-byte lines of its own chunk in the slots it summed (every active i, every line once), every
+# element it loads lies in those lines, lines and slots name one job (rows < 16, chunks < 4, contributors < mc, the
+# workspaces laid out apart), every cell of such a line is stored again by the next launch's contributors before any
+# load, the loads precede the warp barrier and the discard, and every load observes its own launch's store (or its
+# slot-0 sum) with discards on or off; EXL3_SPLITK_DISCARD parses 0 / 1 (default 1, else refused), discard(x) keeps 0..1.
+import ./bend/m16_discard_laws.bend as M16DiscardLaws
