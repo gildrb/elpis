@@ -285,6 +285,12 @@ kernels, the Python server and speed need their own evidence. See
   throughput are not qualified by the recipe settings.
 - Generation is greedy only, one sequence at a time; chat `stream=true` is
   buffered SSE, so first-event time is not TTFT.
+- Greedy output is identical with and without speculation for the same request, but
+  at an exact logit tie the chosen token can depend on the request's `max_tokens`:
+  on `cs12`, one 70-token chat prompt picks token 39457 at `max_tokens` 8192 and 54185 at 256
+  (both at probability 0.28775), with the normal and the all-rejected draft agreeing
+  in each case. The likely cause is the KV page allocation changing the attention
+  reduction order *(not yet proven)*. Compare outputs only at equal request parameters.
 - Speed depends on the text (tokens per round: 3.37 at 32K context to 6.69 on
   quoting), the host's CPU load and the card's temperature, as measured above.
 - Quality evidence is the lane's small samples; the full Prime Envs results for
