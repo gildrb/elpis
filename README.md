@@ -8,19 +8,20 @@ Optimize C1 agent latency and useful code/reasoning output at native context.
 
 ## Current numbers
 
-Live image `cs12` (`sha256:f002839f…`, built from the patch series of commit `6a8341a`), measured
-2026-09-26/27. Every figure is a measurement unless marked *computed*; details and
-definitions follow in [Results](#results).
+Live image `tree3s` (`sha256:ec9751b0…`, the patch series of commit `c10606d`: `cs12` plus
+8-row token-tree verification), measured 2026-09-26/28. Every figure is a measurement unless
+marked *computed*; details and definitions follow in [Results](#results). Rows marked `cs12`
+were measured on the previous image and not repeated.
 
 | What | Result | Workload |
 |---|---|---|
-| **Output speed, reasoning + code lane** | **111.85 tok/s** | 20 calls (AIME 2025, MMLU-Pro, I3 Logic, LiveCodeBench v6), thinking on, greedy; 124,870 output tokens in 1,116.4 s of request wall, prefill included (run #63) |
-| **Energy** | **0.452 tok/J** at 247.3 W mean board power | the same 20 calls, board power sampled every 250 ms |
-| Output speed, GSM8K (the test behind r0b0tlab's 162.9 tok/s) | **148.8 tok/s** median, 0.598 tok/J | first 40 GSM8K test questions, 512 new tokens, 11 isolated runs |
-| Tokens committed per verify round | 3.52 (lane C1 rows) · 5.55 (GSM8K) | 8 positions verified per round |
-| Decode only, 1K-token context | 100.3 tok/s (3.39 tokens per 33.8 ms round), 0.40 tok/J | RoundBench, 4 fresh processes |
-| Same rounds with every draft token rejected | 29.5 tok/s, 0.12 tok/J | RoundBench `wrong0` arm |
-| Output vs plain greedy decoding | identical | invariance gate 45/45 (`cs10`); `cs10` → `cs11` → `cs12`: 20/20 lane and 15/15 C1 answers byte-identical |
+| **Output speed, reasoning + code lane** | **122.33 tok/s** | 20 calls (AIME 2025, MMLU-Pro, I3 Logic, LiveCodeBench v6), thinking on, greedy; 124,870 output tokens in 1,020.8 s of request wall, prefill included (run #67) |
+| **Energy** | **0.495 tok/J** at 247.1 W mean board power | the same 20 calls, board power sampled every 250 ms |
+| Output speed, GSM8K (the test behind r0b0tlab's 162.9 tok/s) | **153.3 tok/s** median, 0.616 tok/J | first 40 GSM8K test questions, 512 new tokens, 5 isolated runs |
+| Tokens committed per verify round | 3.93 (lane C1 rows) · 5.70 (GSM8K) | 8 rows verified per round |
+| Decode only, 1K-token context | 113.6 tok/s (3.89 tokens per 34.2 ms round, *computed*), 0.45 tok/J | RoundBench, 4 fresh processes |
+| Same rounds with every draft token rejected | 29.5 tok/s, 0.12 tok/J (`cs12`) | RoundBench `wrong0` arm |
+| Output vs plain greedy decoding | identical | invariance gate 45/45 (`cs10`); `cs10` → `cs11` → `cs12` → `tree3s`: 20/20 lane and 15/15 C1 answers byte-identical |
 | Context | 262,144 tokens (cache 270,336, 3-bit KV) | a 262,136-token prompt prefills in 537 s (measured on `cs10`) |
 | GPU memory | 21,888 MiB of 24,576 MiB in use | live server, model + draft + cache loaded |
 
@@ -50,7 +51,7 @@ definitions follow in [Results](#results).
 
 ## Results
 
-### Benchmark lane, run #63 (`bash autoresearch.sh`, protocol v4)
+### Benchmark lane, run #67 (`bash autoresearch.sh`, protocol v4)
 
 Prime Envs + Verifiers tasks with their native scorers, one greedy call per task,
 thinking on. tok/s = completion tokens (reasoning included) / request wall time,
@@ -59,13 +60,15 @@ send to complete response, prefill and HTTP included. Power from the host's 250 
 
 | Task set | Calls | Output budget / call | Input tokens | Output tokens | Wall s | tok/s | Mean W | tok/J | Score | Stopped at budget |
 |---|---|---|---|---|---|---|---|---|---|---|
-| AIME 2025 | 3 | 32,768 | 762 | 36,985 | 299.7 | 123.40 | 247.9 | 0.498 | 3/3 | 0 |
-| MMLU-Pro | 10 | 8,192 | 2,681 | 11,991 | 109.0 | 110.03 | 239.2 | 0.460 | 8/10 | 1 |
-| I3 Logic | 4 | 16,384 | 3,825 | 39,876 | 317.6 | 125.54 | 247.8 | 0.507 | 2/4 | 1 |
-| LiveCodeBench v6 | 3 | 16,384 | 1,991 | 36,018 | 390.1 | 92.34 | 248.8 | 0.371 | 1/3 | 2 |
-| **All (primary)** | **20** | | **9,259** | **124,870** | **1,116.4** | **111.85** | **247.3** | **0.452** | | **4** |
+| AIME 2025 | 3 | 32,768 | 762 | 36,985 | 279.4 | 132.36 | 247.6 | 0.534 | 3/3 | 0 |
+| MMLU-Pro | 10 | 8,192 | 2,681 | 11,991 | 100.7 | 119.08 | 238.5 | 0.499 | 8/10 | 1 |
+| I3 Logic | 4 | 16,384 | 3,825 | 39,876 | 294.3 | 135.49 | 247.9 | 0.546 | 2/4 | 1 |
+| LiveCodeBench v6 | 3 | 16,384 | 1,991 | 36,018 | 346.3 | 104.00 | 248.4 | 0.419 | 1/3 | 2 |
+| **All (primary)** | **20** | | **9,259** | **124,870** | **1,020.8** | **122.33** | **247.1** | **0.495** | | **4** |
 
-Reproducibility: the previous stack ran this lane twice, 109.65 and 109.81 tok/s.
+Scores, budget stops and every completion text are byte-identical to `cs12`'s run #63
+(111.85 tok/s, 0.452 tok/J); the tree changes only how many tokens each round commits.
+The previous stack ran this lane twice, 109.65 and 109.81 tok/s.
 
 ### Long prompts: C1 whole-request matrix (same run)
 
@@ -75,51 +78,58 @@ by the non-streaming transport).
 
 | Prompt | Prompt tokens | Wall s (5 requests) | tok/s | Tokens / round | Mean W | tok/J |
 |---|---|---|---|---|---|---|
-| 1K | 1,076 | 38.24 | 133.89 | 5.47 (request 1: 3.54; requests 2-5: 6.28-6.36, their reasoning copies ~80 % of its text verbatim from the prompt) | 243.3 | 0.550 |
-| 8K | 8,244 | 101.18 | 50.60 | 3.01 | 249.2 | 0.203 |
-| 32K | 32,821 | 240.60 | 21.28 | 2.97 | 248.2 | 0.086 |
+| 1K | 1,076 | 36.37 | 140.77 | 5.81 (request 1: 4.00; requests 2-5: 6.40-6.69, their reasoning copies ~80 % of its text verbatim from the prompt) | 243.5 | 0.578 |
+| 8K | 8,244 | 94.29 | 54.30 | 3.40 | 249.2 | 0.218 |
+| 32K | 32,821 | 233.78 | 21.90 | 3.37 | 248.2 | 0.088 |
 
-### Decode rounds only (RoundBench, cs12 defaults)
+### Decode rounds only (RoundBench)
 
 A fresh server process per repetition, 90 s heat-up, 4 repetitions, C1 prompts at
-two depths, 250 W. `wrong0` forces every draft token to be rejected, so each round
-commits exactly one token with the same kernels.
+two depths, 250 W. `off` is `tree3s` with `EXL3_TREE=0` (the `cs12` chain); `wrong0`
+(measured on `cs12`) forces every draft token to be rejected, so each round commits
+exactly one token with the same kernels. tok/s and tok/J are *computed* from the
+measured ms, tokens and joules per round.
 
 | Depth | Mode | ms / round | Tokens / round | tok/s | J / round | tok/J |
 |---|---|---|---|---|---|---|
-| 1K | normal | 33.79 | 3.39 | 100.3 | 8.53 | 0.397 |
-| 8K | normal | 34.87 | 2.90 | 83.1 | 8.71 | 0.333 |
-| 1K | `wrong0` | 33.89 | 1.00 | 29.5 | 8.49 | 0.118 |
-| 8K | `wrong0` | 34.71 | 1.00 | 28.8 | 8.65 | 0.116 |
+| 1K | tree | 34.23 | 3.89 | 113.6 | 8.63 | 0.451 |
+| 8K | tree | 35.01 | 3.31 | 94.5 | 8.71 | 0.380 |
+| 1K | off (chain) | 34.29 | 3.39 | 98.9 | 8.65 | 0.392 |
+| 8K | off (chain) | 35.03 | 2.90 | 82.8 | 8.78 | 0.330 |
+| 1K | `wrong0` (`cs12`) | 33.89 | 1.00 | 29.5 | 8.49 | 0.118 |
+| 8K | `wrong0` (`cs12`) | 34.71 | 1.00 | 28.8 | 8.65 | 0.116 |
 
-Base arm of one screen; the base arms of three screens on 2026-09-27 span 33.79-34.13
-ms (1K) and 34.87-37.04 ms (8K).
+The tree costs no measurable round time: tree − off = −0.06 ms at 1K (95 % CI
+−0.31 to +0.19) and −0.02 ms at 8K (−0.21 to +0.18). Base arms of screens on
+2026-09-27/28 span 33.79-34.29 ms (1K) and 34.87-37.04 ms (8K).
 
 ### GSM8K, the same test as r0b0tlab's published number
 
 [`bench/gsm8k_compare.py`](bench/gsm8k_compare.py) replays r0b0tlab's
 [`acceptance_check.py`](https://github.com/r0b0tlab/qwen38-exl3-dflash2/blob/main/scripts/acceptance_check.py)
 workload: the first 40 GSM8K test questions (pinned file), raw ChatML prompt,
-greedy, 512 new tokens, mean of per-request tok/s. Eleven runs in isolated GPU
-windows on 2026-09-27.
+greedy, 512 new tokens, mean of per-request tok/s. Isolated GPU windows: eleven
+runs of `cs12` on 2026-09-27, five of `tree3s` in one window on 2026-09-28.
 
-| | r0b0tlab (published) | eta `cs12` |
-|---|---|---|
-| Power | 350 W cap; their telemetry of another run: 336 W mean under load | 250 W cap; 249.4 W median |
-| Engine | same ExLlamaV3 `355c6ee`, unpatched | + 36 patches |
-| Context / KV cache | 8,192 / FP16 | 262,144 (cache 270,336) / 3-bit |
-| Transport | in-process `generate()` | HTTP `/v1/completions` |
-| tok/s | 162.9 | **148.8** median (147.9-154.3) |
-| Tokens / round | 5.657 | 5.552 |
-| Answers at the 512-token cap | 5/40 | 4/40 |
-| tok/J | not published | **0.598** median (0.593-0.623) |
+| | r0b0tlab (published) | eta `cs12` | eta `tree3s` (live) |
+|---|---|---|---|
+| Power | 350 W cap; their telemetry of another run: 336 W mean under load | 250 W cap; 249.4 W median | 250 W cap; 249.4 W median |
+| Engine | same ExLlamaV3 `355c6ee`, unpatched | + 36 patches | + 41 patches |
+| Context / KV cache | 8,192 / FP16 | 262,144 (cache 270,336) / 3-bit | same |
+| Transport | in-process `generate()` | HTTP `/v1/completions` | same |
+| tok/s | 162.9 | 148.8 median (147.9-154.3) | **153.3** median (151.9-159.7) |
+| Tokens / round | 5.657 | 5.552 | 5.695 |
+| Answers at the 512-token cap | 5/40 | 4/40 | 4/40 |
+| tok/J | not published | 0.598 median (0.593-0.623) | **0.616** median (0.610-0.646) |
 
-Speed moves with conditions, output does not (5.552 tokens per round and the same
-answers in every run): the first run in a fresh window on a quiet host is the
-fastest (153.9, 154.3), later runs settle at 147.9-150.3 as the card warms from
-44-45 to 67 °C, and a first run while other jobs kept the host's load average near
-10 measured 148.8. One earlier run against the long-running live endpoint on an
-idle host measured 161.9 tok/s (34.0 ms per round).
+All 16 runs of both images return the same 40 answers, byte for byte. GSM8K gains
+less from the tree (+3.0 % tok/s) than the lane (+9.4 %): its answers are short
+and formulaic, so the chain already commits 5.55 of 8 possible tokens per round.
+Speed moves with conditions, output does not: the first run in a fresh window on a
+quiet host is the fastest (`cs12` 153.9 and 154.3, `tree3s` 159.7), later runs settle
+as the card warms from 42-45 to 67 °C, and a `cs12` first run while other jobs
+kept the host's load average near 10 measured 148.8. One earlier `cs12` run against
+the long-running live endpoint on an idle host measured 161.9 tok/s (34.0 ms per round).
 
 ### What 250 W costs
 
@@ -132,11 +142,11 @@ calls, 35,081 tokens, match token for token):
 | 250 W (#57) | 114.69 | 247.9 | 0.463 | 892-1,042 MHz |
 
 The protocol-v4 lane (same tasks as #57, memory offset −1500 MHz, later kernels)
-measures 111.85 tok/s and 0.452 tok/J at 250 W (#63; see [history](#result-history)).
+measures 122.33 tok/s and 0.495 tok/J at 250 W (#67; see [history](#result-history)).
 
 ### Where one verify round goes
 
-CUPTI kernel trace of `cs12` (kernel-trace-12), a short-context reasoning prompt:
+CUPTI kernel trace of `cs12` (kernel-trace-12; the tree adds no measurable round time), a short-context reasoning prompt:
 31.77 ms per round (unprofiled median), 6.17 tokens per round on this prompt.
 
 | Phase | ms / round | % | Note |
@@ -158,11 +168,13 @@ DRAM bandwidth: time per round follows energy per round (8.5-8.7 J measured abov
 
 ## Why it is fast
 
-1. **Speculative decoding with DFlash2.** One draft pass proposes 7 tokens at once
-   (block diffusion over masked positions, conditioned on the target's own hidden
-   states); one target pass checks all 8 positions and keeps every matching token
-   plus one of its own. 3.52-5.55 tokens per round instead of 1 (29.5 → 100.3 tok/s
-   at the same round cost, above).
+1. **Speculative decoding with DFlash2 and a token tree.** One draft pass proposes a
+   block of tokens at once (block diffusion over masked positions, conditioned on the
+   target's own hidden states). Instead of a 7-token chain, the 8 verify rows carry a
+   token tree: 7 nodes picked best-first by the draft's calibrated cumulative
+   probability. One target pass checks every row, and the round keeps the longest
+   matching root path plus one token of the target's own. 3.37-5.81 tokens per round
+   across the lane's C1 depths instead of 1 (29.5 → 113.6 tok/s at the same round cost, above).
 2. **Verifying 8 positions costs about the same as 1.** The weight-streaming kernels
    work in 16-row tensor-core tiles, so 1-8 rows share one pass over the weights
    (16 rows measured +21 % per verify forward).
@@ -170,12 +182,13 @@ DRAM bandwidth: time per round follows energy per round (8.5-8.7 J measured abov
 4. **Hybrid attention.** Only 16 of 64 layers keep a KV cache; at 3 bits that is
    12 KiB per token, 3.1 GiB for 270,336 tokens (*computed*, plus scales). That is
    why the full native context fits in 24 GiB next to the weights.
-5. **36 engine patches**, kept only when the output stayed identical (or passed a
+5. **41 engine patches**, kept only when the output stayed identical (or passed a
    numerics gate) and the benchmark improved:
 
 | Area | Patches | What | Measured when kept |
 |---|---|---|---|
-| Verify loop | exl3 0001-0003, 0005 | batched greedy verify through the Bend acceptor, host/GPU overlap, draft CUDA graph, DFlash2 block mask | |
+| Verify loop | exl3 0001-0003, 0005, 0006 | batched greedy verify through the Bend acceptor, host/GPU overlap, draft CUDA graph, DFlash2 block mask, token-tree verify through the proved tree acceptor | |
+| Token tree | 9008, 3012, 5109, 3013 | GPU tree builder, ancestor-masked verify attention, GDN along each row's ancestors, commit of the accepted path's K/V rows | lane 111.85 → 122.33 tok/s; round time unchanged |
 | Layer tail and MLP | 2001, 7001, 8201, 8202, 8204, 8205b, 2106, 2107, 2113 | M ≤ 16 GEMMs, fused persistent MLP, one kernel per layer tail, weighted split-K, instruction diets, L2 discard of dead split-K partials | 2106/2107: −13.3 µs per layer; 2113: −0.40 to −0.50 ms per round |
 | Projections | 2102, 2105, 9003b | grouped m16 qkv(+z) GEMMs for target and draft | |
 | Attention | 3001-3007, 3010 | exact dequant, GQA split, row-invariant strided verify attention, CUDA prefill attention | 3010: 262,136-token prefill 722 → 537 s |
@@ -194,10 +207,10 @@ DRAM bandwidth: time per round follows energy per round (8.5-8.7 J measured abov
 |---|---|
 | Speculation is lossless by construction | the target commits only its own greedy token at each position; the draft decides speed, never text |
 | Invariance gate (`cs10`) | 45/45: 15 prompts × {normal draft, capped draft, all-wrong draft} give identical token IDs |
-| Last two kept speedups (`cs10` → `cs11` → `cs12`) | 20/20 lane answers and 15/15 C1 answers byte-identical; identical rounds and scores |
-| Kernel changes | bit-exact before keeping: 5108 GDN state hashes at 1-8 steps; 2113 all 64 layers, rows 1-8, 30 CUDA-graph replays |
+| Last three kept speedups (`cs10` → `cs11` → `cs12` → `tree3s`) | 20/20 lane answers and 15/15 C1 answers byte-identical, identical scores; the tree also passed a forced-chain run identical to `cs12` round by round |
+| Kernel changes | bit-exact before keeping: 5108 GDN state hashes at 1-8 steps; 2113 all 64 layers, rows 1-8, 30 CUDA-graph replays; tree attention on all 5,040 tree shapes, each row equal to the chain kernel on its path |
 | Lane scores (small samples, greedy, thinking on) | AIME 2025 3/3 · MMLU-Pro 8/10 · I3 Logic 2/4 · LiveCodeBench 1/3. Of the 6 misses, 4 hit the output budget (MMLU-Pro 8,192; I3 Logic and 2× LiveCodeBench 16,384) and 2 are wrong answers |
-| Bend | `bend PROOF.bend` (Bend 2.0.29, 36 proof modules): "All terms check." Acceptance plus kernel schedule and index laws; proofs cover the Bend models, and each kernel's transcription is checked against its source |
+| Bend | `bend PROOF.bend` (Bend 2.0.29, 41 proof modules): "All terms check." Acceptance (chain and tree), tree descriptor derivation, speculation invariance over trees, plus kernel schedule and index laws. Proofs cover the Bend models; the older kernels' transcriptions are checked against their source, and the tree kernels' conformance rests on bitwise GPU differentials (evidence, not proof) |
 | Not measured | the full Prime Envs suite at a 32,768-token budget; the 4-bit quantization's loss against BF16 |
 
 ## Result history
@@ -213,7 +226,8 @@ differs between them).
 | #58 | cs10 | v3 | 250 W | 106.13 | 0.432 |
 | #60 | cs10 | v4: v3 + declared memory offset −1500 MHz | 250 W | 107.03 | 0.433 |
 | #61, #62 | cs11 | v4 | 250 W | 109.65, 109.81 | 0.444, 0.444 |
-| **#63** | **cs12 (live)** | v4 | 250 W | **111.85** | **0.452** |
+| #63 | cs12 | v4 | 250 W | 111.85 | 0.452 |
+| **#67** | **tree3s (live)** | v4 | 250 W | **122.33** | **0.495** |
 
 Per-change notes and every dropped attempt are in [docs/benchmarks.md](docs/benchmarks.md).
 
@@ -257,7 +271,8 @@ python3 -m bench.gsm8k_compare --api-key-file /path/to/api-key --data gsm8k-test
 
 `LAWS.bend` holds the accepted contract; `PROOF.bend` proves the production Bend
 definitions against it. The serving path's greedy speculative acceptance (the
-accepted prefix and bonus token of each DFlash2 block) runs as a proved Bend leaf
+accepted prefix and bonus token of each DFlash2 block, and for the token tree the
+longest matching root path and its descriptor) runs as proved Bend leaves
 compiled to C. Engine changes follow the same order: state the law, prove the
 implementation, then measure. A Bend proof covers the Bend definition only;
 kernels, the Python server and speed need their own evidence. See
@@ -270,12 +285,11 @@ kernels, the Python server and speed need their own evidence. See
   throughput are not qualified by the recipe settings.
 - Generation is greedy only, one sequence at a time; chat `stream=true` is
   buffered SSE, so first-event time is not TTFT.
-- Speed depends on the text (tokens per round: 2.97 at 32K context to 6.36 on
+- Speed depends on the text (tokens per round: 3.37 at 32K context to 6.69 on
   quoting), the host's CPU load and the card's temperature, as measured above.
 - Quality evidence is the lane's small samples; the full Prime Envs results for
   this engine are pending.
-- In progress, not yet measured end to end: token-tree verification (+8.5 %
-  tokens per round in simulation) and a DFlash2 fine-tune on the target's own
-  outputs.
+- In progress: a DFlash2 fine-tune on the target's own greedy outputs (training
+  prompts disjoint from every evaluation set).
 
 See the [documentation map](docs/README.md).
