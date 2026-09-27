@@ -55,7 +55,7 @@ ARG EXL3_PATCHES_SHA256=
 LABEL io.eta.exl3.variant="candidate"
 LABEL io.eta.exl3.patches-sha256="${EXL3_PATCHES_SHA256}"
 USER root
-# Proven acceptance artifact, built on the host by docker/build-exl3.sh from the
+# Proven acceptance artifacts (chain and tree acceptors), built on the host by docker/build-exl3.sh from the
 # repository's Bend sources with the pinned toolchain; read-only in the image.
 COPY build/bend-exl3/ /opt/qwen/bend-exl3/
 # apply.py verifies every pinned input, applies the series exactly, verifies every
@@ -67,8 +67,9 @@ RUN --mount=type=bind,source=patches/exl3,target=/tmp/exl3-patches \
     echo "${EXL3_PATCHES_SHA256}  /tmp/exl3-patches/exl3-patches.json" | sha256sum --check --strict && \
     /opt/venv/bin/python -I -B /tmp/exl3-patches/apply.py /tmp/exl3-patches /opt/qwen/exl3-patches.json && \
     /opt/venv/bin/python -I -B /opt/qwen/bend-exl3/exl3_bend_accept.py /opt/qwen/bend-exl3 && \
+    /opt/venv/bin/python -I -B /opt/qwen/bend-exl3/exl3_bend_tree_accept.py /opt/qwen/bend-exl3 && \
     /opt/venv/bin/python -I -B -c \
-      "from exllamav3.generator.greedy_accept import GreedyAccept; GreedyAccept(7)"
+      "from exllamav3.generator.greedy_accept import GreedyAccept; GreedyAccept(7); from exllamav3.generator.tree_accept import TreeAccept; TreeAccept(7)"
 ENV QWEN_EXL3_VARIANT=candidate
 USER runner
 
@@ -136,8 +137,9 @@ RUN --mount=type=bind,from=patches,target=/tmp/eta/patches \
       /opt/qwen/exl3-patches.json && \
     echo "${EXL3_ENGINE_MANIFEST_SHA256}  /opt/qwen/exl3-patches.json" | sha256sum --check --strict && \
     /opt/venv/bin/python -I -B /opt/qwen/bend-exl3/exl3_bend_accept.py /opt/qwen/bend-exl3 && \
+    /opt/venv/bin/python -I -B /opt/qwen/bend-exl3/exl3_bend_tree_accept.py /opt/qwen/bend-exl3 && \
     /opt/venv/bin/python -I -B -c \
-      "import torch, exllamav3_ext; from exllamav3.generator.greedy_accept import GreedyAccept; GreedyAccept(7)"
+      "import torch, exllamav3_ext; from exllamav3.generator.greedy_accept import GreedyAccept; GreedyAccept(7); from exllamav3.generator.tree_accept import TreeAccept; TreeAccept(7)"
 USER runner
 
 FROM candidate AS candidate-ext
@@ -154,6 +156,7 @@ RUN --mount=type=bind,from=patches,target=/tmp/eta/patches \
       /opt/qwen/exl3-patches.json && \
     echo "${EXL3_ENGINE_MANIFEST_SHA256}  /opt/qwen/exl3-patches.json" | sha256sum --check --strict && \
     /opt/venv/bin/python -I -B /opt/qwen/bend-exl3/exl3_bend_accept.py /opt/qwen/bend-exl3 && \
+    /opt/venv/bin/python -I -B /opt/qwen/bend-exl3/exl3_bend_tree_accept.py /opt/qwen/bend-exl3 && \
     /opt/venv/bin/python -I -B -c \
-      "import torch, exllamav3_ext; from exllamav3.generator.greedy_accept import GreedyAccept; GreedyAccept(7)"
+      "import torch, exllamav3_ext; from exllamav3.generator.greedy_accept import GreedyAccept; GreedyAccept(7); from exllamav3.generator.tree_accept import TreeAccept; TreeAccept(7)"
 USER runner

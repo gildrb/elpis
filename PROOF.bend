@@ -36,3 +36,10 @@ import ./bend/m16_diet_proof.bend as M16DietProof
 import ./bend/m16_diet2_proof.bend as M16Diet2Proof
 import ./bend/gdn_replay_gather_proof.bend as GdnReplayGatherProof
 import ./bend/m16_discard_proof.bend as M16DiscardProof
+import ./bend/attn_tree_proof.bend as AttnTreeProof
+import ./bend/gdn_tree_proof.bend as GdnTreeProof
+import ./bend/exl3_tree_accept_proof.bend as Exl3TreeAcceptProof
+import ./bend/exl3_tree_derive_proof.bend as Exl3TreeDeriveProof
+import ./bend/exl3_tree_path_proof.bend as Exl3TreePathProof
+import ./bend/spec_inv_tree_proof.bend as SpecInvTreeProof
+import ./bend/tree_desc_agree_proof.bend as TreeDescAgreeProof

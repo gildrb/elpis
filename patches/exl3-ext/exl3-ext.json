@@ -16,7 +16,7 @@
     "path": "/opt/venv/lib/python3.13/site-packages/exllamav3_ext.cpython-313-x86_64-linux-gnu.so",
     "base_sha256": "6d30690fdb76b3c4ad3fb5e69f0479707e410fc9b6194e2a5e32f4d7fe1fd8b3"
   },
-  "series_sha256": "6ac8470fcb1f6e039cb1391b58afd6304465f0c1d68d9b6653dc12b0f607402b",
+  "series_sha256": "48deeccb8c71c599dd9934b2933df767d48c0dbb6fb1068d32ad42567d5dbaa8",
   "patches": [
     {
       "name": "0001-gdn-shared-carveout.patch",
@@ -145,16 +145,36 @@
     {
       "name": "2113-m16-splitk-discard-on5108.patch",
       "sha256": "17daf74b1a1e4b17a86600b37b0be107370f50960bf9a59b49b80ce49a67896c"
+    },
+    {
+      "name": "9008-dflash2-tree-build.patch",
+      "sha256": "00a4a5ad9ecbcc1ad4b3bf7fa0fe657941dfef4d2d772844ef44cd059082948c"
+    },
+    {
+      "name": "3012-attn-verify-tree.patch",
+      "sha256": "ffff28d61d8ba6c78db61ce6cf129b9de8c0c4872fe7e65bc37c64e1489e7687"
+    },
+    {
+      "name": "5109-gdn-tree.patch",
+      "sha256": "9c8d4890cbee55f83546a5632231b4e157507eb21a01bf1e00d473aecd179025"
+    },
+    {
+      "name": "3013-kv-compact-rows.patch",
+      "sha256": "6e927e6c3f340ecdd28775d6125bf7f273e90f35837aefb2821a037dbb465f15"
     }
   ],
   "files": {
     "architecture/dflash.py": {
       "pre": "a5c8ee679f8abc8ba464ad2fef71a74a9c502e3b4320b391b982428967999eaf",
-      "post": "6187d7a48c4bf7694fe0e9e9289e6806479a177f0a1133f7fd84ee7acbadad3e"
+      "post": "9918ecdf4e577bea2126992891caf879fefe6894b4cd5169b6606da6ed445d09"
     },
     "architecture/dflash2.py": {
       "pre": "03f93098649173a3f023a584e68d2db6124480508354aebd2cc56e5855bf7ee7",
-      "post": "a85fcdd2e0d40d6fe06c36899a1ebe6f798de179ca9a03f51c1cec4a12a72fa0"
+      "post": "1abded11cf38f1aefd675a671cfb59c2ccb2e309c93f688f258473561f39739c"
+    },
+    "cache/kv_compact.py": {
+      "pre": null,
+      "post": "8c6bdd61f82097632b33fb9756cb6bf6b230175e212796bb34f0d40cefd52342"
     },
     "exllamav3_ext/attn_small.cu": {
       "pre": null,
@@ -166,23 +186,31 @@
     },
     "exllamav3_ext/attn_verify.cu": {
       "pre": null,
-      "post": "9e34b6c774a639b24bdb899c4be36ebdf4e6c79898242babee5af17e7f613c5c"
+      "post": "b5f9f81d22138e5241e3199fbb06d8933fa432a89f3b00177f91f980bec078d2"
     },
     "exllamav3_ext/attn_verify.cuh": {
       "pre": null,
-      "post": "df353988e16fcf71f5b6f086fd6277597c4fc901a23c8ea7b3eb02bdfd0f9c65"
+      "post": "3ef7d60c35ee8084c3441143fb59e4db13dcaac8f26fa03b4536b44e375c21d5"
     },
     "exllamav3_ext/attn_verify_gr.cu": {
       "pre": null,
-      "post": "b6d588819846abc7c8d5ec75eae8eb918d576984696ce8e0ca0fffdf4250b1bf"
+      "post": "0831bc99ac2a3ff26d91c025cb4a79e53a980355c035a1df0e32162a763eeaf5"
     },
     "exllamav3_ext/attn_verify_gr.cuh": {
       "pre": null,
-      "post": "8d60a45fec7a819168301c3c539a2560cc08d7bd0a2b2f93ee5108332b8180eb"
+      "post": "acd47a8f2de484aab15710aff8d13f590d6013d1f383b4ae8867bc646c458782"
     },
     "exllamav3_ext/bindings.cpp": {
       "pre": "381d867b845335b15106f86aa79e284c9d6b7d316703dd555d8a86a13ed2b465",
-      "post": "65f1e06d7c3268f31175cb61ad8d6798b1e144df9554beeeda9d6b2fc313604d"
+      "post": "72bc9e9b2e93e3452a2803a9974b9877aa5492d30ef4ac810b4237d0b20f2f81"
+    },
+    "exllamav3_ext/dflash2.cu": {
+      "pre": "dd5023eea10408948da25b68e4d6242628704886c261c1c63bd5213887298250",
+      "post": "bd88bf2056b38cdf6384c6a2e8b672b283342ef473e858c22011b29addd7d6f9"
+    },
+    "exllamav3_ext/dflash2.cuh": {
+      "pre": "54de9102a23d7740422867238e5802da44afd591787704ce53cc5102802cc16f",
+      "post": "e6c794c2d611e5d04ae88a22640ccfff190f13078893b7152f6e4341ff05cc53"
     },
     "exllamav3_ext/dflash2_head.cu": {
       "pre": null,
@@ -194,15 +222,15 @@
     },
     "exllamav3_ext/gdn.cu": {
       "pre": "a06effe57ac621eea19d908796b4848135f675438d5b3eedbd3c4e67d336eaf0",
-      "post": "96bdf24c5f7895e62c913e9393c5a82164f2ac9409e27ce95e373ba6f8af7be7"
+      "post": "934470831b98b90fafc255ac8c1e9b113870e90769fbd5b5247194ca67af9fff"
     },
     "exllamav3_ext/gdn.cuh": {
       "pre": "c64e35c29d7ebc40b7b10b64d4015dff7a5ab1409865f7ebf8cd38a903ab05fd",
-      "post": "2f003a213d829f91598d6705cc6aeb1c00ea1df648f6003ab19ffed6710ff0ee"
+      "post": "25309c96aaf5ba6ed66e543acf849253c7b779927979c6b69a6f14e7fae5f741"
     },
     "exllamav3_ext/gdn_ba_ksplit_op.cpp": {
       "pre": null,
-      "post": "8fb049dcdf6022648c637eac66adf6d9e888ab6db0dc5fc34d0c5041ec757609"
+      "post": "2a098f7662e1d4601f9c9adfcdd9217f1d0366a3e5f61b5d68c9c3b9efb6b288"
     },
     "exllamav3_ext/graph.cu": {
       "pre": "8e57b2f599df4df9ac7cdd06dd7e175d511e5780b59e9b6f3570c3476f0a7901",
@@ -220,29 +248,37 @@
       "pre": null,
       "post": "b3c204f3e959fd6bf3b826af4c4e21ab80dc74bce9497af643c9d514afe9ddcb"
     },
+    "exllamav3_ext/kv_compact.cu": {
+      "pre": null,
+      "post": "0cdcb71132256249b0f320f07d26f24eb6e8fbcceaa55d5865c6e1860c762cfd"
+    },
+    "exllamav3_ext/kv_compact.cuh": {
+      "pre": null,
+      "post": "945f07ec9c842888272681fee423dc78cd058ff636f34fc88e594fa5bb3a66b2"
+    },
     "exllamav3_ext/libtorch/attention.cpp": {
       "pre": "78ed122f0cf0a345755a306713ed982137b2bfbee62f6b17cf8bf4b0056427e4",
-      "post": "771633eb3ffc99f1d388f52b9022d75016b851f8bd86af090657779316170735"
+      "post": "c8beb960dda1204b0ef2b1c52f7e38f6c66fa8802b93d1c08529ea4f79487816"
     },
     "exllamav3_ext/libtorch/attention.h": {
       "pre": "628741cc309a351507b09d992c09d8d2972a113afb3ff76e0a6323ed0b0ee4b4",
-      "post": "44e9b6c004c01539b29c0f81e443c04471a2b0b62833aa11e2b794b662e464dc"
+      "post": "2ffa028dfeefcff4fe2e1ce24ba7c0102a3555094aa6aaacdf9cb21a0151ef8e"
     },
     "exllamav3_ext/libtorch/attention_bc.h": {
       "pre": "b007768c5be8f34d8b9765213480c59867cc23784539b5fa2c97d0c235504db5",
-      "post": "bb037b2141ac5416cfe2b509f889ccec62fba59c1fc71e6b4d5cdf29e5ff572f"
+      "post": "8fec6e0215575f05a98aac1eea41824bcf6c26b033d386c06ae1f80e3c78f3e8"
     },
     "exllamav3_ext/libtorch/gated_delta_net.cpp": {
       "pre": "d8a31ef61e42ce753f7a9ee2a55c7e25a1c51e0a0a8d148d6058f9d96120dfef",
-      "post": "2b0e90aeea1257a35f32cae7e0e4a790065dfb8ee4e14e05a66e24ae5d2bf1b8"
+      "post": "7f718163ff3747538c70d02e436e73b19ad713ade1143b9e9e6ea852a6022b97"
     },
     "exllamav3_ext/libtorch/gated_delta_net.h": {
       "pre": "57e460d9e8d5097f647b59b6d20c8be5162386e11ec168ced7903471f4b4205f",
-      "post": "406bbb18a9911ac33721817acc37e51a0364c58821acaec6d23df6a626bc05fc"
+      "post": "1e02266b4b9014a97a63c39c4dd28b57e09b556cfc7f5113b5ac70ef2729075a"
     },
     "exllamav3_ext/libtorch/gated_delta_net_bc.h": {
       "pre": "b281f169bd1df139919723b9e4cd8a418a788c5c21a9782ed041f8e007e923f0",
-      "post": "226a5d3d1abac382e86018a17267f9e0c1cb01da903cb4faf3b9ba96639d84a3"
+      "post": "3d6088f8dc6572f133e67262cc3d10c75b20053ae5a9c3c5813f425344d81bae"
     },
     "exllamav3_ext/libtorch/mlp.cpp": {
       "pre": "3f5d326cabd970a9892b2b2ce69cfc5e7949a113462e5e22b572f6f77803ec85",
@@ -352,6 +388,10 @@
       "pre": null,
       "post": "6d15ae0797f1af34ec4f6aa75760595cf9a82b1dfd8321bbfabd26ea0172d4fa"
     },
+    "generator/gdn_rewind.py": {
+      "pre": "08bf319ae372a26cb85d3a39896e0001bf2d3dbe4c9adf21bb58012c8eedb49a",
+      "post": "0f4a84912f823328e4501784ebcfac24f6e9cb475ae64fa647d5d127139cc940"
+    },
     "generator/job.py": {
       "pre": "4564b54b589fa045c9452f4e5e39cb304a090e06714f6f0d2428cbb261eab04b",
       "post": "3518734c3e08016ec187f9d25808c3b4692f0bca176c80dff6213495b0fa0e24"
@@ -366,7 +406,7 @@
     },
     "modules/arch_specific/dflash2.py": {
       "pre": "8aa64c4099864b0c91022bf06fa84838d98a30956fb03a212a92edc95475d70b",
-      "post": "f75071ef306384091fccc6ff6d491b15096712f2706c2953b25391fcdfe98c88"
+      "post": "3fefbf00e912b1784001ef0e47e2d128de8e69437762b683412b6cc1cbff1ec6"
     },
     "modules/arch_specific/dflash2_head_blocks.py": {
       "pre": null,
@@ -378,7 +418,7 @@
     },
     "modules/attention_fn/bc_attn.py": {
       "pre": "63f0768f313cb7015485d4655b433020f2e9e66bb44d971a9e6c65bc306994e0",
-      "post": "a61d0f70ad1ecfc141e240b41face22d53aff4d8ea5238fd9d875c679fe68df1"
+      "post": "ca8454948f54e68fde932a1bd499a636a0202a577c8ae687a29452c5f895a87b"
     },
     "modules/attention_fn/triton_paged.py": {
       "pre": "910379b663acb08711c3be207cd3e9ed96658527cc110a6ce39c793f997836d9",
@@ -386,11 +426,11 @@
     },
     "modules/attn.py": {
       "pre": "92075ee1f8890c014fbf9fb62fecb705dba793ac96dbd794c1d399e284034c26",
-      "post": "2e02d9dd1f4de26d262c02e95a48b57342a9139f427c88fdf1916bffe4a2632f"
+      "post": "27080f57092ecdbfa16381bdbded479b8d9956bb5b101ba96ca90b6952600b30"
     },
     "modules/gated_delta_net.py": {
       "pre": "955f2ae25509ccf695dac4b79721115bc51d9d63a7f6f1eeb0a42671b685cf5a",
-      "post": "844bafa3a2918bf18c355da8056ba412f655fcc0238c8479a425c6c8c2030df1"
+      "post": "86d90f0c9f4f27987401057196289b8ab2de4e1465c58a61c7db82bc9b4361a5"
     },
     "modules/mlp.py": {
       "pre": "ca921d38cdf607a2dd272bc4f2ddfd9db8f4da7de9df91af32262a0fef611587",

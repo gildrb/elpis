@@ -546,3 +546,43 @@ realistic gain 0.2-0.4 ms per round); fp16-accumulated PV in decode attention (0
 8K); dequantizing the 3-bit cache once per round (11× the traffic); the draft-id handoff
 without host sync and graphing the draft preamble (idle removal gives nothing at the cap);
 producer-aligned split-K for the MLP tail; the 2109 lm_head instruction trim (−1.2 %).
+
+**8-row dynamic tree verify (ext 9008 / 3012 / 5109 / 3013, exl3 0006; `EXL3_TREE`, default on).**
+The same 8 verify rows carry a draft token tree instead of a 7-token chain. The anchor is row 0, and the 7 nodes are chosen best-first
+by calibrated cumulative probability over the DFlash2 selector lattice (frozen constants, deterministic tie-break).
+The tree is built on the GPU (9008). The target verifies each row at position base + depth: attention folds in the
+row's ancestors in logical order (3012), and GDN runs the conv window along the ancestors and the recurrence from the
+parent state (5109). The proven tree acceptance commits the maximal matching root path under the chain rules (eos,
+budget, checkpoint). The commit replays GDN along the path, moves the path's CQ3 K/V rows to base + depth (3013), and
+refreshes the draft cache from the path rows. `EXL3_TREE` and the test hook `EXL3_TREE_FORCE_CHAIN` parse strictly as
+0 or 1. Unset, the tree is on wherever it is supported (single-sequence DFlash2 with the int4 head, window 7, GDN target),
+otherwise off; `EXL3_TREE=1` on an unsupported configuration refuses to start.
+
+Verification (tree3 image, 250 W / mem −1500, 2026-09-27; `/tmp/gpu-queue/done/0070a-tree3-rungs.out`):
+- per slice, bitwise GPU differentials:
+  - 9008: builder mode 0 equals the greedy walk on 14,301 rounds;
+  - 3012: all 5040 tree shapes, every row equal to the chain kernel on the row's path; CHAIN equals cs12;
+  - 5109: T1-T5; CHAIN equals cs12 including the conv state;
+  - 3013: T1-T4.
+- rung 2: the forced chain (`EXL3_TREE_FORCE_CHAIN=1`) equals cs12 on the 17 alpha-2032 prompts (lane ×15, C1 1K/8K, capped at
+  4096 / 1024 tokens): the same ids, every round's (position, count), every round's drafted ids, and the same usage.
+- rung 3: the dynamic tree produces the same ids and finish reasons as cs12 on those prompts.
+- rung 4: lane-mix committed tokens per round 4.675 vs 4.309 (+8.48 %; the lattice simulation gave +8.53 %).
+  Per task: aime +5.7, i3-logic +5.9, livecodebench +12.3, mmlu-pro +9.5, C1 1K +12.9, C1 8K +13.7 %.
+- rung 5 (RoundBench, tree3s image, `sw` payload, off vs tree): ms per round is unchanged at 1K (34.287 vs 34.229, Δ −0.059,
+  95 % CI [−0.310, +0.192]) and 8K (35.031 vs 35.014); committed tokens per round go up by 14.7 % (1K) and 14.1 % (8K).
+- rung 6 (lane, tree3s `sha256:ec9751b0…`, #67): **122.33** vs cs12's 111.85 (+9.4 %), 0.495 vs 0.452 tok/J, accept length
+  3.933 vs 3.521. Rewards and truncation counts match. All 85 completion texts (lane traces, C1 responses) are byte-identical
+  to cs12's.
+
+Proof boundary. `bend PROOF.bend` covers:
+- the Bend tree-acceptance leaf and descriptor derivation (`exl3_tree_accept*`), against their independent list
+  reference;
+- the Nat models of the tree attention passes (`attn_tree*`) and of the GDN tree program and commit maps (`gdn_tree*`);
+- the agreement of the two descriptor references (`tree_desc_agree*`);
+- round-level speculation invariance over trees (`spec_inv_tree*`), under the hypothesis that a verify row's output
+  depends only on its absolute prefix.
+
+It does not prove the CUDA or Python code. The kernels' conformance to the models, the floating-point facts that hypothesis
+rests on (an all-masked attention pass leaves (m, l, acc) unchanged; PEEK and ADV share one arithmetic body), and the
+host plumbing are established by the bitwise differentials and rungs above, which are evidence, not proofs.

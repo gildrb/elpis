@@ -1,0 +1,469 @@
+--- a/exllamav3_ext/dflash2.cu
++++ b/exllamav3_ext/dflash2.cu
+@@ -306,6 +306,370 @@
+ }
+ 
+ 
++// ext 9008 (eta): DFlash2 draft tree builder (TreeDesign DESIGN.md §2.2 / §3a; DraftProj tree/POLICY.md v2).
++//
++// Stage 1 (dflash2_tree_lattice_kernel, 97 blocks): the selector scores of every candidate of every draft row given
++// every possible predecessor: block 0 = row 0 given the anchor, block 1 + 16 (d - 1) + i = row d given candidate i of
++// row d - 1. The per-score instruction sequence is the walk kernel's (dflash2_selector_walk_kernel above: fp32
++// a_g = A[pred] * gate in shared memory, per-warp lane-strided dot, xor butterfly, + unary), so mode 0's greedy walk
++// over the lattice returns the walk kernel's ids bit for bit.
++// Stages 2-4 (dflash2_tree_select_kernel, 1 block):
++//   mode 0: first-argmax walk (ascending candidate, strict >) -> tokens [anchor, path], CHAIN descriptor;
++//   mode 1: calibrated log-probabilities lp = (v - max v) - ln sum exp(v - max v) + ln q_d, v = s / T_d (frozen
++//   T_d, q_d; own exp / log polynomials, every op an explicit round-to-nearest intrinsic, so the CPU reference
++//   (DraftProj s1/tree_ref.py) reproduces the bytes exactly); best-first 7 pops (score desc, then index-path key
++//   asc, then depth asc), each pop pushing its 4 best children; rows sorted by (depth, pop); TreeDesc per §2.2.
++// Deterministic: no atomics, fixed orders, one thread for every order-dependent step.
++
++#define TREE_ROWS 7
++#define TREE_K 16
++#define TREE_LAT_ROWS (1 + (TREE_ROWS - 1) * TREE_K)          // 97
++#define TREE_OUT_BYTES 192
++#define TREE_FRONTIER 48
++
++template <typename TG, typename TC>
++__global__ __launch_bounds__(WALK_THREADS)
++void dflash2_tree_lattice_kernel
++(
++    const float* __restrict__ unary,        // [7, 16]
++    const int64_t* __restrict__ cands,      // [7, 16]
++    const TG* __restrict__ gate,            // [7, rank]
++    const TC* __restrict__ pred_cb,         // [vocab, rank]
++    const TC* __restrict__ succ_cb,         // [vocab, rank]
++    const int64_t* __restrict__ anchor,     // [1]
++    float* __restrict__ lat,                // [97, 16]
++    const int rank
++)
++{
++    extern __shared__ float smem[];
++    float* a_g = smem;                      // [rank]
++    const int blk = blockIdx.x;
++    const int t = threadIdx.x;
++    const int warp = t / 32, lane = t % 32;
++    const int i = blk == 0 ? 0 : (blk - 1) / TREE_K + 1;   // draft row
++    const int64_t pred = blk == 0 ? anchor[0] : cands[(i - 1) * TREE_K + (blk - 1) % TREE_K];
++
++    const TC* a_row = pred_cb + pred * rank;
++    const TG* g_row = gate + (int64_t) i * rank;
++    for (int r = t; r < rank; r += WALK_THREADS)
++        a_g[r] = to_f(a_row[r]) * to_f(g_row[r]);
++    __syncthreads();
++
++    const int64_t* c_row = cands + (int64_t) i * TREE_K;
++    const float* u_row = unary + (int64_t) i * TREE_K;
++    for (int c = warp; c < TREE_K; c += WALK_THREADS / 32)
++    {
++        const TC* b_row = succ_cb + c_row[c] * rank;
++        float dot = 0.0f;
++        for (int r = lane; r < rank; r += 32)
++            dot += a_g[r] * to_f(b_row[r]);
++        for (int offset = 16; offset > 0; offset /= 2)
++            dot += __shfl_xor_sync(0xffffffff, dot, offset);
++        if (lane == 0) lat[blk * TREE_K + c] = u_row[c] + dot;
++    }
++}
++
++// Frozen calibration (POLICY.md §2), exact fp32 bit patterns
++__constant__ uint32_t tree_invt_bits[TREE_ROWS] = {0x3f94b756, 0x3f5c5905, 0x3f476080, 0x3f346562, 0x3f346562, 0x3f2b9ad2, 0x3f2b9ad2};
++__constant__ uint32_t tree_logq_bits[TREE_ROWS] = {0xbb800b88, 0xbce7ce45, 0xbd64ade1, 0xbd9c2035, 0xbdb2925b, 0xbdbfcc63, 0xbdc5a782};
++__constant__ uint32_t tree_expc_bits[9] = {0x3f800000, 0x3f317218, 0x3e75fdf0, 0x3d635847, 0x3c1d955b, 0x3aaec3ff, 0x39218489, 0x377fe5fe, 0x35b16011};
++__constant__ uint32_t tree_logc_bits[5] = {0x3de38e39, 0x3e124925, 0x3e4ccccd, 0x3eaaaaab, 0x3f800000};
++
++__device__ __forceinline__ float tree_exp(float x)          // x <= 0
++{
++    const float y = __fmul_rn(x, __uint_as_float(0x3fb8aa3b));
++    if (y < -126.0f) return 0.0f;
++    const float n = floorf(y);
++    const float f = __fsub_rn(y, n);
++    float p = __uint_as_float(tree_expc_bits[8]);
++    for (int k = 7; k >= 0; --k) p = __fadd_rn(__fmul_rn(p, f), __uint_as_float(tree_expc_bits[k]));
++    const float scale = __uint_as_float((uint32_t) ((int) n + 127) << 23);
++    return __fmul_rn(p, scale);
++}
++
++__device__ __forceinline__ float tree_log(float z)          // z >= 1
++{
++    const uint32_t bits = __float_as_uint(z);
++    int e = (int) (bits >> 23) - 127;
++    float m = __uint_as_float((bits & 0x7FFFFFu) | 0x3F800000u);
++    if (m > __uint_as_float(0x3fb504f3)) { m = __fmul_rn(m, 0.5f); e += 1; }
++    const float t = __fdiv_rn(__fsub_rn(m, 1.0f), __fadd_rn(m, 1.0f));
++    const float t2 = __fmul_rn(t, t);
++    float p = __uint_as_float(tree_logc_bits[0]);
++    for (int k = 1; k < 5; ++k) p = __fadd_rn(__fmul_rn(p, t2), __uint_as_float(tree_logc_bits[k]));
++    return __fadd_rn(__fmul_rn((float) e, __uint_as_float(0x3f317218)), __fmul_rn(__fadd_rn(t, t), p));
++}
++
++// TreeDesc from parent[8] (DESIGN.md §2.2): bytes 64..191 of out
++__device__ void tree_write_desc(const int* parent, uint8_t* d)
++{
++    int depth[8], path[8][8], kids[8][8], nk[8];
++    for (int r = 0; r < 8; ++r) nk[r] = 0;
++    depth[0] = 0; path[0][0] = 0;
++    for (int r = 1; r < 8; ++r)
++    {
++        const int p = parent[r];
++        depth[r] = depth[p] + 1;
++        for (int j = 0; j < depth[r]; ++j) path[r][j] = path[p][j];
++        path[r][depth[r]] = r;
++        kids[p][nk[p]++] = r;
++    }
++    bool chain = true;
++    for (int r = 1; r < 8; ++r) chain = chain && parent[r] == r - 1;
++    for (int b = 0; b < 128; ++b) d[b] = 0;
++    int n_leaf = 0;
++    for (int r = 0; r < 8; ++r)
++    {
++        d[8 + r] = (uint8_t) (r == 0 ? 0xFF : parent[r]);
++        d[16 + r] = (uint8_t) depth[r];
++        uint8_t anc = 0;
++        for (int j = 0; j <= depth[r]; ++j) anc |= (uint8_t) (1 << path[r][j]);
++        d[24 + r] = anc;
++        int x = r;
++        while (nk[x]) x = kids[x][0];
++        d[32 + r] = (uint8_t) x;
++        if (!nk[r]) d[40 + n_leaf++] = (uint8_t) r;
++        for (int j = 0; j < 8; ++j) d[64 + 8 * r + j] = (uint8_t) (j <= depth[r] ? path[r][j] : 0xFF);
++    }
++    for (int j = n_leaf; j < 8; ++j) d[40 + j] = 0xFF;
++
++    // GDN program: ADV 0, visit(0) (explicit stack; §2.2 program rule)
++    uint8_t prog[16]; int np = 0;
++    int st_node[8], st_k[8], sp = 0;
++    prog[np++] = 0x00;
++    st_node[0] = 0; st_k[0] = -1; sp = 1;
++    while (sp)
++    {
++        const int v = st_node[sp - 1];
++        int inner[8], ni = 0, lf[8], nl = 0;
++        for (int q = 0; q < nk[v]; ++q) { const int c = kids[v][q]; if (nk[c]) inner[ni++] = c; else lf[nl++] = c; }
++        int& k = st_k[sp - 1];
++        if (k < 0)                                  // first entry into v
++        {
++            if (!ni)
++            {
++                for (int q = 0; q + 1 < nl; ++q) prog[np++] = (uint8_t) (0x10 | lf[q]);
++                if (nl) prog[np++] = (uint8_t) lf[nl - 1];
++                --sp;
++                continue;
++            }
++            for (int q = 0; q < nl; ++q) prog[np++] = (uint8_t) (0x10 | lf[q]);
++            k = 0;
++        }
++        else                                        // returned from inner[k]
++        {
++            prog[np++] = 0x20;
++            for (int j = 0; j <= depth[v]; ++j) prog[np++] = (uint8_t) (0x30 | path[v][j]);
++            ++k;
++        }
++        if (k < ni - 1)
++        {
++            prog[np++] = (uint8_t) inner[k];
++            st_node[sp] = inner[k]; st_k[sp] = -1; ++sp;
++        }
++        else                                        // last inner child: tail call, v is done
++        {
++            const int c = inner[ni - 1];
++            prog[np++] = (uint8_t) c;
++            st_node[sp - 1] = c; st_k[sp - 1] = -1;
++        }
++    }
++    d[0] = 0x54; d[1] = 1; d[2] = 8; d[3] = (uint8_t) n_leaf; d[4] = (uint8_t) np; d[5] = chain ? 0 : 1;
++    for (int j = 0; j < 16; ++j) d[48 + j] = j < np ? prog[j] : 0xFF;
++}
++
++__global__ __launch_bounds__(128)
++void dflash2_tree_select_kernel
++(
++    const float* __restrict__ lat,          // [97, 16]
++    const int64_t* __restrict__ cands,      // [7, 16]
++    const int64_t* __restrict__ anchor,     // [1]
++    uint8_t* __restrict__ out,              // [192]
++    const int mode
++)
++{
++    __shared__ float lp[TREE_LAT_ROWS][TREE_K];
++    __shared__ uint8_t top[TREE_LAT_ROWS][4];
++    const int t = threadIdx.x;
++
++    if (mode == 1 && t < TREE_LAT_ROWS)
++    {
++        const int d = t == 0 ? 0 : (t - 1) / TREE_K + 1;
++        const float invt = __uint_as_float(tree_invt_bits[d]);
++        const float logq = __uint_as_float(tree_logq_bits[d]);
++        float x[TREE_K];
++        float mx = 0.0f;
++        for (int j = 0; j < TREE_K; ++j)
++        {
++            x[j] = __fmul_rn(lat[t * TREE_K + j], invt);
++            if (j == 0 || x[j] > mx) mx = x[j];
++        }
++        float s = 0.0f;
++        for (int j = 0; j < TREE_K; ++j)
++        {
++            x[j] = __fsub_rn(x[j], mx);
++            const float e = tree_exp(x[j]);
++            s = j == 0 ? e : __fadd_rn(s, e);
++        }
++        const float L = tree_log(s);
++        uint32_t used = 0;
++        for (int j = 0; j < TREE_K; ++j) lp[t][j] = __fadd_rn(__fsub_rn(x[j], L), logq);
++        for (int q = 0; q < 4; ++q)
++        {
++            int best = -1;
++            for (int j = 0; j < TREE_K; ++j)
++                if (!(used >> j & 1) && (best < 0 || lp[t][j] > lp[t][best])) best = j;
++            used |= 1u << best;
++            top[t][q] = (uint8_t) best;
++        }
++    }
++    __syncthreads();
++    if (t) return;
++
++    int64_t* tok = (int64_t*) out;
++    int parent[8];
++    tok[0] = anchor[0];
++    parent[0] = -1;
++    if (mode == 0)
++    {
++        int i = 0;
++        for (int d = 0; d < TREE_ROWS; ++d)
++        {
++            const float* sc = lat + (d == 0 ? 0 : 1 + (d - 1) * TREE_K + i) * TREE_K;
++            int best = 0;
++            float best_score = sc[0];
++            for (int c = 1; c < TREE_K; ++c)
++                if (sc[c] > best_score) { best_score = sc[c]; best = c; }
++            tok[d + 1] = cands[d * TREE_K + best];
++            parent[d + 1] = d;
++            i = best;
++        }
++        tree_write_desc(parent, out + 64);
++        return;
++    }
++
++    // best-first selection: entries (score, key, depth, candidate j, parent pop)
++    float f_sc[TREE_FRONTIER]; uint32_t f_key[TREE_FRONTIER]; int f_dep[TREE_FRONTIER], f_j[TREE_FRONTIER], f_par[TREE_FRONTIER];
++    int nf = 0;
++    for (int j = 0; j < TREE_K; ++j)
++    {
++        f_sc[nf] = lp[0][j]; f_key[nf] = (uint32_t) j << 24; f_dep[nf] = 1; f_j[nf] = j; f_par[nf] = -1; ++nf;
++    }
++    int p_dep[TREE_ROWS], p_j[TREE_ROWS], p_par[TREE_ROWS];
++    for (int n = 0; n < TREE_ROWS; ++n)
++    {
++        int bi = 0;
++        for (int q = 1; q < nf; ++q)
++        {
++            const bool better = f_sc[q] > f_sc[bi] ||
++                (f_sc[q] == f_sc[bi] && (f_key[q] < f_key[bi] || (f_key[q] == f_key[bi] && f_dep[q] < f_dep[bi])));
++            if (better) bi = q;
++        }
++        const float sc = f_sc[bi]; const uint32_t key = f_key[bi]; const int dep = f_dep[bi], j = f_j[bi];
++        p_dep[n] = dep; p_j[n] = j; p_par[n] = f_par[bi];
++        for (int q = bi; q + 1 < nf; ++q)                  // order-preserving removal (tie rule is total anyway)
++        {
++            f_sc[q] = f_sc[q + 1]; f_key[q] = f_key[q + 1]; f_dep[q] = f_dep[q + 1]; f_j[q] = f_j[q + 1]; f_par[q] = f_par[q + 1];
++        }
++        --nf;
++        if (dep < TREE_ROWS)
++        {
++            const int row = 1 + (dep - 1) * TREE_K + j;   // lattice row: depth dep's candidates given this node
++            for (int q = 0; q < 4; ++q)
++            {
++                const int c = top[row][q];
++                f_sc[nf] = __fadd_rn(sc, lp[row][c]);
++                f_key[nf] = key | ((uint32_t) c << (4 * (6 - dep)));
++                f_dep[nf] = dep + 1; f_j[nf] = c; f_par[nf] = n; ++nf;
++            }
++        }
++    }
++
++    // rows 1..7 = pops stably sorted by (depth, pop index)
++    int row_of_pop[TREE_ROWS], r = 1;
++    for (int dep = 1; dep <= TREE_ROWS; ++dep)
++        for (int n = 0; n < TREE_ROWS; ++n)
++            if (p_dep[n] == dep)
++            {
++                row_of_pop[n] = r;
++                parent[r] = p_par[n] < 0 ? 0 : row_of_pop[p_par[n]];
++                tok[r] = cands[(dep - 1) * TREE_K + p_j[n]];
++                ++r;
++            }
++    tree_write_desc(parent, out + 64);
++}
++
++/*
++unary:   (1, 7, 16) fp32 top-16 draft scores of rows 1..7 (q4 head), contiguous
++cands:   (1, 7, 16) int64 their token ids (distinct per row, head order), contiguous
++gate:    (1, 7, rank) fp16 or fp32 = selector hidden_proj(state[:, 1:]), contiguous
++pred_cb, succ_cb: (vocab, rank) fp16 or bf16 codebooks (same dtype), contiguous
++anchor:  (1,) int64
++mode:    0 = greedy chain (ids == dflash2_selector_walk), 1 = dynamic_8 tree
++out:     (1, 192) uint8: tokens int64[8] (row 0 = anchor) + TreeDesc (DESIGN.md §2.2)
++*/
++
++void dflash2_tree_build
++(
++    const at::Tensor& unary,
++    const at::Tensor& cands,
++    const at::Tensor& gate,
++    const at::Tensor& pred_cb,
++    const at::Tensor& succ_cb,
++    const at::Tensor& anchor,
++    int64_t mode,
++    at::Tensor& out
++)
++{
++    const at::cuda::OptionalCUDAGuard device_guard(unary.device());
++    cudaStream_t stream = at::cuda::getCurrentCUDAStream().stream();
++
++    TORCH_CHECK(mode == 0 || mode == 1, "dflash2_tree_build: mode must be 0 or 1");
++    TORCH_CHECK_DTYPE(unary, kFloat);
++    TORCH_CHECK_DTYPE(cands, kLong);
++    TORCH_CHECK_DTYPE(anchor, kLong);
++    TORCH_CHECK_DTYPE(out, kByte);
++    TORCH_CHECK(unary.dim() == 3 && unary.size(0) == 1 && unary.size(1) == TREE_ROWS && unary.size(2) == TREE_K,
++                "dflash2_tree_build: unary must be (1, 7, 16)");
++    TORCH_CHECK(cands.sizes() == unary.sizes(), "dflash2_tree_build: cands must be (1, 7, 16)");
++    TORCH_CHECK(gate.dim() == 3 && gate.size(0) == 1 && gate.size(1) == TREE_ROWS, "dflash2_tree_build: gate must be (1, 7, rank)");
++    TORCH_CHECK(gate.dtype() == at::kHalf || gate.dtype() == at::kFloat, "dflash2_tree_build: gate must be fp16 or fp32");
++    const int rank = gate.size(2);
++    TORCH_CHECK(pred_cb.dim() == 2 && pred_cb.size(1) == rank && succ_cb.sizes() == pred_cb.sizes() &&
++                pred_cb.dtype() == succ_cb.dtype() && (pred_cb.dtype() == at::kHalf || pred_cb.dtype() == at::kBFloat16),
++                "dflash2_tree_build: codebooks must both be (vocab, rank) fp16 or both bf16");
++    TORCH_CHECK(anchor.dim() == 1 && anchor.size(0) == 1, "dflash2_tree_build: anchor must be (1,)");
++    TORCH_CHECK(out.dim() == 2 && out.size(0) == 1 && out.size(1) == TREE_OUT_BYTES, "dflash2_tree_build: out must be (1, 192) uint8");
++    TORCH_CHECK(unary.is_contiguous() && cands.is_contiguous() && gate.is_contiguous() && pred_cb.is_contiguous() &&
++                succ_cb.is_contiguous() && anchor.is_contiguous() && out.is_contiguous(), "dflash2_tree_build: inputs must be contiguous");
++    TORCH_CHECK(unary.device() == cands.device() && unary.device() == gate.device() && unary.device() == pred_cb.device() &&
++                unary.device() == anchor.device() && unary.device() == out.device() && unary.is_cuda(),
++                "dflash2_tree_build: all tensors must be on one CUDA device");
++    TORCH_CHECK(((uintptr_t) out.data_ptr()) % 8 == 0, "dflash2_tree_build: out must be 8-byte aligned");
++    TORCH_CHECK(rank >= 1, "dflash2_tree_build: empty rank");
++
++    at::Tensor lat = at::empty({TREE_LAT_ROWS, TREE_K}, unary.options());
++    size_t smem = rank * sizeof(float);
++    #define LAUNCH(TG, TC) \
++        dflash2_tree_lattice_kernel<TG, TC><<<TREE_LAT_ROWS, WALK_THREADS, smem, stream>>> \
++        ( \
++            (const float*) unary.data_ptr(), (const int64_t*) cands.data_ptr(), (const TG*) gate.data_ptr(), \
++            (const TC*) pred_cb.data_ptr(), (const TC*) succ_cb.data_ptr(), (const int64_t*) anchor.data_ptr(), \
++            (float*) lat.data_ptr(), rank \
++        );
++    if (gate.dtype() == at::kHalf) { if (pred_cb.dtype() == at::kHalf) { LAUNCH(half, half) } else { LAUNCH(half, __nv_bfloat16) } }
++    else                           { if (pred_cb.dtype() == at::kHalf) { LAUNCH(float, half) } else { LAUNCH(float, __nv_bfloat16) } }
++    #undef LAUNCH
++    cuda_check(cudaPeekAtLastError());
++    dflash2_tree_select_kernel<<<1, 128, 0, stream>>>
++    (
++        (const float*) lat.data_ptr(), (const int64_t*) cands.data_ptr(), (const int64_t*) anchor.data_ptr(),
++        (uint8_t*) out.data_ptr(), (int) mode
++    );
++    cuda_check(cudaPeekAtLastError());
++}
++
++
+ // Top-k over the draft block's logits for the selector, one launch for all rows (torch.topk
+ // spends ~18 launches on its radix select). Each row is split over blocks of 256 threads x E
+ // elements; every thread holds its E elements in registers and tracks its running maximum,
+--- a/exllamav3_ext/dflash2.cuh
++++ b/exllamav3_ext/dflash2.cuh
+@@ -24,6 +24,18 @@
+     const c10::optional<at::Tensor>& conf
+ );
+ 
++void dflash2_tree_build
++(
++    const at::Tensor& unary,
++    const at::Tensor& cands,
++    const at::Tensor& gate,
++    const at::Tensor& pred_cb,
++    const at::Tensor& succ_cb,
++    const at::Tensor& anchor,
++    int64_t mode,
++    at::Tensor& out
++);
++
+ void dflash2_topk
+ (
+     const at::Tensor& logits,
+--- a/exllamav3_ext/bindings.cpp
++++ b/exllamav3_ext/bindings.cpp
+@@ -246,6 +246,7 @@
+ 
+     m.def("dflash2_dynconv", &dflash2_dynconv, "dflash2_dynconv");
+     m.def("dflash2_selector_walk", &dflash2_selector_walk, "dflash2_selector_walk");
++    m.def("dflash2_tree_build", &dflash2_tree_build, "dflash2_tree_build");
+     m.def("dflash2_topk", &dflash2_topk, "dflash2_topk");
+     m.def("dflash2_q4_head_topk", &dflash2_q4_head_topk, "dflash2_q4_head_topk");
+     m.def("cache_rotate", &cache_rotate, "cache_rotate");
+--- a/modules/arch_specific/dflash2.py
++++ b/modules/arch_specific/dflash2.py
+@@ -389,6 +389,33 @@
+         return self._walk_torch(unary.float(), cands.long(), gate.float(), anchor_ids, return_confidence)
+ 
+ 
++    def build_tree(
++        self,
++        hidden: torch.Tensor,
++        unary: torch.Tensor,
++        cands: torch.Tensor,
++        anchor_ids: torch.Tensor,
++        mode: int,
++        out: torch.Tensor,
++    ) -> torch.Tensor:
++        """Draft token tree over the block's rows (eta ext 9008, dflash2_tree_build): the same gate and selector
++        scores as walk_cands, then mode 0 = the greedy chain (ids identical to walk_cands) or mode 1 = the dynamic_8
++        best-first tree. out: device uint8 (1, 192) = tokens int64[8] ([anchor, row tokens]) + the 128-byte tree
++        descriptor; returns out"""
++        if type(mode) is not int or mode not in (0, 1):
++            raise ValueError(f"build_tree: mode must be the int 0 or 1, got {mode!r}")
++        if not hidden.is_cuda or self.pred_codebook.dtype not in (torch.half, torch.bfloat16):
++            raise RuntimeError("build_tree: needs the CUDA selector (fp16 / bf16 codebooks)")
++        gate = self.hidden_proj.forward(hidden.half(), params = {})
++        anchor_ids = anchor_ids.long()
++        ext.dflash2_tree_build(
++            unary.float().contiguous(), cands.long().contiguous(), gate.contiguous(),
++            self.pred_codebook, self.succ_codebook,
++            anchor_ids.to(hidden.device, non_blocking = anchor_ids.is_pinned()).contiguous(), mode, out,
++        )
++        return out
++
++
+     def _walk_torch(self, unary, cands, gate, anchor_ids, return_confidence):
+         pred = anchor_ids
+         path = [pred]
+--- a/architecture/dflash2.py
++++ b/architecture/dflash2.py
+@@ -476,6 +476,26 @@
+         anchor = get_for_device(params, "dflash2_anchor_ids", dev)[:, -1]
+         export_conf = params.get("export_draft_conf", False)
+         q4 = self.q4_head
++        tree_out = params.get("dflash2_tree_out")
++        if tree_out is not None:
++            # Tree round (eta ext 9008): the generator owns tree_out (device uint8 (1, 192)) and its D2H; the builder
++            # writes [anchor, row tokens] + the tree descriptor into it, and the ids returned are a view of it
++            mode = params.get("dflash2_tree")
++            if type(mode) is not int or mode not in (0, 1):
++                raise ValueError(f"dflash2_tree must be the int 0 or 1, got {mode!r}")
++            if (not isinstance(tree_out, torch.Tensor) or tree_out.dtype != torch.uint8 or
++                    tuple(tree_out.shape) != (1, 192) or not tree_out.is_contiguous() or tree_out.device != torch.device(dev)):
++                raise ValueError("dflash2_tree_out must be a contiguous uint8 (1, 192) tensor on the selector's device")
++            if q4 is None or state.shape[0] != 1 or state.shape[1] != 8:
++                raise RuntimeError("DFlash2 tree rounds need the int4 draft head and one sequence of 8 block rows")
++            if export_conf:
++                raise RuntimeError("DFlash2 tree rounds do not export draft confidences")
++            pruned = self.head_policy is not None and self.head_policy.use_pruned
++            unary, cands = q4.topk(state, 1, pruned)
++            self.selector.build_tree(
++                to_device(state[:, 1:], dev), to_device(unary, dev), to_device(cands, dev), anchor, mode, tree_out,
++            )
++            return tree_out[:, :64].view(torch.int64)
+         if q4 is not None and state.shape[0] == 1 and 1 < state.shape[1] <= 8:
+             # Rows 1.. only (row 0 is the anchor); top-16 straight from the int4 head's GEMM epilogue, over the
+             # kept blocks when the pruned head is in use this round (ext 9005)

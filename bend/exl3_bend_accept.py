@@ -6,7 +6,8 @@
 The directory holds libexl3_accept.so (unchanged Bend 2.0.29 emitted C of
 bend/EXL3_ACCEPT.bend plus bend/exl3_accept_glue.c), the canonical table
 printed by the Bend reference program bend/EXL3_ACCEPT_SPEC.bend, this file and
-identity.json. admit() verifies every file hash and the identity digest, loads
+identity.json, beside the four tree acceptor files (exl3_bend_tree_accept.py).
+admit() verifies every file hash and the identity digest, loads
 the library, renders the complete finite differential table through the
 loaded leaf and requires it to equal the pinned reference table byte for
 byte, then probes the domain edges: the edge call must succeed and every call
@@ -49,6 +50,14 @@ IDENTITY_KEYS = frozenset({
     "identity_sha256",
 })
 ARTIFACTS = frozenset({LIBRARY_NAME, TABLE_NAME, LOADER_NAME})
+# The acceptor root holds exactly the chain and the tree acceptor files.
+ROOT_FILES = ARTIFACTS | {
+    IDENTITY_NAME,
+    "libexl3_tree_accept.so",
+    "exl3_tree_accept_table.txt",
+    "exl3_bend_tree_accept.py",
+    "tree_identity.json",
+}
 MAX_PROPOSALS = 7
 MAX_STOPS = 4
 ID_LIMIT = 1 << 32
@@ -210,7 +219,7 @@ def verify_files(directory: Path, identity: dict[str, object]) -> None:
     if not isinstance(artifacts, dict) or set(artifacts) != ARTIFACTS:
         raise fail("artifact set differs")
     present = {path.name for path in directory.iterdir()}
-    if present != ARTIFACTS | {IDENTITY_NAME}:
+    if present != ROOT_FILES:
         raise fail(f"directory holds {sorted(present)}, not exactly the admitted files")
     for name, expected in artifacts.items():
         path = directory / str(name)

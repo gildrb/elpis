@@ -1,0 +1,719 @@
+--- a/exllamav3_ext/bindings.cpp
++++ b/exllamav3_ext/bindings.cpp
+@@ -222,13 +222,13 @@
+         .def(py::init<uintptr_t, uintptr_t, int, int, int>());
+     py::class_<StateRewindJob>(m, "StateRewindJob")
+         .def(py::init<uintptr_t, uintptr_t, int64_t>());
+-    m.def("batched_conv_rewind", &batched_conv_rewind, py::arg("jobs"), py::arg("device_index"));
++    m.def("batched_conv_rewind", &batched_conv_rewind, py::arg("jobs"), py::arg("device_index"), py::arg("src_off") = py::none());
+     m.def("batched_state_rewind", &batched_state_rewind, py::arg("jobs"), py::arg("device_index"));
+     m.def("set_graph_outer_capture", &set_graph_outer_capture, py::arg("enable"));
+     m.def("graph_outer_capture", &graph_outer_capture);
+     py::class_<StateReplayJob>(m, "StateReplayJob")
+         .def(py::init<uintptr_t, uintptr_t, uintptr_t, uintptr_t, int, int, int, int, int>());
+-    m.def("batched_state_replay", &batched_state_replay, py::arg("jobs"), py::arg("device_index"));
++    m.def("batched_state_replay", &batched_state_replay, py::arg("jobs"), py::arg("device_index"), py::arg("row_map") = py::none());
+ 
+     m.def("argmax_sample", &argmax_sample, "argmax_sample");
+     m.def("gumbel_sample", &gumbel_sample, "gumbel_sample");
+--- a/exllamav3_ext/gdn.cu
++++ b/exllamav3_ext/gdn.cu
+@@ -2780,7 +2780,9 @@
+     return sum;
+ }
+ 
+-// dot1_col = this column's SUBK partials, 128 floats apart
++// dot1_col = this column's SUBK partials, 128 floats apart. STORE false (ext 5109, the tree
++// program's PEEK): the same expression; the updated value feeds v_out, the state keeps its value
++template <bool STORE = true>
+ __device__ __forceinline__ float gdn_rule_update
+ (
+     float (&state)[32],
+@@ -2800,8 +2802,9 @@
+     #pragma unroll
+     for (int j = 0; j < 32; ++j)
+     {
+-        state[j] = state[j] * g_h + k_rd[j] * v * beta_h;
+-        v_out = v_out + q_rd[j] * state[j];
++        float ns = state[j] * g_h + k_rd[j] * v * beta_h;
++        if constexpr (STORE) state[j] = ns;
++        v_out = v_out + q_rd[j] * ns;
+     }
+     return v_out;
+ }
+@@ -2856,6 +2859,77 @@
+         }
+         __syncthreads();
+     }
++}
++
++// ext 5109: the tree verify's recurrence. `tdesc` = the round's TreeDesc (128 bytes, host-validated,
++// in shared memory), 8 rows; `head_state` = the head's pre-verify state S0 (row 0 of the slot, never
++// written by a history-free verify). The program prog[0..n_prog) (byte op << 4 | row) visits the rows
++// depth first (DESIGN.md 2.2): ADV r advances the state by row r and emits row r, PEEK r emits row r
++// from the state advanced by r without keeping it (a leaf), REPLAY r advances without emitting, RELOAD
++// reloads S0. Every row is emitted exactly once, from the state history S0 -> path[r] (prog_bound.py,
++// bend/gdn_tree_laws.bend). The dot1 buffers alternate per arithmetic step (RELOAD takes none), so
++// consecutive steps never share one. The chain program ADV 0..7 is gdn_rule_tokens<RULE_VERIFY, 4>'s
++// loop, step for step
++#define GT_N_PROG 4
++#define GT_DEPTH 16
++#define GT_PROG 48
++#define GT_PATH 64
++#define GT_BYTES 128
++template <int GROUPS>
++__device__ __forceinline__ void gdn_rule_tokens_tree
++(
++    float (&state)[32],
++    GdnRuleSmem m,
++    int S,
++    GdnRuleThread th,
++    float scale,
++    const uint8_t* tdesc,
++    const float* head_state
++)
++{
++    static_assert(GROUPS == 4, "outputs need the whole head in one block");
++    constexpr int THREADS = GROUPS * 128;
++    const int warp = threadIdx.x / 32;
++    const int lane = threadIdx.x % 32;
++
++    for (int task = warp; task < 2 * S; task += THREADS / 32)
++        gdn_rule_l2norm_warp((task & 1 ? m.k : m.q) + (task >> 1) * 128, lane);
++    __syncthreads();
++
++    const int n_prog = tdesc[GT_N_PROG];
++    int step = 0;
++    for (int t = 0; t < n_prog; ++t)
++    {
++        const int op = tdesc[GT_PROG + t] >> 4;
++        const int r = tdesc[GT_PROG + t] & 15;
++        if (op == 2)
++        {
++            gdn_rule_load_state(state, head_state, th);
++            continue;
++        }
++        const float* k_rd = m.k + r * 128 + th.kslice * 32;
++        const float* q_rd = m.q + r * 128 + th.kslice * 32;
++        float* dot1_buf = m.dot1 + (step & 1) * SUBK * 128;
++        ++step;
++        dot1_buf[th.kslice * 128 + th.vcol] = gdn_rule_dot1(state, k_rd);
++        __syncthreads();
++        float v_out;
++        if (op == 1) v_out = gdn_rule_update<false>(state, k_rd, q_rd, dot1_buf + th.vcol, m.v[r * 128 + th.vcol], m.gexp[r], m.beta[r]);
++        else         v_out = gdn_rule_update<true>(state, k_rd, q_rd, dot1_buf + th.vcol, m.v[r * 128 + th.vcol], m.gexp[r], m.beta[r]);
++        if (op != 3) m.dot2[(r * SUBK + th.kslice) * 128 + th.vcol] = v_out;
++    }
++
++    __syncthreads();
++    for (int e = threadIdx.x; e < S * 128; e += THREADS)
++    {
++        int s = e / 128;
++        int c = e - s * 128;
++        float v_out = 0.0f;
++        #pragma unroll
++        for (int i = 0; i < SUBK; ++i) v_out += m.dot2[(s * SUBK + i) * 128 + c];
++        m.out[s * 128 + c] = __float2bfloat16_rz(v_out * scale);
++    }
++    __syncthreads();
+ }
+ 
+ // gated_rms_norm_kernel<32> for one 128-wide head row (lane owns elements 4l..4l+3)
+@@ -2976,7 +3050,11 @@
+ // barrier), SYNC (non-owner arrival / owner wait passed), STATE (thread 0's state landed), LOOP, NORM,
+ // END, and per-warp GEMV stamps (KS 0: slot 0 start, slot 1 + r after round r of the warp's first
+ // task; KS > 0: 0 start, 1 after the partial FMAs, 2 after the trees).
+-template <typename a_log_T, typename norm_w_T, int K, int KS, bool STAMP>
++// TREE (ext 5109): the tree verify of the 8-row TreeDesc `tree` (host-validated, DESIGN.md 2.2): row r's
++// conv window runs along its ancestors path[r] and the committed window, the rule walks the tree program
++// (gdn_rule_tokens_tree); conv_out / ba / beta / g stay per row and the window write-back keeps the raw
++// inputs of rows 0..7. With the CHAIN desc every value is the TREE = false kernel's
++template <typename a_log_T, typename norm_w_T, int K, int KS, bool STAMP, bool TREE>
+ __global__ __launch_bounds__(512)
+ void gdn_conv_rule_norm_kernel
+ (
+@@ -3013,7 +3091,8 @@
+     const int gate_act,                         // 0 = silu, 1 = sigmoid
+     const int dim,                              // 128, a runtime value as in the norm kernel
+     unsigned long long* __restrict__ stamps,    // STAMP only: [blocks][GDN_STAMP_WORDS]
+-    unsigned long long* __restrict__ wstamps    // STAMP only: [blocks][16 warps][8]
++    unsigned long long* __restrict__ wstamps,   // STAMP only: [blocks][16 warps][8]
++    const uint8_t* __restrict__ tree            // TREE only: TreeDesc [128], 4-byte aligned
+ )
+ {
+     constexpr int HD = 128;
+@@ -3033,6 +3112,14 @@
+     const int SEQ = K + S;
+     GdnRuleSmem m = gdn_rule_smem(gr_smem, S, true);
+ 
++    // TREE: the descriptor in shared memory after the conv windows (+GT_BYTES, see the launcher)
++    uint8_t* tdesc = (uint8_t*) (m.seq + 3 * HD * SEQ);
++    if constexpr (TREE)
++    {
++        if (t < GT_BYTES / 4) ((uint32_t*) tdesc)[t] = ((const uint32_t*) tree)[t];
++        __syncthreads();
++    }
++
+     // Recurrent state (row 0 of the slot, never written here), consumed by the rule: issued first,
+     // except with KS = 2, where the b/a loads go first and the state loads follow the conv (the
+     // three sets do not fit the 128 registers of a 512-thread block at once)
+@@ -3113,7 +3200,20 @@
+             if (s < S)
+             {
+                 seq[K + s] = xb[s];
+-                win[K - 1] = __bfloat162float(xb[s]);
++                if constexpr (TREE)
++                {
++                    // Row s's window: its ancestors' raw inputs by depth (path[s]), below depth 0 the
++                    // committed window seq[1..K-1]; every entry read (<= K + s) is written
++                    const int d = tdesc[GT_DEPTH + s];
++                    const uint8_t* pth = tdesc + GT_PATH + s * 8;
++                    #pragma unroll
++                    for (int kk = 0; kk < K; ++kk)
++                    {
++                        const int i = d - (K - 1) + kk;
++                        win[kk] = __bfloat162float(seq[K + (i >= 0 ? (int) pth[i] : i)]);
++                    }
++                }
++                else win[K - 1] = __bfloat162float(xb[s]);
+ 
+                 float acc = bias_d;
+                 #pragma unroll
+@@ -3126,9 +3226,12 @@
+                 if (store) conv_out[((size_t) b * S + s) * F + c] = o;
+                 dst[s * HD] = __bfloat162float(o);
+ 
+-                #pragma unroll
+-                for (int kk = 0; kk < K - 1; ++kk)
+-                    win[kk] = win[kk + 1];
++                if constexpr (!TREE)
++                {
++                    #pragma unroll
++                    for (int kk = 0; kk < K - 1; ++kk)
++                        win[kk] = win[kk + 1];
++                }
+             }
+         }
+     }
+@@ -3332,7 +3435,8 @@
+         for (int j = 0; j < 32; ++j) dep += state[j];
+         gdn_stamp<STAMP>(stamps, GDN_ST_STATE, dep);
+     }
+-    gdn_rule_tokens<RULE_VERIFY, 4>(state, m, S, th, scale);
++    if constexpr (TREE) gdn_rule_tokens_tree<4>(state, m, S, th, scale, tdesc, head_state);
++    else                gdn_rule_tokens<RULE_VERIFY, 4>(state, m, S, th, scale);
+     gdn_stamp<STAMP>(stamps, GDN_ST_LOOP);
+ 
+     // Gated RMS norm, warp s = token s
+@@ -3509,7 +3613,8 @@
+     Graph* graph,
+     int ksplit,
+     unsigned long long* stamps,
+-    unsigned long long* wstamps
++    unsigned long long* wstamps,
++    const c10::optional<at::Tensor>& tree
+ )
+ {
+     TORCH_CHECK(!((stamps || wstamps) && graph), "gdn_conv_rule_norm: stamps are for eager launches");
+@@ -3584,8 +3689,20 @@
+                 conv_weight.is_contiguous() && conv_out.is_contiguous() && recurrent_state.is_contiguous(),
+                 "gdn_conv_rule_norm: tensors must be contiguous");
+ 
+-    int smem = gdn_rule_smem_bytes(S, true, GR_K);
+-    int smem_max = gdn_rule_smem_bytes(GR_MAX_S, true, GR_K);
++    // ext 5109 tree verify: one batch row of 8 tokens, a host-validated TreeDesc on the device
++    const bool is_tree = tree.has_value();
++    if (is_tree)
++    {
++        const at::Tensor& td = tree.value();
++        TORCH_CHECK(B == 1 && S == 8, "gdn_conv_rule_norm: tree mode needs bsz 1, seqlen 8");
++        TORCH_CHECK(!stamps, "gdn_conv_rule_norm: no stamps in tree mode");
++        TORCH_CHECK(td.dtype() == at::kByte && td.dim() == 1 && td.numel() >= GT_BYTES && td.is_contiguous() &&
++                    td.device() == qkv.device() && ((uintptr_t) td.data_ptr()) % 4 == 0,
++                    "gdn_conv_rule_norm: tree must be a contiguous 4-byte aligned uint8 device tensor of >= 128 bytes");
++    }
++
++    int smem = gdn_rule_smem_bytes(S, true, GR_K) + (is_tree ? GT_BYTES : 0);
++    int smem_max = gdn_rule_smem_bytes(GR_MAX_S, true, GR_K) + (is_tree ? GT_BYTES : 0);
+     int history_stride = recurrent_state.size(1);
+     float scale = 1.0f / sqrtf(k_head_dim);
+ 
+@@ -3617,25 +3734,32 @@
+         (half*) y.data_ptr(),                           \
+         (int*) conv_sync.data_ptr(),                    \
+         S, F, state_size, k, num_k_heads, H, history_stride, \
+-        beta_scale, scale, epsilon, constant_bias, gate_act, 128, stamps, wstamps
+-
+-    #define LAUNCH_V(a_log_T, norm_w_T, KSV, STAMP)                                                   \
+-        launched = gdn_conv_rule_norm_launch(&gdn_conv_rule_norm_kernel<a_log_T, norm_w_T, GR_K, KSV, STAMP>, \
++        beta_scale, scale, epsilon, constant_bias, gate_act, 128, stamps, wstamps, \
++        (const uint8_t*) (is_tree ? tree.value().data_ptr() : nullptr)
++
++    #define LAUNCH_V(a_log_T, norm_w_T, KSV, STAMP, TREE)                                             \
++        launched = gdn_conv_rule_norm_launch(&gdn_conv_rule_norm_kernel<a_log_T, norm_w_T, GR_K, KSV, STAMP, TREE>, \
+                                              dim3(H, B), smem, smem_max, stream, graph, ARGS(a_log_T, norm_w_T));
+ 
+     #define LAUNCH(a_log_T, norm_w_T)                                                     \
+     {                                                                                     \
+-        if (stamps)                                                                       \
++        if (is_tree)                                                                      \
+         {                                                                                 \
+-            if (ks == 0)      LAUNCH_V(a_log_T, norm_w_T, 0, true)                        \
+-            else if (ks == 1) LAUNCH_V(a_log_T, norm_w_T, 1, true)                        \
+-            else              LAUNCH_V(a_log_T, norm_w_T, 2, true)                        \
++            if (ks == 0)      LAUNCH_V(a_log_T, norm_w_T, 0, false, true)                 \
++            else if (ks == 1) LAUNCH_V(a_log_T, norm_w_T, 1, false, true)                 \
++            else              LAUNCH_V(a_log_T, norm_w_T, 2, false, true)                 \
++        }                                                                                 \
++        else if (stamps)                                                                  \
++        {                                                                                 \
++            if (ks == 0)      LAUNCH_V(a_log_T, norm_w_T, 0, true, false)                 \
++            else if (ks == 1) LAUNCH_V(a_log_T, norm_w_T, 1, true, false)                 \
++            else              LAUNCH_V(a_log_T, norm_w_T, 2, true, false)                 \
+         }                                                                                 \
+         else                                                                              \
+         {                                                                                 \
+-            if (ks == 0)      LAUNCH_V(a_log_T, norm_w_T, 0, false)                       \
+-            else if (ks == 1) LAUNCH_V(a_log_T, norm_w_T, 1, false)                       \
+-            else              LAUNCH_V(a_log_T, norm_w_T, 2, false)                       \
++            if (ks == 0)      LAUNCH_V(a_log_T, norm_w_T, 0, false, false)                \
++            else if (ks == 1) LAUNCH_V(a_log_T, norm_w_T, 1, false, false)                \
++            else              LAUNCH_V(a_log_T, norm_w_T, 2, false, false)                \
+         }                                                                                 \
+     }
+ 
+@@ -3957,13 +4081,15 @@
+ #define REWIND_CONV_THREADS 256
+ #define REWIND_STATE_THREADS 256
+ 
+-struct ConvRewindJobBatch { ConvRewindJob jobs[REWIND_MAX_JOBS]; int num_jobs; };
++// ext 5109: src_off (MAP): window entry k reads src + src_off[k] (the tree's committed path), else src + k
++struct ConvRewindJobBatch { ConvRewindJob jobs[REWIND_MAX_JOBS]; int num_jobs; int8_t src_off[CONV1D_MAX_K]; };
+ struct StateRewindJobBatch { StateRewindJob jobs[REWIND_MAX_JOBS]; int num_jobs; };
+ 
+ // conv_state[slot, :, :cdim] <- conv_state[slot, :, p-cdim:p], one thread per channel. Reads its
+ // (up to CONV1D_MAX_K) elements into registers before writing any of them back, so the copy is
+ // safe even when src/dst windows overlap (num_tokens < conv_kernel_size) -- no synchronization
+ // needed since channels are independent and a single thread's read-then-write is self-ordered.
++template <bool MAP>
+ __global__ __launch_bounds__(REWIND_CONV_THREADS)
+ void batched_conv_rewind_kernel(ConvRewindJobBatch batch)
+ {
+@@ -3980,7 +4106,7 @@
+     bfloat16 reg[CONV1D_MAX_K];
+     #pragma unroll
+     for (int k = 0; k < CONV1D_MAX_K; ++k)
+-        if (k < j.cdim) reg[k] = s[k];
++        if (k < j.cdim) reg[k] = s[MAP ? (int) batch.src_off[k] : k];
+     #pragma unroll
+     for (int k = 0; k < CONV1D_MAX_K; ++k)
+         if (k < j.cdim) t[k] = reg[k];
+@@ -4003,17 +4129,22 @@
+     ((float4*) j.dst)[i4] = ((const float4*) j.src)[i4];
+ }
+ 
+-void batched_conv_rewind(std::vector<ConvRewindJob> const& jobs, int device_index)
++// ext 5109: src_off (the tree commit, DESIGN.md 3e): cdim offsets, strictly increasing, each in 0..11;
++// every job's reads (src - dst) / 2 + src_off[k] must stay inside its channel row (stride elements)
++void batched_conv_rewind(std::vector<ConvRewindJob> const& jobs, int device_index,
++                         const std::optional<std::vector<int64_t>>& src_off)
+ {
+     if (jobs.empty()) return;
+     c10::cuda::CUDAGuard device_guard((c10::DeviceIndex) device_index);
+     cudaStream_t stream = at::cuda::getCurrentCUDAStream().stream();
++    const bool map = src_off.has_value();
+ 
+     for (size_t base = 0; base < jobs.size(); base += REWIND_MAX_JOBS)
+     {
+         int n = (int) MIN(jobs.size() - base, (size_t) REWIND_MAX_JOBS);
+         ConvRewindJobBatch batch;
+         batch.num_jobs = n;
++        for (int k = 0; k < CONV1D_MAX_K; ++k) batch.src_off[k] = (int8_t) k;
+         int max_dim = 0;
+         for (int i = 0; i < n; ++i)
+         {
+@@ -4021,9 +4152,29 @@
+             TORCH_CHECK(batch.jobs[i].cdim <= CONV1D_MAX_K, "batched_conv_rewind: cdim exceeds CONV1D_MAX_K");
+             max_dim = MAX(max_dim, batch.jobs[i].dim);
+         }
++        if (map)
++        {
++            const std::vector<int64_t>& off = src_off.value();
++            for (int i = 0; i < n; ++i)
++            {
++                const ConvRewindJob& j = batch.jobs[i];
++                TORCH_CHECK((int) off.size() == j.cdim, "batched_conv_rewind: src_off needs one entry per window element");
++                TORCH_CHECK(j.src >= j.dst && (j.src - j.dst) % sizeof(bfloat16) == 0,
++                            "batched_conv_rewind: src_off needs the source after the destination in one channel row");
++                const int64_t rel = (int64_t) ((j.src - j.dst) / sizeof(bfloat16));
++                for (int k = 0; k < j.cdim; ++k)
++                {
++                    TORCH_CHECK(0 <= off[k] && off[k] <= 11 && (k == 0 || off[k - 1] < off[k]),
++                                "batched_conv_rewind: src_off must be strictly increasing, in 0..11");
++                    TORCH_CHECK(rel + off[k] < j.stride, "batched_conv_rewind: src_off reads past the channel row");
++                }
++            }
++            for (size_t k = 0; k < off.size(); ++k) batch.src_off[k] = (int8_t) off[k];
++        }
+ 
+         dim3 blocks(CEIL_DIVIDE(max_dim, REWIND_CONV_THREADS), n);
+-        batched_conv_rewind_kernel<<<blocks, REWIND_CONV_THREADS, 0, stream>>>(batch);
++        if (map) batched_conv_rewind_kernel<true><<<blocks, REWIND_CONV_THREADS, 0, stream>>>(batch);
++        else     batched_conv_rewind_kernel<false><<<blocks, REWIND_CONV_THREADS, 0, stream>>>(batch);
+         cuda_check(cudaPeekAtLastError());
+     }
+ }
+@@ -4065,13 +4216,15 @@
+ // (RULE_COMMIT never reads it). GATHER false = the pre-5108 loader (A/B: EXL3_GDN_REPLAY_GATHER=0)
+ #define REPLAY_PARTS 20                                     // 16 k + 4 v uint4 per token
+ #define REPLAY_GI ((GR_MAX_S * REPLAY_PARTS + 127) / 128)
+-struct StateReplayJobBatch { StateReplayJob jobs[REWIND_MAX_JOBS]; int num_jobs; };
++// ext 5109: row_map (MAP): replay token s reads verify row row_map[s] (the tree's accepted path)
++struct StateReplayJobBatch { StateReplayJob jobs[REWIND_MAX_JOBS]; int num_jobs; uint8_t row_map[GR_MAX_S]; };
+ static_assert(sizeof(StateReplayJobBatch) <= 4096, "StateReplayJobBatch exceeds the kernel parameter limit");
+ 
+-template <bool GATHER>
++template <bool GATHER, bool MAP>
+ __global__ __launch_bounds__(128, 8)                         // 64 registers: 8 CTAs/SM as before 5108
+ void batched_state_replay_kernel(StateReplayJobBatch batch)
+ {
++    static_assert(GATHER || !MAP, "the row map needs the gather loader");
+     int job_idx = blockIdx.z;
+     if (job_idx >= batch.num_jobs) return;
+     StateReplayJob j = batch.jobs[job_idx];
+@@ -4107,13 +4260,17 @@
+                 const int s = e / REPLAY_PARTS;
+                 const int p = e - s * REPLAY_PARTS;
+                 const int ch = p < 16 ? k_ch + p * 8 : v_ch + (p - 16) * 8;
+-                r[i] = *(const uint4*) (src + (size_t) s * F + ch);
++                const int sr = MAP ? (int) batch.row_map[s] : s;
++                r[i] = *(const uint4*) (src + (size_t) sr * F + ch);
+             }
+         }
+         const float* g_row = (const float*) j.g + row_tokens * H;
+         const bfloat16* beta_row = (const bfloat16*) j.beta + row_tokens * H;
+         for (int s = threadIdx.x; s < S; s += 128)
+-            gdn_rule_scalars(g_row[(size_t) s * H + h], beta_row[(size_t) s * H + h], m.gexp[s], m.beta[s]);
++        {
++            const int sr = MAP ? (int) batch.row_map[s] : s;
++            gdn_rule_scalars(g_row[(size_t) sr * H + h], beta_row[(size_t) sr * H + h], m.gexp[s], m.beta[s]);
++        }
+         #pragma unroll
+         for (int i = 0; i < REPLAY_GI; ++i)
+         {
+@@ -4165,10 +4322,22 @@
+     return value;
+ }
+ 
+-void batched_state_replay(std::vector<StateReplayJob> const& jobs, int device_index)
++// ext 5109: row_map (the tree commit, DESIGN.md 3e): GR_MAX_S rows, row_map[0] == 0; per job the first
++// `steps` entries strictly increasing and below seqlen (entries past steps are not read). Needs the gather
++void batched_state_replay(std::vector<StateReplayJob> const& jobs, int device_index,
++                          const std::optional<std::vector<int64_t>>& row_map)
+ {
+     if (jobs.empty()) return;
+     const bool gather = gdn_replay_gather(-1) != 0;
++    const bool map = row_map.has_value();
++    if (map)
++    {
++        const std::vector<int64_t>& rm = row_map.value();
++        TORCH_CHECK(gather, "batched_state_replay: a row map needs the 5108 gather (EXL3_GDN_REPLAY_GATHER=1)");
++        TORCH_CHECK((int) rm.size() == GR_MAX_S && rm[0] == 0, "batched_state_replay: row_map must be 16 rows, row_map[0] == 0");
++        for (int s = 0; s < GR_MAX_S; ++s)
++            TORCH_CHECK(0 <= rm[s] && rm[s] < GR_MAX_S, "batched_state_replay: row_map entries must be in 0..15");
++    }
+     c10::cuda::CUDAGuard device_guard((c10::DeviceIndex) device_index);
+     cudaStream_t stream = at::cuda::getCurrentCUDAStream().stream();
+ 
+@@ -4190,12 +4359,21 @@
+             // 5108 gather: 16-byte loads of conv_out rows (F and the channel offsets are multiples of 8)
+             TORCH_CHECK(!gather || ((j.mixed_qkv % 16) == 0 && ((2 * 128 * j.num_k_heads + 128 * j.num_v_heads) % 8) == 0),
+                         "batched_state_replay: conv_out must be 16-byte aligned for the 5108 gather");
++            if (map)
++            {
++                const std::vector<int64_t>& rm = row_map.value();
++                for (int s = 0; s < j.steps; ++s)
++                    TORCH_CHECK(rm[s] < j.seqlen && (s == 0 || rm[s - 1] < rm[s]),
++                                "batched_state_replay: row_map must be strictly increasing below seqlen over the replayed steps");
++            }
+             batch.jobs[i] = j;
+             max_heads = MAX(max_heads, j.num_v_heads);
+             max_steps = MAX(max_steps, j.steps);
+         }
+-
+-        auto kernel = gather ? &batched_state_replay_kernel<true> : &batched_state_replay_kernel<false>;
++        for (int s = 0; s < GR_MAX_S; ++s) batch.row_map[s] = (uint8_t) (map ? row_map.value()[s] : s);
++
++        auto kernel = map ? &batched_state_replay_kernel<true, true> :
++                      gather ? &batched_state_replay_kernel<true, false> : &batched_state_replay_kernel<false, false>;
+         gdn_max_shared_carveout((const void*) kernel);
+         gdn_rule_smem_optin((const void*) kernel, gdn_rule_smem_bytes(GR_MAX_S, false, 0));
+         dim3 blocks(128 / 32, max_heads, n);
+--- a/exllamav3_ext/gdn.cuh
++++ b/exllamav3_ext/gdn.cuh
+@@ -282,7 +282,8 @@
+     Graph* graph,
+     int ksplit = -1,
+     unsigned long long* stamps = nullptr,
+-    unsigned long long* wstamps = nullptr
++    unsigned long long* wstamps = nullptr,
++    const c10::optional<at::Tensor>& tree = c10::nullopt   // ext 5109: TreeDesc uint8 [>= 128], bsz 1, seqlen 8
+ );
+ 
+ // b/a GEMV variant of gdn_conv_rule_norm_gr, read at launch/capture time: EXL3_GDN_BA_KSPLIT (0 = the
+@@ -394,9 +395,12 @@
+         steps(_steps), num_k_heads(_num_k_heads), num_v_heads(_num_v_heads) {}
+ };
+ 
+-void batched_conv_rewind(std::vector<ConvRewindJob> const& jobs, int device_index);
++// ext 5109: src_off / row_map (tree commit, DESIGN.md 3e), host-checked; nullopt = the chain launches
++void batched_conv_rewind(std::vector<ConvRewindJob> const& jobs, int device_index,
++                         const std::optional<std::vector<int64_t>>& src_off = std::nullopt);
+ void batched_state_rewind(std::vector<StateRewindJob> const& jobs, int device_index);
+-void batched_state_replay(std::vector<StateReplayJob> const& jobs, int device_index);
++void batched_state_replay(std::vector<StateReplayJob> const& jobs, int device_index,
++                          const std::optional<std::vector<int64_t>>& row_map = std::nullopt);
+ // ext 5108: input loader of batched_state_replay (1 batched 16-byte gather, 0 the pre-5108 loader);
+ // EXL3_GDN_REPLAY_GATHER or the last set >= 0, read at every launch. Returns the value in use
+ int gdn_replay_gather(int set);
+--- a/exllamav3_ext/gdn_ba_ksplit_op.cpp
++++ b/exllamav3_ext/gdn_ba_ksplit_op.cpp
+@@ -14,6 +14,8 @@
+ //       num_v_heads, norm_w, gate, y, epsilon, constant_bias, gate_act, conv_sync, ksplit,
+ //       stamps?, wstamps?) -> 0 declined, else 1 + the variant launched; ksplit -1 = the knob;
+ //       stamps int64 [>= B * H * 8], wstamps int64 [>= B * H * 128] (globaltimer ns)
++//   torch.ops.exl3_gdn.conv_rule_norm_tree(the same without stamps, tree) -> ext 5109 tree verify with
++//       the TreeDesc `tree` (uint8 [>= 128]); bsz 1, seqlen 8
+ 
+ static int64_t gdn_ba_ksplit_op(int64_t set)
+ {
+@@ -76,9 +78,48 @@
+                                  sync_, nullptr, (int) ksplit, st, wst);
+ }
+ 
++static int64_t gdn_conv_rule_norm_tree_op
++(
++    const at::Tensor& x,
++    const at::Tensor& ba_w,
++    const c10::optional<at::Tensor>& ba_bias,
++    const at::Tensor& ba,
++    const at::Tensor& qkv,
++    const at::Tensor& dt_bias,
++    const at::Tensor& a_log,
++    const at::Tensor& beta,
++    const at::Tensor& g,
++    double beta_scale,
++    const at::Tensor& conv_state,
++    const at::Tensor& slots,
++    const at::Tensor& conv_weight,
++    const c10::optional<at::Tensor>& conv_bias,
++    const at::Tensor& conv_out,
++    const at::Tensor& recurrent_state,
++    int64_t num_k_heads,
++    int64_t num_v_heads,
++    const at::Tensor& norm_w,
++    const at::Tensor& gate,
++    const at::Tensor& y,
++    double epsilon,
++    double constant_bias,
++    int64_t gate_act,
++    const at::Tensor& conv_sync,
++    int64_t ksplit,
++    const at::Tensor& tree
++)
++{
++    at::Tensor ba_ = ba, beta_ = beta, g_ = g, cs_ = conv_state, co_ = conv_out, rs_ = recurrent_state, y_ = y, sync_ = conv_sync;
++    return gdn_conv_rule_norm_gr(x, ba_w, ba_bias, ba_, qkv, dt_bias, a_log, beta_, g_, (float) beta_scale,
++                                 cs_, slots, conv_weight, conv_bias, co_, rs_, (int) num_k_heads, (int) num_v_heads,
++                                 128, 128, norm_w, gate, y_, (float) epsilon, (float) constant_bias, (int) gate_act,
++                                 sync_, nullptr, (int) ksplit, nullptr, nullptr, tree);
++}
++
+ TORCH_LIBRARY(exl3_gdn, m)
+ {
+     m.def("ba_ksplit", &gdn_ba_ksplit_op);
+     m.def("replay_gather", &gdn_replay_gather_op);   // ext 5108 A/B knob (set < 0 reads)
+     m.def("conv_rule_norm", &gdn_conv_rule_norm_op);
++    m.def("conv_rule_norm_tree", &gdn_conv_rule_norm_tree_op);   // ext 5109
+ }
+--- a/exllamav3_ext/libtorch/gated_delta_net.cpp
++++ b/exllamav3_ext/libtorch/gated_delta_net.cpp
+@@ -78,6 +78,18 @@
+     for (const Slot& s : slots_hist)
+         TORCH_CHECK(!s.configured, "BC_GatedDeltaNetSplit: replay_verify must be set before any history slot");
+     replay_verify = enable;
++}
++
++void BC_GatedDeltaNetSplit::set_tree(const at::Tensor& desc)
++{
++    TORCH_CHECK(replay_verify, "BC_GatedDeltaNetSplit: tree verify needs replay_verify");
++    TORCH_CHECK(!tree.defined(), "BC_GatedDeltaNetSplit: set_tree once");
++    TORCH_CHECK(desc.dtype() == at::kByte && desc.dim() == 1 && desc.numel() >= 128 && desc.is_contiguous() &&
++                desc.is_cuda() && ((uintptr_t) desc.data_ptr()) % 4 == 0,
++                "BC_GatedDeltaNetSplit: the tree desc must be a contiguous 4-byte aligned uint8 device tensor of >= 128 bytes");
++    for (const Slot& s : slots_hist)
++        TORCH_CHECK(!s.configured, "BC_GatedDeltaNetSplit: set_tree must come before any history slot");
++    tree = desc;
+ }
+ 
+ void BC_GatedDeltaNetSplit::configure_slot
+@@ -341,6 +353,12 @@
+         // covered (same conv_out / conv_state as gdn_conv_ba_gr; ba / beta / g from the k-split b/a
+         // GEMV of ext 5106 unless EXL3_GDN_BA_KSPLIT=0; recurrent_state untouched). It records ba x,
+         // conv_state, slots, recurrent_state, slots in that order
++        // ext 5109: with a tree desc every history launch is a tree verify (bsz 1, seqlen 8), which
++        // only the fused kernel runs: a decline raises
++        const bool tree_verify = history && tree.defined();
++        if (tree_verify)
++            TORCH_CHECK(verify_free && norm_ok && x.size(0) == 1 && x.size(1) == 8,
++                        "BC_GatedDeltaNetSplit: tree verify needs the fused replay_verify path at bsz 1, seqlen 8");
+         if (verify_free && norm_ok)
+         {
+             if (!conv_sync.defined() && !graph)
+@@ -353,9 +371,11 @@
+                 recurrent_state, num_k_heads, num_v_heads, k_head_dim, v_head_dim,
+                 norm->weight, s.z, s.core_attn_out_f,
+                 norm->rms_norm_eps, norm->constant_bias, norm->gate_act,
+-                conv_sync, graph
++                conv_sync, graph, -1, nullptr, nullptr,
++                tree_verify ? c10::optional<at::Tensor>(tree) : c10::nullopt
+             );
+         }
++        TORCH_CHECK(!tree_verify || fused_all, "BC_GatedDeltaNetSplit: the fused kernel declined a tree verify");
+ 
+         // b/a GEMV, beta/g and the conv update as one launch reading the fp32 qkv directly (same
+         // results as the three launches below; mixed_qkv is not written). Both record ba x,
+--- a/exllamav3_ext/libtorch/gated_delta_net.h
++++ b/exllamav3_ext/libtorch/gated_delta_net.h
+@@ -163,6 +163,12 @@
+     bool replay_verify = false;
+     void set_replay_verify(bool enable);
+ 
++    // ext 5109: the generator's device TreeDesc static (uint8 [>= 128], fixed address). Once set, every
++    // history launch is a tree verify reading it (baked, unpatched, into captured graphs); set once,
++    // before the first history slot
++    at::Tensor tree;
++    void set_tree(const at::Tensor& desc);
++
+     // Zeroed int32 counters (MAX_BSZ * num_k_heads) for gdn_conv_rule_norm_gr's q/k conv-window
+     // hand-off; every launch leaves them zero. Allocated on the first eager replay_verify run
+     at::Tensor conv_sync;
+--- a/exllamav3_ext/libtorch/gated_delta_net_bc.h
++++ b/exllamav3_ext/libtorch/gated_delta_net_bc.h
+@@ -167,6 +167,7 @@
+ .def("run_bszN", &BC_GatedDeltaNetSplit::run_bszN)
+ .def("run_bszN_defer", &BC_GatedDeltaNetSplit::run_bszN_defer)
+ .def("set_replay_verify", &BC_GatedDeltaNetSplit::set_replay_verify, py::arg("enable"))
++.def("set_tree", &BC_GatedDeltaNetSplit::set_tree, py::arg("desc"))
+ .def("set_qkvz_bundle", &BC_GatedDeltaNetSplit::set_qkvz_bundle,
+     py::arg("ptrs_trellis"),
+     py::arg("ptrs_suh"),
+--- a/generator/gdn_rewind.py
++++ b/generator/gdn_rewind.py
+@@ -92,21 +92,65 @@
+         return launches
+ 
+ 
+-    def rewind(self, prepared: tuple, num_tokens: int):
++    @staticmethod
++    def check_maps(layers: list, window: int, num_tokens: int, row_map, src_off) -> tuple[list[int], list[int]]:
+         """
+-        Same effect and the same launches as state.rewind(num_tokens) for the state `prepared` planned
++        ext 5109 tree commit maps (DESIGN.md 3e, 8), checked before anything is launched. count = window + 1 -
++        num_tokens accepted rows along the path P: row_map (16 rows) = P[0..count) then s for s >= count,
++        P[0] == 0, strictly increasing below window + 1; src_off (conv kernel size entries, each 0..11) =
++        seqidx(count + k) - count with seqidx(L) = L for L < K, else K + P[L - K]. Every absolute conv read
++        (window - num_tokens + src_off[k] in the history-layout tail) must lie inside each layer's conv_state
++        """
++        count = window + 1 - num_tokens
++        rm = [int(v) for v in row_map]
++        so = [int(v) for v in src_off]
++        if len(rm) != 16 or not 1 <= count <= window + 1:
++            raise ValueError("RewindPlans: row_map must have 16 entries")
++        P = rm[:count]
++        if P[0] != 0 or any(not 0 <= a < b for a, b in zip(P, P[1:])) or P[-1] > window:
++            raise ValueError("RewindPlans: row_map must start at row 0 and increase strictly below the verify length")
++        if rm[count:] != list(range(count, 16)):
++            raise ValueError("RewindPlans: row_map entries past the accepted count must be the identity")
++        for l in layers:
++            cdim = l.module.conv_kernel_size
++            size = l.conv_state.shape[-1]
++            want = [(L if L < cdim else cdim + P[L - cdim]) - count for L in range(count, count + cdim)]
++            if so != want:
++                raise ValueError("RewindPlans: src_off does not match row_map")
++            if any(not 0 <= v <= 11 for v in so) or any(not 0 <= size - num_tokens - cdim + v < size for v in so):
++                raise ValueError("RewindPlans: src_off reads outside the conv state")
++        return rm, so
++
++
++    def rewind(self, prepared: tuple, num_tokens: int, row_map=None, src_off=None):
++        """
++        Same effect and the same launches as state.rewind(num_tokens) for the state `prepared` planned.
++        ext 5109: a tree round's accepted path also passes row_map / src_off (both or neither, DESIGN.md
++        3e): the replay reads the path's verify rows and the conv window the path's raw inputs
+         """
+         state, layers, entries, launches = prepared
+         slot = state.slot
++        if (row_map is None) != (src_off is None):
++            raise ValueError("RewindPlans: row_map and src_off go together")
++        if row_map is not None:
++            if len(launches[num_tokens]) != 1:
++                raise ValueError("RewindPlans: path maps need a plan on one device")
++            row_map, src_off = self.check_maps(layers, state.last_history, num_tokens, row_map, src_off)
+         if any(l.pending.get(slot) is not entry for l, entry in zip(layers, entries)):
+             raise RuntimeError("GDN rewind plan is stale: a layer's pending verify changed after planning")
+         for l in layers:
+             del l.pending[slot]
+         for device_index, conv_jobs, replay_jobs in launches[num_tokens]:
+             if conv_jobs:
+-                ext.batched_conv_rewind(conv_jobs, device_index)
++                if src_off is None:
++                    ext.batched_conv_rewind(conv_jobs, device_index)
++                else:
++                    ext.batched_conv_rewind(conv_jobs, device_index, src_off)
+             if replay_jobs:
+-                ext.batched_state_replay(replay_jobs, device_index)
++                if row_map is None:
++                    ext.batched_state_replay(replay_jobs, device_index)
++                else:
++                    ext.batched_state_replay(replay_jobs, device_index, row_map)
+         state.position -= num_tokens
+         state.last_history = 0
+         self.planned_rewinds += 1
+--- a/modules/gated_delta_net.py
++++ b/modules/gated_delta_net.py
+@@ -793,6 +793,8 @@
+             self.bc_split = True
+             self.replay_verify = self.k_head_dim == 128 and self.v_head_dim == 128
+             self.bc.set_replay_verify(self.replay_verify)
++            # ext 5109: the generator's TreeDesc static once a verify forward carried it (tree mode)
++            self.tree_desc = None
+ 
+             # Sliced qkv+z bundle: both projections read x and are cut into equal-width column
+             # slices run as one launch (SlicedMultiLinear); the graph object gets the tables, the
+@@ -1139,6 +1141,25 @@
+                 self.ba_bias.copy_(torch.cat([b_bias, a_bias]))
+             self.ba_weight_filled = True
+ 
++        # ext 5109 tree verify: in tree mode every verify forward (and only those) carries the generator's
++        # device TreeDesc static params["tree_desc"], the same tensor each call. It is bound to the BC
++        # layer before its first history slot; the fused BC replay_verify path at bsz 1, seqlen 8 is the
++        # only path that runs it (DESIGN.md 3c, 8)
++        tree_desc = params.get("tree_desc")
++        if tree_desc is not None:
++            if not (
++                self.bc_split and self.replay_verify and not self.kda and save_state and save_history and
++                recurrent_slots is not None and bsz == 1 and seqlen == 8 and 8 <= _BC_MAX_QLEN
++            ):
++                raise RuntimeError("GatedDeltaNet: a tree verify needs the fused BC history path at bsz 1, seqlen 8")
++            if self.tree_desc is None:
++                self.bc.set_tree(tree_desc)
++                self.tree_desc = tree_desc
++            elif tree_desc is not self.tree_desc:
++                raise RuntimeError("GatedDeltaNet: params['tree_desc'] must be the same tensor every call")
++        elif save_history and getattr(self, "tree_desc", None) is not None:
++            raise RuntimeError("GatedDeltaNet: a history forward without params['tree_desc'] in tree mode")
++
+         # Fused C++ path for decode with split projections, generalized over (bsz, seqlen) up to
+         # (_BC_MAX_BSZ, _BC_MAX_QLEN) and over save_history (needed for MTP draft/verify). Runs
+         # the entire layer in one call, replayed through an internal CUDA graph per (bsz, seqlen,

@@ -1046,6 +1046,18 @@ class Server:
         self.verified_acceptance = variant == "candidate"
         if self.verified_acceptance != hasattr(self.gen, "greedy_verify_rounds"):
             raise RuntimeError("Installed engine does not match the image variant")
+        # Dynamic tree verify (exl3 0006): the candidate engine parses EXL3_TREE and the test hook
+        # EXL3_TREE_FORCE_CHAIN strictly (0|1) and counts tree rounds; the baseline engine has no
+        # tree, so both must be unset or 0 there.
+        if self.verified_acceptance:
+            if not hasattr(self.gen, "tree_verify_rounds"):
+                raise RuntimeError("Installed engine lacks the tree verify (exl3 0006)")
+            self.tree_rounds_expected = bool(self.gen.tree and not self.gen.tree_force_chain)
+        else:
+            for name in ("EXL3_TREE", "EXL3_TREE_FORCE_CHAIN"):
+                if os.environ.get(name) not in (None, "0"):
+                    raise RuntimeError(f"{name} requires the candidate engine")
+            self.tree_rounds_expected = False
         self.stop_ids = list(model.config.eos_token_id_list or [])
         if (
             self.tokenizer.eos_token_id is not None
@@ -1150,6 +1162,9 @@ class Server:
                 verified_before = (
                     self.gen.greedy_verify_rounds if self.verified_acceptance else 0
                 )
+                tree_before = (
+                    self.gen.tree_verify_rounds if self.verified_acceptance else 0
+                )
                 self.gen.enqueue(job)
                 final = None
                 while self.gen.num_remaining_jobs():
@@ -1184,6 +1199,15 @@ class Server:
                 ):
                     raise RuntimeError(
                         "A verify round bypassed the admitted acceptance decision"
+                    )
+                # With the dynamic tree on (and not forced to the chain) every greedy verify
+                # round of this single-sequence argmax job is a tree round; otherwise none is
+                tree_rounds = (
+                    self.gen.tree_verify_rounds - tree_before if self.verified_acceptance else 0
+                )
+                if tree_rounds != (spec_rounds if self.tree_rounds_expected else 0):
+                    raise RuntimeError(
+                        "Tree verify rounds disagree with the EXL3_TREE configuration"
                     )
                 pending.result = Result(
                     text,

@@ -1,0 +1,586 @@
+--- a/generator/generator.py
++++ b/generator/generator.py
+@@ -1,5 +1,6 @@
+ from __future__ import annotations
+ import logging
++import os
+ import torch
+ from ..model.model import Model
+ from ..cache.cache import Cache
+@@ -20,6 +21,7 @@
+ from .sampler.custom import CustomSampler, SS_Fused
+ from .greedy_accept import GreedyAccept
+ from .gdn_rewind import RewindPlans
++from . import tree_round
+ from .visualizer import CacheVisualizer
+ import time
+ import threading
+@@ -273,6 +275,97 @@
+         self.rewind_plans = RewindPlans()
+         self.draft_ids_ready = None
+         self.verify_staging_set = 0
++
++        # Dynamic tree verify (eta exl3 0006-tree-verify): EXL3_TREE strict 0|1, the test hook
++        # EXL3_TREE_FORCE_CHAIN strict 0|1 (valid only with the tree on) runs every round as the CHAIN
++        # descriptor through the tree kernels. Unset, the tree is on for every configuration it supports
++        # (the served one) and off for the others (no draft, batches, other drafters); set to 1 on a
++        # configuration it does not support, construction fails
++        self._tree_configure(os.environ)
++
++
++    def _tree_configure(self, environ):
++        self.tree, self.tree_force_chain = tree_round.switches(environ)
++        self.tree_verify_rounds = 0
++        self.tree_mode = None
++        if self.tree:
++            unsupported = self._tree_unsupported()
++            if unsupported is None:
++                self._tree_init()
++            elif "EXL3_TREE" in environ or self.tree_force_chain:
++                raise ValueError(f"EXL3_TREE=1: {unsupported}")
++            else:
++                self.tree = False
++
++
++    def _tree_unsupported(self) -> str | None:
++        """Why this configuration cannot run the tree verify (DESIGN.md §3f), or None."""
++        dm = self.draft_model
++        if not self.dflash_draft or getattr(dm, "q4_head", None) is None or getattr(dm, "selector", None) is None:
++            return "requires a DFlash2 draft model with the int4 draft head"
++        if self.max_batch_size != 1:
++            return "requires max_batch_size 1"
++        if self.num_draft_tokens != tree_round.WINDOW:
++            return f"requires a {tree_round.WINDOW}-token draft window"
++        if self.draft_calibrator is not None or self.dynamic_draft:
++            return "does not support dynamic draft lengths"
++        if self.recurrent_cache is None:
++            return "requires a recurrent (GDN) target"
++        return None
++
++
++    def _tree_init(self):
++        """Tree-mode buffers and the admitted tree acceptance (DESIGN.md §2.3, §3f)."""
++        dm = self.draft_model
++        from .tree_accept import TreeAccept
++        from ..cache.kv_compact import KvCompactor, kv_moves
++        from ..architecture.dflash import dflash_update_kv_from_target
++        self.tree_accept = TreeAccept(self.num_draft_tokens)
++        self.kv_compactor = KvCompactor(self.model, self.cache)
++        self.tree_kv_moves = kv_moves
++        self.tree_refresh = dflash_update_kv_from_target
++        dev = dm.selector.device
++        rows = tree_round.ROWS
++        # Builder record (device) and its readback; the verify's static descriptor + positions, baked
++        # into the tree-mode verify graphs, filled per round from one of two pinned staging sets
++        self.tree_out = torch.zeros((1, tree_round.OUT_BYTES), dtype = torch.uint8, device = dev)
++        self.tree_out_pinned = torch.zeros((1, tree_round.OUT_BYTES), dtype = torch.uint8, pin_memory = True)
++        self.tree_dev = torch.zeros((tree_round.DEV_BYTES,), dtype = torch.uint8, device = dev)
++        self.tree_pos = self.tree_dev[tree_round.DESC_BYTES:].view(torch.int32).view(1, rows)
++        self.tree_stage = [torch.zeros((tree_round.DEV_BYTES,), dtype = torch.uint8, pin_memory = True) for _ in range(2)]
++        self.tree_rows_stage = [torch.zeros((rows,), dtype = torch.long, pin_memory = True) for _ in range(2)]
++
++
++    def _tree_draft_mode(self) -> int:
++        """Builder mode of this round's draft: 1 (dynamic tree) for the one greedy-eligible sequence, else 0."""
++        jobs = [job for job in self.active_jobs if job.is_prefill_done()]
++        if len(jobs) != 1 or len(jobs[0].sequences) != 1:
++            raise RuntimeError("EXL3_TREE=1 drafts for exactly one sequence")
++        return 0 if self.tree_force_chain or not self._greedy_verify_eligible(jobs[0]) else 1
++
++
++    def _tree_verify_prepare(self, staging_set: int) -> tree_round.TreeRound:
++        """Check this round's builder record and upload the verify descriptor (DESIGN.md §2.3)."""
++        mode, self.tree_mode = self.tree_mode, None
++        if mode is None:
++            raise RuntimeError("Tree verify: no drafted tree for this round")
++        jobs = [job for job in self.active_jobs if job.is_prefill_done()]
++        if len(jobs) != 1 or len(jobs[0].sequences) != 1:
++            raise RuntimeError("EXL3_TREE=1 verifies exactly one sequence")
++        seq = jobs[0].sequences[0]
++        anchor_ids = seq.sequence_ids.torch_slice(seq.kv_position, None)
++        if anchor_ids.shape[-1] != 1:
++            raise RuntimeError("Tree verify: the sequence has more than one uncached token")
++        raw = self.tree_out_pinned.numpy().tobytes()
++        rnd = tree_round.check_output(raw, mode, int(anchor_ids[0, 0]), self.tree_accept.derive)
++        stage = self.tree_stage[staging_set]
++        # Row positions = the chain's positions[b] + row (iterate_gen: kv_position, plus the job's MRoPE text
++        # offset on targets with the mrope cap) with row -> depth, so a CHAIN row gets the same int as cs12
++        base = seq.kv_position + (jobs[0].alt_rope_offset if "mrope" in self.model.caps else 0)
++        stage.copy_(torch.frombuffer(bytearray(tree_round.verify_bytes(rnd.desc, rnd.depth, base)),
++                                     dtype = torch.uint8))
++        self.tree_dev.copy_(stage, non_blocking = True)
++        return rnd
+ 
+ 
+     def num_remaining_jobs(self):
+@@ -872,6 +965,13 @@
+             input_ids = batch_ids,
+             params = params,
+         )
++        # Tree mode: the tree builder (ext 9008) replaces the selector walk and writes this round's 192-byte
++        # record into tree_out; mode 0 is the greedy walk with the CHAIN descriptor
++        tree_mode = None
++        if self.tree:
++            tree_mode = self._tree_draft_mode()
++            params["dflash2_tree"] = tree_mode
++            params["dflash2_tree_out"] = self.tree_out
+         new_ids = self.draft_model.sample_from_state(out_state, params)
+ 
+         # Draft models with a confidence head cap the usable draft length per round;
+@@ -907,6 +1007,11 @@
+         # The readback completes in iterate_gen, which synchronizes on it only once it needs the drafted tokens,
+         # after preparing the verify batch's block table while the draft still runs
+         self.draft_ids_pinned[:batch_size, :window].copy_(new_ids[:batch_size, :window], non_blocking = True)
++        if tree_mode is not None:
++            if new_ids.data_ptr() != self.tree_out.data_ptr() + 8 or window != tree_round.WINDOW:
++                raise RuntimeError("Tree draft: the drafted ids are not the builder record's rows 1..7")
++            self.tree_out_pinned.copy_(self.tree_out, non_blocking = True)
++            self.tree_mode = tree_mode
+         self.draft_ids_ready = torch.cuda.Event()
+         self.draft_ids_ready.record(torch.cuda.current_stream(new_ids.device))
+         return self.draft_ids_pinned[:, :window]
+@@ -1054,6 +1159,20 @@
+         if draft_ids_ready is not None:
+             draft_ids_ready.synchronize()
+ 
++        # Tree mode: check the builder record against the host (and the proven derive), then upload the verify
++        # descriptor and row positions into the static buffer the tree-mode verify graphs read
++        tree_rnd = None
++        if self.tree and draft_tokens is not None:
++            tree_rnd = self._tree_verify_prepare(staging_set)
++            # draft_tokens is draft_ids_pinned[:, :window]: one row per constructor batch slot (the pinned buffer
++            # is sized before the recurrent-slot clamp); the one verified sequence is row 0
++            if draft_tokens.dim() != 2 or draft_tokens.shape[1] != tree_round.WINDOW:
++                raise RuntimeError(f"Tree verify: drafted ids have shape {tuple(draft_tokens.shape)}, "
++                                   f"expected (rows, {tree_round.WINDOW})")
++            if draft_tokens[0].tolist() != tree_rnd.tokens[1:]:
++                raise RuntimeError(f"Tree verify: drafted ids {draft_tokens[0].tolist()} differ from the builder "
++                                   f"record rows 1..7 {tree_rnd.tokens[1:]}")
++
+         # Collect input IDs and indexed embeddings
+         # Jobs may contribute multiple sequence rows. logit_mapping records the slice of the model output that
+         # belongs to each active job, while batch_jobs keeps the corresponding Job objects in compact-batch order.
+@@ -1112,6 +1231,11 @@
+         }
+         if self.draft_model:
+             params.update(self.draft_model.draft_verifier_params)
++        if tree_rnd is not None:
++            params["tree_desc"] = self.tree_dev
++            params["position_ids"] = self.tree_pos
++            # position_ids replaces the per-sequence positions (the kernels accept exactly one of the two)
++            params["positions"] = None
+         batch_logits = self.model.forward(
+             input_ids = batch_ids,
+             params = params,
+@@ -1282,24 +1406,70 @@
+             # window was accepted or the job ends, the accepted prefix otherwise), then the draft cache update.
+             # The host bookkeeping below then runs while the GPU executes them
+             decisions = []
++            tree_path = None
+             for row, job in enumerate(verified):
+-                count, eos = self.greedy_accept(
+-                    pinned[row],
+-                    draft_tokens[row],
+-                    job.stop_tokens,
+-                    job.max_new_tokens - job.new_tokens,
+-                    checkpoints[row],
+-                )
+-                self.greedy_verify_rounds += 1
+-                if batch_states:
+-                    num_rejected = window + 1 - count if not eos and count <= window else 0
+-                    if rewind_plans[row] is not None:
+-                        self.rewind_plans.rewind(rewind_plans[row], num_rejected)
+-                    else:
+-                        batch_states[row].rewind(num_rejected)
++                if tree_rnd is not None and tree_rnd.is_tree:
++                    # Tree round: the proven tree leaf picks the maximal matching root path and applies the chain
++                    # rules along it; the GDN commit replays exactly that path's rows
++                    count, eos, last = self.tree_accept.accept_tree(
++                        pinned[row].tolist(),
++                        tree_rnd.tokens,
++                        tree_rnd.parent,
++                        job.stop_tokens,
++                        job.max_new_tokens - job.new_tokens,
++                        checkpoints[row],
++                    )
++                    tree_path = tree_round.accepted_path(tree_rnd, count, last)
++                    self.greedy_verify_rounds += 1
++                    self.tree_verify_rounds += 1
++                    if rewind_plans[row] is None:
++                        raise RuntimeError("Tree verify: no prepared GDN commit plan for a tree round")
++                    self.rewind_plans.rewind(
++                        rewind_plans[row],
++                        window + 1 - count,
++                        row_map = tree_round.row_map(tree_path),
++                        src_off = tree_round.src_off(tree_path),
++                    )
++                else:
++                    count, eos = self.greedy_accept(
++                        pinned[row],
++                        draft_tokens[row],
++                        job.stop_tokens,
++                        job.max_new_tokens - job.new_tokens,
++                        checkpoints[row],
++                    )
++                    self.greedy_verify_rounds += 1
++                    if batch_states:
++                        num_rejected = window + 1 - count if not eos and count <= window else 0
++                        if rewind_plans[row] is not None:
++                            self.rewind_plans.rewind(rewind_plans[row], num_rejected)
++                        else:
++                            batch_states[row].rewind(num_rejected)
+                 decisions.append((count, eos))
+                 accepted_lengths.append(count)
+-            if self.dflash_draft:
++            if tree_path is not None and not tree_round.is_identity(tree_path):
++                # Accepted rows off their chain slots: move their CQ K/V to base + depth, restore the pages'
++                # token ids there, and refresh the draft cache from the path's export rows (DESIGN.md §3e)
++                seq = verified[0].sequences[0]
++                base = seq.kv_position
++                self.kv_compactor.compact(
++                    self.tree_kv_moves(tree_path, base, [page.page_index for page in seq.allocated_pages])
++                )
++                tree_round.apply_page_fixups(
++                    seq.allocated_pages, tree_round.page_fixups(tree_path, base, tree_rnd.tokens)
++                )
++                rows = self.tree_rows_stage[staging_set][:len(tree_path)]
++                rows.copy_(torch.tensor(tree_path, dtype = torch.long))
++                self.tree_refresh(
++                    self.draft_model,
++                    p_export_states,
++                    self.draft_cache,
++                    {"block_table": block_index, "cache_seqlens": p_cache_seqlens},
++                    lengths = accepted_lengths,
++                    rows = rows.to(self.tree_out.device, non_blocking = True),
++                )
++                draft_kv_refreshed = True
++            elif self.dflash_draft:
+                 refresh_draft_kv()
+                 draft_kv_refreshed = True
+ 
+@@ -1313,9 +1483,10 @@
+                 for i in range(count):
+                     # One draw per consumed verifier row keeps the job RNG on the serial path's sequence
+                     job.rng.randint(0, (1 << 32) - 1)
++                    r = tree_path[i] if tree_path is not None else i
+                     token_eos, _, rq = job.receive_sample(
+                         None,
+-                        verify_ids[i:i + 1].view(1, 1),
++                        verify_ids[r:r + 1].view(1, 1),
+                         None,
+                         None,
+                         None,
+@@ -1354,6 +1525,8 @@
+         # position n gates position n+1, and constrained-decoding masks and sampling past IDs
+         # must advance between positions.
+         else:
++            if tree_rnd is not None and tree_rnd.is_tree:
++                raise RuntimeError("Tree verify: a tree round reached the serial (non-greedy) commit path")
+             for idx, (job, a, b) in enumerate(zip(self.active_jobs, logit_mapping[:-1], logit_mapping[1:])):
+                 if a == b: continue
+                 job_logits = batch_logits[a:b, :, :]
+--- /dev/null
++++ b/generator/tree_round.py
+@@ -0,0 +1,202 @@
++"""
++Host side of the 8-row dynamic tree verify (eta exl3 patch 0006-tree-verify).
++
++The draft-side builder (ext 9008) writes one 192-byte record per round: the eight verify-row tokens (int64,
++row 0 = the anchor) followed by a 128-byte TreeDesc. The verify kernels (ext 3012 attention, ext 5109 GDN)
++read a host-checked copy of that TreeDesc from one static device buffer, and the commit (ext 5109 replay /
++conv rewind, ext 3013 K/V compaction and draft refresh) consumes the accepted root path through maps built
++here. Everything in this module is host arithmetic over plain ints and bytes; every check fails closed.
++
++TreeDesc (128 bytes): magic 0x54, version 1, n_rows 8, n_leaf, n_prog, kind (0 = chain shape, else 1), two
++zero bytes, parent i8[8] (row 0 = -1, else 0 <= parent < row), depth u8[8], anc_mask u8[8], leaf_of u8[8],
++leaves u8[8], prog u8[16], path u8[8][8] (path[r][j] = row of r's depth-j ancestor, 0xFF past depth[r]).
++"""
++
++from __future__ import annotations
++import os
++import struct
++
++ROWS = 8
++WINDOW = ROWS - 1
++DESC_BYTES = 128
++OUT_BYTES = 64 + DESC_BYTES
++DEV_BYTES = DESC_BYTES + 4 * ROWS
++MAGIC = 0x54
++VERSION = 1
++CONV_K = 4
++PAGE_SIZE = 256
++
++_PARENT = 8
++_DEPTH = 16
++_ANC = 24
++_LEAF_OF = 32
++_LEAVES = 40
++_PROG = 48
++_PATH = 64
++
++OP_ADV = 0
++OP_PEEK = 1
++OP_RELOAD = 2
++OP_REPLAY = 3
++
++
++def parse_switch(name: str, raw: str | None, default: bool) -> bool:
++    """A strict 0|1 switch: unset is `default`, "0" is off, "1" is on, anything else raises."""
++    if raw is None:
++        return default
++    if raw == "0":
++        return False
++    if raw == "1":
++        return True
++    raise ValueError(f"{name} must be 0 or 1, got {raw!r}")
++
++
++def switches(environ = os.environ) -> tuple[bool, bool]:
++    """
++    (EXL3_TREE, EXL3_TREE_FORCE_CHAIN). The dynamic tree is on unless EXL3_TREE=0; the test hook
++    EXL3_TREE_FORCE_CHAIN (default 0) is valid only with the tree on.
++    """
++    tree = parse_switch("EXL3_TREE", environ.get("EXL3_TREE"), True)
++    force_chain = parse_switch("EXL3_TREE_FORCE_CHAIN", environ.get("EXL3_TREE_FORCE_CHAIN"), False)
++    if force_chain and not tree:
++        raise ValueError("EXL3_TREE_FORCE_CHAIN=1 requires EXL3_TREE=1")
++    return tree, force_chain
++
++
++def chain_desc() -> bytes:
++    """The constant TreeDesc of the chain parent[r] = r - 1 (DESIGN.md §2.2 CHAIN)."""
++    d = bytearray(DESC_BYTES)
++    d[0:8] = bytes([MAGIC, VERSION, ROWS, 1, ROWS, 0, 0, 0])
++    d[_PARENT:_PARENT + ROWS] = bytes([0xFF] + list(range(ROWS - 1)))
++    d[_DEPTH:_DEPTH + ROWS] = bytes(range(ROWS))
++    d[_ANC:_ANC + ROWS] = bytes((1 << (r + 1)) - 1 for r in range(ROWS))
++    d[_LEAF_OF:_LEAF_OF + ROWS] = bytes([ROWS - 1] * ROWS)
++    d[_LEAVES:_LEAVES + ROWS] = bytes([ROWS - 1] + [0xFF] * (ROWS - 1))
++    d[_PROG:_PROG + 16] = bytes([(OP_ADV << 4) | r for r in range(ROWS)] + [0xFF] * 8)
++    for r in range(ROWS):
++        d[_PATH + 8 * r:_PATH + 8 * r + 8] = bytes([j if j <= r else 0xFF for j in range(ROWS)])
++    return bytes(d)
++
++
++CHAIN = chain_desc()
++CHAIN_PARENT = [-1] + list(range(ROWS - 1))
++
++
++class TreeRound:
++    """One round's checked builder output: tokens, parent, depth, root paths and the TreeDesc bytes."""
++    __slots__ = ("mode", "tokens", "parent", "depth", "paths", "desc")
++
++    def __init__(self, mode: int, tokens: list[int], parent: list[int], depth: list[int],
++                 paths: list[list[int]], desc: bytes):
++        self.mode = mode
++        self.tokens = tokens
++        self.parent = parent
++        self.depth = depth
++        self.paths = paths
++        self.desc = desc
++
++    @property
++    def is_tree(self) -> bool:
++        return self.mode == 1
++
++
++def _require(cond: bool, message: str):
++    if not cond:
++        raise RuntimeError(f"Tree verify: {message}")
++
++
++def check_output(raw: bytes, mode: int, anchor: int, derive) -> TreeRound:
++    """
++    Check one builder record against the host: tokens[0] is the anchor, every token id is non-negative,
++    mode 0 wrote CHAIN, mode 1 wrote exactly derive(parent) for a parent array with 0 <= parent[r] < r,
++    and children of one parent carry distinct tokens. Returns the parsed round.
++    """
++    _require(type(raw) is bytes and len(raw) == OUT_BYTES, "builder record must be 192 bytes")
++    _require(mode in (0, 1), f"builder mode must be 0 or 1, got {mode!r}")
++    tokens = list(struct.unpack("<8q", raw[:64]))
++    desc = raw[64:]
++    _require(tokens[0] == anchor, f"builder anchor {tokens[0]} differs from the committed anchor {anchor}")
++    _require(all(t >= 0 for t in tokens), "negative token id in the builder record")
++    parent = [b - 256 if b >= 128 else b for b in desc[_PARENT:_PARENT + ROWS]]
++    if mode == 0:
++        _require(desc == CHAIN, "mode-0 builder record is not CHAIN")
++    else:
++        _require(parent[0] == -1 and all(0 <= parent[r] < r for r in range(1, ROWS)),
++                 f"parent array {parent} is not parent-before-child")
++        expected = derive(parent)
++        _require(type(expected) is bytes and len(expected) == DESC_BYTES, "derive() returned a malformed TreeDesc")
++        _require(desc == expected, "builder TreeDesc differs from the proven derive(parent)")
++    children: dict[int, set[int]] = {}
++    for r in range(1, ROWS):
++        sib = children.setdefault(parent[r], set())
++        _require(tokens[r] not in sib, f"sibling rows under row {parent[r]} repeat token {tokens[r]}")
++        sib.add(tokens[r])
++    depth = list(desc[_DEPTH:_DEPTH + ROWS])
++    paths = []
++    for r in range(ROWS):
++        row = desc[_PATH + 8 * r:_PATH + 8 * r + 8]
++        p = list(row[:depth[r] + 1])
++        _require(p[0] == 0 and p[-1] == r and all(p[j] < p[j + 1] for j in range(len(p) - 1)),
++                 f"path of row {r} is not a root path")
++        paths.append(p)
++    return TreeRound(mode, tokens, parent, depth, paths, desc)
++
++
++def verify_bytes(desc: bytes, depth: list[int], base: int) -> bytes:
++    """The 160 bytes uploaded to the verify's static buffer: TreeDesc, then int32 positions base + depth."""
++    _require(len(desc) == DESC_BYTES and len(depth) == ROWS, "malformed TreeDesc")
++    _require(0 <= base and base + ROWS < (1 << 31), f"position base {base} out of range")
++    return desc + struct.pack("<8i", *[base + d for d in depth])
++
++
++def accepted_path(rnd: TreeRound, count: int, last: int) -> list[int]:
++    """Rows P[0..count) whose K/V and state the round commits: the root path of `last`, exactly count long."""
++    _require(1 <= count <= ROWS and 0 <= last < ROWS, f"acceptance returned count {count}, last {last}")
++    p = rnd.paths[last]
++    _require(len(p) == count, f"acceptance count {count} is not the depth of row {last} plus one")
++    return list(p)
++
++
++def committed_tokens(verify_ids: list[int], path: list[int]) -> list[int]:
++    """The target's greedy tokens along the path: the round's committed tokens, the last one the next anchor."""
++    return [verify_ids[r] for r in path]
++
++
++def is_identity(path: list[int]) -> bool:
++    return all(r == j for j, r in enumerate(path))
++
++
++def row_map(path: list[int]) -> bytes:
++    """Replay row map (16 bytes): the path, then identity for the unused steps."""
++    count = len(path)
++    _require(1 <= count <= ROWS and path[0] == 0 and all(path[j] < path[j + 1] for j in range(count - 1)),
++             f"replay rows {path} are not a root path")
++    return bytes(path + list(range(count, 16)))
++
++
++def src_off(path: list[int]) -> bytes:
++    """
++    Conv-window source offsets (4 bytes) relative to the chain rewind's source (p - cdim, p = state_size -
++    rejected). Window entry k is logical index L = count + k of [old0..3, x_P0 .. x_P(count-1)]; its index
++    in the verify's window sequence [old0..3, x_0..x_7] is L below 4, else 4 + P[L - 4]; the offset is that
++    index minus count. The chain gives 0, 1, 2, 3.
++    """
++    count = len(path)
++    _require(1 <= count <= ROWS and path[0] == 0, f"conv rows {path} are not a root path")
++    out = []
++    for k in range(CONV_K):
++        L = count + k
++        seq = L if L < CONV_K else CONV_K + path[L - CONV_K]
++        _require(1 <= seq <= CONV_K + WINDOW, f"conv window index {seq} outside the verify's written tail")
++        out.append(seq - count)
++    return bytes(out)
++
++def page_fixups(path: list[int], base: int, tokens: list[int]) -> list[tuple[int, int]]:
++    """(position, token) pairs that restore page.sequence to the committed tokens at the moved positions."""
++    return [(base + j, tokens[r]) for j, r in enumerate(path) if j and r != j]
++
++
++def apply_page_fixups(pages, fixups: list[tuple[int, int]]):
++    for pos, token in fixups:
++        page = pages[pos // PAGE_SIZE]
++        page.sequence[:, pos % PAGE_SIZE] = token
+--- /dev/null
++++ b/generator/tree_accept.py
+@@ -0,0 +1,97 @@
++"""
++Admitted acceptance decision and descriptor derivation for 8-row greedy tree verification.
++
++Both are the Bend-proven tree leaves, compiled into a CPU library and admitted by their own loader (artifact
++identity plus an exhaustive differential against the Bend specification table) when the generator is
++constructed. This module only binds that loader; it never computes or approximates either result.
++"""
++
++from __future__ import annotations
++import importlib.util
++from collections.abc import Sequence
++from pathlib import Path
++import torch
++
++ACCEPTOR_DIR = Path("/opt/qwen/bend-exl3")
++ACCEPTOR_LOADER = ACCEPTOR_DIR / "exl3_bend_tree_accept.py"
++ROWS = 8
++
++
++def _ids(values: torch.Tensor | Sequence[int]) -> list[int]:
++    return values.tolist() if isinstance(values, torch.Tensor) else list(values)
++
++
++class TreeAccept:
++    """
++    Decide how many verifier tokens an 8-row greedy tree round commits, and derive the round's TreeDesc.
++
++    Row 0 is the anchor, rows 1..7 are the drafted nodes with parent[r] < r. The decision walks the maximal
++    matching path P from the root (repeatedly the lowest child whose token equals the current row's verify id) and
++    applies the chain rules (stop token, token budget, final row, recurrent checkpoint boundary) along it. Returns
++    (count, eos, last): verify_ids[P[i]] for i < count is committed, eos tells whether the last committed token
++    ends the job, and last = P[count - 1] is the row of the last committed token.
++    """
++
++    def __init__(self, window: int):
++        if window != ROWS - 1:
++            raise RuntimeError(f"Tree acceptance requires a {ROWS - 1}-token draft window, not {window}")
++        spec = importlib.util.spec_from_file_location("exl3_bend_tree_accept", ACCEPTOR_LOADER)
++        if spec is None or spec.loader is None:
++            raise RuntimeError(f"Tree acceptance loader is missing: {ACCEPTOR_LOADER}")
++        module = importlib.util.module_from_spec(spec)
++        spec.loader.exec_module(module)
++        self.acceptor = module.admit(str(ACCEPTOR_DIR))
++
++
++    def accept_tree(
++        self,
++        verify_ids: torch.Tensor | Sequence[int],
++        tokens: torch.Tensor | Sequence[int],
++        parent: torch.Tensor | Sequence[int],
++        stop_tokens: set[int],
++        budget: int,
++        checkpoint: int,
++    ) -> tuple[int, bool, int]:
++        """
++        :param verify_ids:
++            Host int64 (8,), the target's greedy token for each verified row
++
++        :param tokens:
++            Host int64 (8,), row 0 = anchor, rows 1..7 = drafted tokens
++
++        :param parent:
++            (8,) parent rows: parent[0] = -1, 0 <= parent[r] < r
++
++        :param stop_tokens:
++            Token IDs that end the job
++
++        :param budget:
++            Tokens the job may still generate, >= 1
++
++        :param checkpoint:
++            Committed count in 1..7 at which a recurrent checkpoint boundary stops acceptance along the path, or 0
++        """
++        count, eos, last = self.acceptor.accept_tree(
++            _ids(verify_ids),
++            _ids(tokens),
++            _ids(parent),
++            tuple(sorted(stop_tokens)),
++            budget,
++            checkpoint,
++        )
++        if (
++            type(count) is not int or type(eos) is not bool or type(last) is not int
++            or not 1 <= count <= ROWS or not 0 <= last < ROWS
++        ):
++            raise RuntimeError("Tree acceptance returned a malformed decision")
++        return count, eos, last
++
++
++    def derive(self, parent: torch.Tensor | Sequence[int]) -> bytes:
++        """
++        The 128-byte TreeDesc (DESIGN.md §2.2) of a legal parent array: parent[0] = -1, 0 <= parent[r] < r.
++        """
++        desc = self.acceptor.derive(_ids(parent))
++        if type(desc) is not bytes or len(desc) != 128:
++            raise RuntimeError("Tree descriptor derivation returned a malformed descriptor")
++        return desc

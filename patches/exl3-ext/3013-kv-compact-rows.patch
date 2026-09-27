@@ -1,0 +1,394 @@
+--- /dev/null
++++ b/exllamav3_ext/kv_compact.cuh
+@@ -0,0 +1,48 @@
++#pragma once
++
++#include <ATen/Tensor.h>
++#include <cstdint>
++#include <tuple>
++#include <vector>
++
++// ext 3013: tree-verify commit of a paged quantized K/V cache (CacheLayer_quant). A tree verify
++// writes row r at slot base+r; the accepted path P keeps rows P[0..count) and must end up at
++// slots base+0..base+count-1, as a chain verify of P writes them. Each token row is quantized
++// on its own (words + fp16 group scales, RoPE applied before quantization at base+depth), so the
++// commit is a byte copy of whole token rows.
++
++#define KV_COMPACT_MAX_MOVES 7
++#define KV_COMPACT_MAX_JOBS 32      // layers per launch: 4 row sets each, within the 4 KB parameter limit
++
++// One attention layer's quantized cache: qk/qv int32 [pages, PAGE_SIZE, words], sk/sv fp16
++// [pages, PAGE_SIZE, scales], contiguous. Built from the tensors, which it checks; the tensors
++// must outlive the job (the cache allocates them once per model load).
++struct KvCompactJob
++{
++    uintptr_t k;
++    uintptr_t v;
++    uintptr_t k_scales;
++    uintptr_t v_scales;
++    int words_k;            // int32 words per token row
++    int words_v;
++    int scales_k;           // fp16 scales per token row
++    int scales_v;
++    int64_t num_tokens;     // physical token rows (pages * PAGE_SIZE)
++    int device;
++
++    KvCompactJob() = default;
++    KvCompactJob(const at::Tensor& qk, const at::Tensor& qv, const at::Tensor& sk, const at::Tensor& sv);
++};
++
++// moves: 1..KV_COMPACT_MAX_MOVES (src, dst) physical token indices, in ascending logical
++// destination order. Checked before launch: every index in [0, num_tokens) of every job,
++// src != dst, destinations distinct, and no source is an earlier move's destination (the
++// ascending in-place rule). One launch per KV_COMPACT_MAX_JOBS layers on the current stream;
++// every 16-byte unit is read at all sources before any destination is written, which equals
++// the sequential ascending copy.
++void kv_compact_rows
++(
++    std::vector<KvCompactJob> const& layer_jobs,
++    std::vector<std::tuple<int64_t, int64_t>> const& moves,
++    int device_index
++);
+--- /dev/null
++++ b/exllamav3_ext/kv_compact.cu
+@@ -0,0 +1,139 @@
++#include <cuda_fp16.h>
++#include "kv_compact.cuh"
++#include <c10/cuda/CUDAGuard.h>
++#include <ATen/cuda/CUDAContext.h>
++#include "util.h"
++#include "util.cuh"
++
++// ext 3013: see kv_compact.cuh. The layer jobs are flattened to row sets (one per cache tensor
++// of each layer) copied in 16-byte units; one block row per set, one thread per unit of a token
++// row. A thread owns the same unit of every source and destination row, and distinct token rows
++// never share bytes, so reading all sources into registers before writing any destination makes
++// the copy hazard-free with no synchronization.
++
++#define KV_COMPACT_THREADS 64
++
++struct KvCompactRowSet
++{
++    uint4* base;            // token row t starts at base + t * units
++    int64_t units;          // 16-byte units per token row
++};
++
++struct KvCompactBatch
++{
++    KvCompactRowSet sets[KV_COMPACT_MAX_JOBS * 4];
++    int64_t src[KV_COMPACT_MAX_MOVES];
++    int64_t dst[KV_COMPACT_MAX_MOVES];
++    int num_sets;
++    int num_moves;
++};
++static_assert(sizeof(KvCompactBatch) <= 4096, "KvCompactBatch exceeds the kernel parameter limit");
++
++__global__ __launch_bounds__(KV_COMPACT_THREADS)
++void kv_compact_rows_kernel(KvCompactBatch batch)
++{
++    const KvCompactRowSet set = batch.sets[blockIdx.y];
++    const int64_t u = (int64_t) blockIdx.x * KV_COMPACT_THREADS + threadIdx.x;
++    if (u >= set.units) return;
++
++    uint4 row[KV_COMPACT_MAX_MOVES];
++    #pragma unroll
++    for (int i = 0; i < KV_COMPACT_MAX_MOVES; ++i)
++        if (i < batch.num_moves) row[i] = set.base[batch.src[i] * set.units + u];
++    #pragma unroll
++    for (int i = 0; i < KV_COMPACT_MAX_MOVES; ++i)
++        if (i < batch.num_moves) set.base[batch.dst[i] * set.units + u] = row[i];
++}
++
++static int row_units(const at::Tensor& t, int elem_bytes, const char* name)
++{
++    TORCH_CHECK(t.is_cuda(), "KvCompactJob: ", name, " is not a CUDA tensor");
++    TORCH_CHECK(t.dim() == 3, "KvCompactJob: ", name, " must be [pages, page_size, row]");
++    TORCH_CHECK(t.is_contiguous(), "KvCompactJob: ", name, " is not contiguous");
++    TORCH_CHECK(t.element_size() == elem_bytes, "KvCompactJob: ", name, " has the wrong element size");
++    TORCH_CHECK(reinterpret_cast<uintptr_t>(t.data_ptr()) % 16 == 0, "KvCompactJob: ", name, " is not 16-byte aligned");
++    const int64_t row_bytes = t.size(2) * elem_bytes;
++    TORCH_CHECK(row_bytes > 0 && row_bytes % 16 == 0, "KvCompactJob: ", name, " row is not a multiple of 16 bytes");
++    return (int) t.size(2);
++}
++
++KvCompactJob::KvCompactJob(const at::Tensor& qk, const at::Tensor& qv, const at::Tensor& sk, const at::Tensor& sv)
++{
++    TORCH_CHECK(qk.dtype() == at::kInt && qv.dtype() == at::kInt, "KvCompactJob: qk/qv must be int32");
++    TORCH_CHECK(sk.dtype() == at::kHalf && sv.dtype() == at::kHalf, "KvCompactJob: sk/sv must be float16");
++    words_k = row_units(qk, 4, "qk");
++    words_v = row_units(qv, 4, "qv");
++    scales_k = row_units(sk, 2, "sk");
++    scales_v = row_units(sv, 2, "sv");
++    for (const at::Tensor* t : {&qv, &sk, &sv})
++    {
++        TORCH_CHECK(t->device() == qk.device(), "KvCompactJob: tensors on different devices");
++        TORCH_CHECK(t->size(0) == qk.size(0) && t->size(1) == qk.size(1), "KvCompactJob: page geometry differs between tensors");
++    }
++    k = reinterpret_cast<uintptr_t>(qk.data_ptr());
++    v = reinterpret_cast<uintptr_t>(qv.data_ptr());
++    k_scales = reinterpret_cast<uintptr_t>(sk.data_ptr());
++    v_scales = reinterpret_cast<uintptr_t>(sv.data_ptr());
++    num_tokens = qk.size(0) * qk.size(1);
++    device = qk.get_device();
++}
++
++void kv_compact_rows
++(
++    std::vector<KvCompactJob> const& layer_jobs,
++    std::vector<std::tuple<int64_t, int64_t>> const& moves,
++    int device_index
++)
++{
++    TORCH_CHECK(!layer_jobs.empty(), "kv_compact_rows: no layer jobs");
++    const int n = (int) moves.size();
++    TORCH_CHECK(n >= 1 && n <= KV_COMPACT_MAX_MOVES, "kv_compact_rows: need 1..", KV_COMPACT_MAX_MOVES, " moves, got ", n);
++    int64_t num_tokens = layer_jobs[0].num_tokens;
++    for (auto const& j : layer_jobs)
++    {
++        TORCH_CHECK(j.device == device_index, "kv_compact_rows: layer job on device ", j.device, ", expected ", device_index);
++        num_tokens = MIN(num_tokens, j.num_tokens);
++    }
++
++    KvCompactBatch batch;
++    batch.num_moves = n;
++    for (int i = 0; i < n; ++i)
++    {
++        const int64_t s = std::get<0>(moves[i]);
++        const int64_t d = std::get<1>(moves[i]);
++        TORCH_CHECK(s >= 0 && s < num_tokens && d >= 0 && d < num_tokens, "kv_compact_rows: move ", i, " (", s, ", ", d, ") outside [0, ", num_tokens, ")");
++        TORCH_CHECK(s != d, "kv_compact_rows: move ", i, " copies token ", s, " onto itself");
++        for (int k = 0; k < i; ++k)
++        {
++            TORCH_CHECK(batch.dst[k] != d, "kv_compact_rows: moves ", k, " and ", i, " share destination ", d);
++            TORCH_CHECK(batch.dst[k] != s, "kv_compact_rows: move ", i, " reads token ", s, ", the destination of earlier move ", k);
++        }
++        batch.src[i] = s;
++        batch.dst[i] = d;
++    }
++    for (int i = n; i < KV_COMPACT_MAX_MOVES; ++i) batch.src[i] = batch.dst[i] = 0;
++
++    c10::cuda::CUDAGuard device_guard((c10::DeviceIndex) device_index);
++    cudaStream_t stream = at::cuda::getCurrentCUDAStream().stream();
++
++    for (size_t base = 0; base < layer_jobs.size(); base += KV_COMPACT_MAX_JOBS)
++    {
++        const int jobs = (int) MIN(layer_jobs.size() - base, (size_t) KV_COMPACT_MAX_JOBS);
++        int64_t max_units = 0;
++        batch.num_sets = 0;
++        for (int i = 0; i < jobs; ++i)
++        {
++            KvCompactJob const& j = layer_jobs[base + i];
++            const uintptr_t ptrs[4] = {j.k, j.v, j.k_scales, j.v_scales};
++            const int64_t units[4] = {j.words_k / 4, j.words_v / 4, j.scales_k / 8, j.scales_v / 8};
++            for (int t = 0; t < 4; ++t)
++            {
++                batch.sets[batch.num_sets++] = {reinterpret_cast<uint4*>(ptrs[t]), units[t]};
++                max_units = MAX(max_units, units[t]);
++            }
++        }
++        dim3 blocks((unsigned) CEIL_DIVIDE(max_units, (int64_t) KV_COMPACT_THREADS), (unsigned) batch.num_sets);
++        kv_compact_rows_kernel<<<blocks, KV_COMPACT_THREADS, 0, stream>>>(batch);
++        cuda_check(cudaPeekAtLastError());
++    }
++}
+--- a/exllamav3_ext/bindings.cpp
++++ b/exllamav3_ext/bindings.cpp
+@@ -45,6 +45,7 @@
+ #include "generator/cache.cuh"
+ 
+ #include "cache/q_cache.cuh"
++#include "kv_compact.cuh"
+ #include "pattn.cuh"
+ 
+ #include "histogram.cuh"
+@@ -261,6 +262,10 @@
+     m.def("quant_cache_paged", &quant_cache_paged, "quant_cache_paged");
+     m.def("dequant_cache_paged", &dequant_cache_paged, "dequant_cache_paged");
+     m.def("dequant_cache_paged_window", &dequant_cache_paged_window, "dequant_cache_paged_window");
++    py::class_<KvCompactJob>(m, "KvCompactJob")
++        .def(py::init<const at::Tensor&, const at::Tensor&, const at::Tensor&, const at::Tensor&>(),
++             py::arg("qk"), py::arg("qv"), py::arg("sk"), py::arg("sv"));
++    m.def("kv_compact_rows", &kv_compact_rows, py::arg("layer_jobs"), py::arg("moves"), py::arg("device_index"));
+     m.def("pattn_prefill", &pattn_prefill, "pattn_prefill");
+ 
+     m.def("count_inf_nan", &count_inf_nan, "count_inf_nan");
+--- /dev/null
++++ b/cache/kv_compact.py
+@@ -0,0 +1,125 @@
++"""
++Tree-verify commit of the target's quantized K/V cache (ext 3013).
++
++A tree verify writes row r of the verify window at logical slot base+r. The accepted path
++P = path[last][0..count) (P[0] = 0, strictly increasing) must leave slots base..base+count-1
++holding rows P[0..count), the bytes a chain verify of P writes there: each token row is RoPE'd
++at its own position base+depth and quantized on its own, so the commit is a byte copy of token
++rows. kv_moves derives the copies from P and the job's page list; KvCompactor applies them to
++every attention layer of the cache in one launch.
++"""
++
++from __future__ import annotations
++from typing import Sequence
++from ..constants import PAGE_SIZE
++from .cache import Cache
++from .quant import CacheLayer_quant
++from exllamav3.ext import exllamav3_ext as ext
++
++# Rows of a phase-1 tree verify window and the most copies one commit needs (rows 1..7)
++KV_COMPACT_ROWS = 8
++KV_COMPACT_MAX_MOVES = KV_COMPACT_ROWS - 1
++
++
++def _is_int(value: object) -> bool:
++    return type(value) is int
++
++
++def kv_moves(rows: Sequence[int], base: int, page_indices: Sequence[int]) -> list[tuple[int, int]]:
++    """
++    Physical (src, dst) token copies that turn a tree verify's cache into a chain verify's of P.
++
++    :param rows:
++        The accepted path P = path[last][0..count) as row indices: P[0] == 0, strictly
++        increasing, every row < 8. Hence P[j] >= j, and P[j] > j for every j after the first move.
++
++    :param base:
++        The job's kv_position before the verify (slot of row 0).
++
++    :param page_indices:
++        page_indices[i] is the physical page of logical page i (pos // PAGE_SIZE); it must cover
++        every slot the verify wrote.
++
++    :return:
++        [(phys(base+P[j]), phys(base+j)) for j = 1..count-1 with P[j] != j], in ascending j, with
++        phys(pos) = page_indices[pos // PAGE_SIZE] * PAGE_SIZE + pos % PAGE_SIZE. Empty for an
++        identity path (nothing to move, no draft refresh gather). Applied in ascending j, no
++        source is an earlier destination: base+P[j'] > base+P[j] >= base+j for j' > j.
++    """
++    count = len(rows)
++    if not 1 <= count <= KV_COMPACT_ROWS:
++        raise ValueError(f"kv_moves: path length {count} outside 1..{KV_COMPACT_ROWS}")
++    if not all(_is_int(r) for r in rows):
++        raise ValueError("kv_moves: path rows must be ints")
++    if rows[0] != 0:
++        raise ValueError("kv_moves: path must start at row 0")
++    if any(rows[j] <= rows[j - 1] for j in range(1, count)):
++        raise ValueError("kv_moves: path rows must be strictly increasing")
++    if rows[-1] >= KV_COMPACT_ROWS:
++        raise ValueError(f"kv_moves: path row {rows[-1]} outside the {KV_COMPACT_ROWS}-row window")
++    if not _is_int(base) or base < 0:
++        raise ValueError("kv_moves: base must be a non-negative int")
++    last_page = (base + KV_COMPACT_ROWS - 1) // PAGE_SIZE
++    if len(page_indices) <= last_page:
++        raise ValueError(f"kv_moves: {len(page_indices)} pages do not cover slot {base + KV_COMPACT_ROWS - 1}")
++    pages = page_indices[: last_page + 1]
++    if not all(_is_int(p) and p >= 0 for p in pages):
++        raise ValueError("kv_moves: page indices must be non-negative ints")
++    if len(set(pages)) != len(pages):
++        raise ValueError("kv_moves: page indices repeat")
++
++    def phys(pos: int) -> int:
++        return pages[pos // PAGE_SIZE] * PAGE_SIZE + pos % PAGE_SIZE
++
++    return [(phys(base + rows[j]), phys(base + j)) for j in range(1, count) if rows[j] != j]
++
++
++class KvCompactor:
++    """
++    Prebuilt kv_compact_rows jobs for every attention layer of a quantized target cache.
++    """
++
++    def __init__(self, model, cache: Cache):
++        if cache.model is not model:
++            raise ValueError("KvCompactor: cache is not attached to this model")
++        if model.loaded_tp:
++            raise ValueError("KvCompactor: tensor-parallel caches are not supported")
++        if not cache.layers:
++            raise ValueError("KvCompactor: cache has no attention layers")
++        self.layers = []
++        self.tensors = []
++        self.jobs = []
++        devices = set()
++        for key in sorted(cache.layers):
++            layer = cache.layers[key]
++            # Exact type: subclasses (QSA planes) carry per-token state this copy would miss
++            if type(layer) is not CacheLayer_quant:
++                raise ValueError(f"KvCompactor: layer {key} is {type(layer).__name__}, not CacheLayer_quant")
++            if layer.qk is None:
++                raise ValueError(f"KvCompactor: layer {key} is not allocated")
++            tensors = (layer.qk, layer.qv, layer.sk, layer.sv)
++            self.layers.append(layer)
++            self.tensors.append(tensors)
++            self.jobs.append(ext.KvCompactJob(*tensors))
++            devices.add(layer.qk.device)
++        if len(devices) != 1:
++            raise ValueError("KvCompactor: attention layers span several devices")
++        device = devices.pop()
++        if device.type != "cuda" or device.index is None:
++            raise ValueError(f"KvCompactor: cache device {device} is not an indexed CUDA device")
++        self.device_index = device.index
++
++    def compact(self, moves: list[tuple[int, int]]):
++        """
++        Apply kv_moves output (1..7 physical (src, dst) pairs) to every attention layer on the current
++        stream. The extension checks bounds, src != dst, distinct destinations and that no source
++        is an earlier destination, and raises before launching otherwise.
++        """
++        for layer, tensors in zip(self.layers, self.tensors):
++            if any(now is not built for now, built in zip((layer.qk, layer.qv, layer.sk, layer.sv), tensors)):
++                raise RuntimeError("KvCompactor: cache tensors were reallocated since the jobs were built")
++        if not 1 <= len(moves) <= KV_COMPACT_MAX_MOVES:
++            raise ValueError(f"KvCompactor: {len(moves)} moves outside 1..{KV_COMPACT_MAX_MOVES}")
++        if not all(type(m) is tuple and len(m) == 2 and _is_int(m[0]) and _is_int(m[1]) for m in moves):
++            raise ValueError("KvCompactor: moves must be (src, dst) int pairs")
++        ext.kv_compact_rows(self.jobs, moves, self.device_index)
+--- a/architecture/dflash.py
++++ b/architecture/dflash.py
+@@ -188,6 +188,7 @@
+     cache: Cache,
+     params: dict,
+     lengths: list[int] = None,
++    rows: torch.Tensor = None,
+ ):
+     """
+     Update a DFlash-style draft's K/V cache with hidden states extracted from the target model.
+@@ -198,7 +199,19 @@
+     params:
+         "block_table": torch.Tensor
+         "cache_seqlens": torch.Tensor
+-    """
++
++    rows (ext 3013, tree verify): device int64 [count], the accepted path rows of a single job,
++    with lengths == [count]. The concatenated taps are gathered to these rows, which land at
++    cache_seqlens + 0..count-1, the cache a chain verify of the path would leave
++    """
++
++    if rows is not None:
++        if lengths is None or len(lengths) != 1:
++            raise ValueError("dflash_update_kv_from_target: rows needs lengths == [count]")
++        if rows.dtype != torch.int64 or rows.dim() != 1 or rows.numel() != lengths[0]:
++            raise ValueError("dflash_update_kv_from_target: rows must be int64 [count] with count == lengths[0]")
++        if rows.device != torch.device(model.input_layer.device):
++            raise ValueError("dflash_update_kv_from_target: rows must be on the draft input device")
+ 
+     # Target states arrive in layer execution order. Reorder them only when the checkpoint's
+     # projection expects a different target_layer_ids order.
+@@ -208,7 +221,8 @@
+         target_hidden = [target_hidden[source_idx[layer_id]] for layer_id in target_layer_ids]
+ 
+     # May update a few redundant tokens when batching, but we'd never draft longer than the cache length
+-    if lengths is not None:
++    # (tree path rows index the full verify window, so they gather after the concat instead)
++    if lengths is not None and rows is None:
+         max_length = max(lengths)
+         target_hidden = [t[:, :max_length] for t in target_hidden]
+ 
+@@ -219,6 +233,10 @@
+ 
+     # Projection concatenated states to hidden size, once
+     target_hidden = torch.cat(target_hidden, dim = -1)
++    if rows is not None:
++        if target_hidden.shape[0] != 1:
++            raise ValueError("dflash_update_kv_from_target: rows needs a single job")
++        target_hidden = target_hidden.index_select(1, rows)
+     fc = _m16g_launches(M16G_DRAFT_FC, [model.input_layer.proj], target_hidden)
+     if fc is not None:
+         target_hidden = _m16g_run(fc, target_hidden)[0].view(*target_hidden.shape[:-1], -1)

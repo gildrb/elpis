@@ -1,0 +1,754 @@
+--- a/exllamav3_ext/attn_verify.cuh
++++ b/exllamav3_ext/attn_verify.cuh
+@@ -15,6 +15,20 @@
+ // A verify row's result depends only on its absolute position, S and the cache contents: its
+ // tiles, per-slot tile lists, visible positions and combine order do not depend on the round's
+ // start or row count (bend/attn_stride_laws.bend: attend_once, row_invariant, slot_once).
++//
++// TREE (ext 3012, attn_verify_split_k*_tree): the 8 rows of a bsz-1 verify round carry a token
++// tree (row 0 = anchor, parent[r] < r) described by a host-validated 128-byte TreeDesc (layout
++// below, TreeDesign DESIGN.md 2.2). Row r sits at absolute position q_abs = base + depth[r]
++// (base = cache_seqlens[b]) while its K/V lives in slot base + r. Tiles below the round's tail
++// tiles T0 = base / 64, T1 = (base + 7) / 64 run once for all rows, as in the chain. A CTA owning
++// a tail tile stashes the 8 in-round K/V rows at entry and runs that tile once per leaf l
++// (leaves ascending): in-round column base + j holds slot base + path[l][j] for j <= depth[l]
++// (else base + j), and only rows with leaf_of[r] == l see the tile. Every row is in exactly one
++// pass of each tail tile and path[leaf_of[r]] extends path[r], so row r sees, at base + j, its
++// depth-j ancestor for j <= depth[r]: exactly the columns of the chain row at base + depth[r]
++// holding r's path; the other passes are all-masked tiles, which leave (m, l, acc) bit-identical
++// (bend/attn_tree_laws.bend: pass_once, path_prefix, sees_path). CHAIN (parent r - 1) is one
++// identity pass, the cs12 arithmetic.
+ 
+ #include <cuda_runtime.h>
+ #include <cuda_fp16.h>
+@@ -57,6 +71,23 @@
+     return q + p + red + AV_STAGES * stage;
+ }
+ 
++// TreeDesc (DESIGN.md 2.2): byte offsets of the fields the TREE split kernel reads
++#define AV_TD_BYTES 128
++#define AV_TD_MAGIC 0x54
++#define AV_TD_VERSION 1
++#define AV_TD_N_LEAF 3     // u8, 1 .. 7
++#define AV_TD_DEPTH 16     // u8[8]
++#define AV_TD_LEAF_OF 32   // u8[8]: the pass (leaf row) serving row r
++#define AV_TD_LEAVES 40    // u8[8]: leaf rows ascending, 0xFF past n_leaf
++#define AV_TD_PATH 64      // u8[8][8]: path[r][j] = r's depth-j ancestor, j <= depth[r]
++
++// Dynamic shared memory of the TREE split kernel: av_smem_bytes plus the stash of the 8 in-round
++// K and V rows (words + fp16 scales)
++__host__ __device__ inline int av_tree_smem_bytes(int kb, int vb)
++{
++    return av_smem_bytes(kb, vb) + AV_QPOS * ((8 * kb + 4) + (8 * vb + 4)) * 4;
++}
++
+ #define AV_SPLIT_ARGS \
+     const half* __restrict__ q, \
+     const uint32_t* __restrict__ k_cache, \
+@@ -88,6 +119,10 @@
+ #ifdef __CUDACC__
+ extern "C" __global__ void attn_verify_split_k3v3(AV_SPLIT_ARGS);
+ extern "C" __global__ void attn_verify_split_k4v4(AV_SPLIT_ARGS);
++// TREE (ext 3012): tree = the device TreeDesc (AV_TD_BYTES), appended so the arguments the graphs
++// patch (block table 6, cache_seqlens 7, block-table width 10) keep their indices; q_len must be 8
++extern "C" __global__ void attn_verify_split_k3v3_tree(AV_SPLIT_ARGS, const uint8_t* __restrict__ tree);
++extern "C" __global__ void attn_verify_split_k4v4_tree(AV_SPLIT_ARGS, const uint8_t* __restrict__ tree);
+ extern "C" __global__ void attn_verify_combine(AV_COMBINE_ARGS);
+ extern "C" __global__ void attn_verify_combine_gate(AV_COMBINE_ARGS, const half* __restrict__ gate);
+ #endif
+--- a/exllamav3_ext/attn_verify.cu
++++ b/exllamav3_ext/attn_verify.cu
+@@ -166,8 +166,9 @@
+     }
+ }
+ 
+-template <int KB, int VB>
+-__device__ __forceinline__ void split_body(AV_SPLIT_ARGS)
++// TREE (ext 3012, attn_verify.cuh): tree is the TreeDesc (nullptr and unread when !TREE)
++template <int KB, int VB, bool TREE>
++__device__ __forceinline__ void split_body(AV_SPLIT_ARGS, const uint8_t* __restrict__ tree)
+ {
+     extern __shared__ __align__(16) unsigned char smem[];
+     half* qs = (half*) smem;                                  // [48][QSTR] H32-rotated q
+@@ -176,6 +177,7 @@
+     float* red_sum = red_max + AV_NW * AV_ROWS;               // [NW][48]
+     uint32_t* stages = (uint32_t*) (red_sum + AV_NW * AV_ROWS);
+     constexpr int STAGE_WORDS = AV_T * (Geo<KB>::ROWW + Geo<VB>::ROWW);
++    uint32_t* tstash = stages + AV_STAGES * STAGE_WORDS;     // TREE: [8][ROWW_K] K, then [8][ROWW_V] V
+ 
+     const int kvh = blockIdx.y;
+     const int b = blockIdx.z;
+@@ -198,6 +200,50 @@
+     const int ntiles = av_cta_tiles(n_tiles, cta, S);
+     const int* bt = block_table + (size_t) b * num_pages_per_seq;
+ 
++    // TREE: row gid's position base + depth[gid] and pass leaf_of[gid]; the tail tiles T0, T1 hold
++    // the round's 8 slots base .. base + 7 (the last live tiles). A CTA owning one stashes the 8
++    // in-round K/V rows (through the block table: they may straddle a page) with the first
++    // prologue stage, so they are resident at the first tile's wait
++    int base = 0, n_leaf = 1, my_depth = 0, my_leaf = 0, T0 = -1, T1 = -1;
++    if constexpr (TREE)
++    {
++        if (q_len != AV_QPOS || tree[0] != AV_TD_MAGIC || tree[1] != AV_TD_VERSION || tree[2] != AV_QPOS)
++            __trap();                                         // fail closed: not an 8-row TreeDesc
++        base = cache_seqlens[b];
++        n_leaf = tree[AV_TD_N_LEAF];
++        my_depth = tree[AV_TD_DEPTH + gid];
++        my_leaf = tree[AV_TD_LEAF_OF + gid];
++        if (n_leaf < 1 || n_leaf >= AV_QPOS || my_depth >= AV_QPOS) __trap();
++        T0 = base / AV_T;
++        T1 = (base + AV_QPOS - 1) / AV_T;
++        auto owns = [&] (int tile) { return tile >= cta && (tile - cta) % S == 0; };
++        if (owns(T0) || owns(T1))
++        {
++            constexpr int CK = Geo<KB>::CHUNKS;
++            constexpr int CV = Geo<VB>::CHUNKS;
++            uint32_t* tsv = tstash + AV_QPOS * Geo<KB>::ROWW;
++            #pragma unroll 1
++            for (int c = tid; c < AV_QPOS * (CK + CV); c += AV_NW * 32)
++            {
++                bool is_v = c >= AV_QPOS * CK;
++                int cc = is_v ? c - AV_QPOS * CK : c;
++                int C = is_v ? CV : CK;
++                int bits = is_v ? VB : KB;
++                int j = cc / C;
++                int ch = cc - j * C;
++                int pos = base + j;
++                size_t row = (size_t) bt[pos / AV_PAGE] * AV_PAGE + (pos % AV_PAGE);
++                const void* src;
++                if (ch < 2 * bits)
++                    src = (is_v ? v_cache : k_cache) + row * (n_kv_heads * 8 * bits) + kvh * 8 * bits + ch * 4;
++                else
++                    src = (is_v ? v_scales : k_scales) + row * (n_kv_heads * 8) + kvh * 8;
++                uint32_t* dst = (is_v ? tsv + j * Geo<VB>::ROWW : tstash + j * Geo<KB>::ROWW) + ch * 4;
++                cp_async16(dst, src, true);
++            }
++        }
++    }
++
+     auto issue = [&] (int it)
+     {
+         int n0 = (cta + it * S) * AV_T;
+@@ -261,7 +307,8 @@
+     }
+ 
+     // Per-thread rows: slot (mt, hr) = row 16 mt + 8 hr + gid; every warp tracks the same (m, l)
+-    const int q_abs = L - q_len + gid;                        // causal bound: absolute position of the row
++    // causal bound: absolute position of the row (TREE: base + depth[gid])
++    const int q_abs = TREE ? base + my_depth : L - q_len + gid;
+     bool row_ok[6];
+     float m[6], l[6];
+     #pragma unroll
+@@ -293,6 +340,54 @@
+         const uint32_t* sv = sk + AV_T * Geo<KB>::ROWW;
+         const int n0 = (cta + it * S) * AV_T;
+ 
++        // TREE: a tail tile runs once per leaf (the body below, not re-indented, is the pass);
++        // every other tile, and every tile of a !TREE kernel, is one pass with q_lim = q_abs
++        bool tail = false;
++        if constexpr (TREE) tail = n0 == T0 * AV_T || n0 == T1 * AV_T;
++        const int n_pass = tail ? n_leaf : 1;
++        #pragma unroll 1
++        for (int pass = 0; pass < n_pass; ++pass)
++        {
++        int q_lim = q_abs;
++        if constexpr (TREE)
++        {
++            if (tail)
++            {
++                // Pass of leaf lf: in-round column c = base + j of this tile takes stash row
++                // path[lf][j] (j <= depth[lf]) else j; rows of other passes see nothing (q_lim -1:
++                // an all-masked tile keeps their (m, l, acc) bit-identical)
++                if (pass > 0) __syncthreads();                // (D) the previous pass is done with the tile
++                const int lf = tree[AV_TD_LEAVES + pass];
++                if (lf >= AV_QPOS) __trap();
++                const int dl = tree[AV_TD_DEPTH + lf];
++                const int c_lo = max(base, n0);
++                const int c_hi = min(base + AV_QPOS, n0 + AV_T);
++                constexpr int QK = Geo<KB>::ROWW / 4;
++                constexpr int QV = Geo<VB>::ROWW / 4;
++                uint32_t* skw = stages + (it % AV_STAGES) * STAGE_WORDS;
++                uint32_t* svw = skw + AV_T * Geo<KB>::ROWW;
++                const uint32_t* tsv = tstash + AV_QPOS * Geo<KB>::ROWW;
++                #pragma unroll 1
++                for (int w = tid; w < (c_hi - c_lo) * (QK + QV); w += AV_NW * 32)
++                {
++                    int r = w / (QK + QV);
++                    int qq = w - r * (QK + QV);
++                    int c = c_lo + r;
++                    int j = c - base;
++                    int src = j <= dl ? tree[AV_TD_PATH + AV_QPOS * lf + j] : j;
++                    if (src >= AV_QPOS) __trap();
++                    bool is_v = qq >= QK;
++                    const uint4* s4 = is_v ? reinterpret_cast<const uint4*>(tsv + src * Geo<VB>::ROWW) + (qq - QK)
++                                           : reinterpret_cast<const uint4*>(tstash + src * Geo<KB>::ROWW) + qq;
++                    uint4* d4 = is_v ? reinterpret_cast<uint4*>(svw + (c - n0) * Geo<VB>::ROWW) + (qq - QK)
++                                     : reinterpret_cast<uint4*>(skw + (c - n0) * Geo<KB>::ROWW) + qq;
++                    *d4 = *s4;
++                }
++                __syncthreads();                              // (E) the pass's in-round rows staged
++                q_lim = my_leaf == lf ? q_abs : -1;
++            }
++        }
++
+         // S = Q K^T for this warp's 8 tokens (tile-local warp * 8 + gid) x 48 rows
+         float sc[3][4];
+         #pragma unroll
+@@ -334,7 +429,7 @@
+                 for (int e = 0; e < 2; ++e)
+                 {
+                     int tok = tok0 + e;
+-                    bool ok = row_ok[2 * i + hr] && tok <= q_abs;
++                    bool ok = row_ok[2 * i + hr] && tok <= q_lim;
+                     x[2 * i + hr][e] = ok ? sc[i][2 * hr + e] * scale_log2 : NEG_INF;
+                 }
+         #pragma unroll
+@@ -418,6 +513,7 @@
+                 for (int i = 0; i < 3; ++i) mma16816(acc[i][j], pa[i], b0, b1);
+             }
+         }
++        }   // pass
+     }
+     cp_wait<0>();
+ 
+@@ -442,14 +538,31 @@
+ 
+ extern "C" __global__ void __launch_bounds__(AV_NW * 32, 1) attn_verify_split_k3v3(AV_SPLIT_ARGS)
+ {
+-    split_body<3, 3>(q, k_cache, v_cache, k_scales, v_scales, h32, block_table, cache_seqlens,
+-                     partial_o, partial_ml, num_pages_per_seq, q_len, n_q_heads, n_kv_heads, scale_log2);
++    split_body<3, 3, false>(q, k_cache, v_cache, k_scales, v_scales, h32, block_table, cache_seqlens,
++                            partial_o, partial_ml, num_pages_per_seq, q_len, n_q_heads, n_kv_heads, scale_log2,
++                            nullptr);
+ }
+ 
+ extern "C" __global__ void __launch_bounds__(AV_NW * 32, 1) attn_verify_split_k4v4(AV_SPLIT_ARGS)
+ {
+-    split_body<4, 4>(q, k_cache, v_cache, k_scales, v_scales, h32, block_table, cache_seqlens,
+-                     partial_o, partial_ml, num_pages_per_seq, q_len, n_q_heads, n_kv_heads, scale_log2);
++    split_body<4, 4, false>(q, k_cache, v_cache, k_scales, v_scales, h32, block_table, cache_seqlens,
++                            partial_o, partial_ml, num_pages_per_seq, q_len, n_q_heads, n_kv_heads, scale_log2,
++                            nullptr);
++}
++
++// TREE (ext 3012): one pass per leaf on the round's tail tiles, see attn_verify.cuh
++extern "C" __global__ void __launch_bounds__(AV_NW * 32, 1) attn_verify_split_k3v3_tree(AV_SPLIT_ARGS, const uint8_t* __restrict__ tree)
++{
++    split_body<3, 3, true>(q, k_cache, v_cache, k_scales, v_scales, h32, block_table, cache_seqlens,
++                           partial_o, partial_ml, num_pages_per_seq, q_len, n_q_heads, n_kv_heads, scale_log2,
++                           tree);
++}
++
++extern "C" __global__ void __launch_bounds__(AV_NW * 32, 1) attn_verify_split_k4v4_tree(AV_SPLIT_ARGS, const uint8_t* __restrict__ tree)
++{
++    split_body<4, 4, true>(q, k_cache, v_cache, k_scales, v_scales, h32, block_table, cache_seqlens,
++                           partial_o, partial_ml, num_pages_per_seq, q_len, n_q_heads, n_kv_heads, scale_log2,
++                           tree);
+ }
+ 
+ // Combine: one CTA per (row, kv head, batch), thread = output dim. The live partial slots are merged
+--- a/exllamav3_ext/attn_verify_gr.cuh
++++ b/exllamav3_ext/attn_verify_gr.cuh
+@@ -8,14 +8,17 @@
+ // Bits per value of a quantized paged cache tensor (..., n_kv_heads * 256 / 32 * bits)
+ int attn_verify_bits(const at::Tensor& cache, int n_kv_heads);
+ 
+-// Validates the shape and sets the split kernel's dynamic shared memory limit (once per slot)
+-void attn_verify_prepare(int bits);
++// Validates the shape and sets the split kernel's dynamic shared memory limit (once per slot);
++// tree selects the TREE split kernel (ext 3012)
++void attn_verify_prepare(int bits, bool tree);
+ 
+ // Split + combine over the paged quantized cache into out (bsz, q_len, n_q_heads, 256): `splits`
+ // = S CTAs per (kv head, batch), CTA x over the absolute 64-token tiles x, x + S, ..., one partial
+ // slot per CTA (S per (batch, kv head)); records the block table, cache_seqlens and block-table
+ // width sites when graph is non-null. With gate (ext 3007) the combine also applies the output gate
+-// out *= sigmoid(gate) (mul_sigmoid__gr's half2 ops), gate shaped like out
++// out *= sigmoid(gate) (mul_sigmoid__gr's half2 ops), gate shaped like out. With tree (ext 3012:
++// the uint8 device TreeDesc, baked into the graph, bsz 1, q_len 8) the TREE split kernel runs the
++// round's rows as a token tree (attn_verify.cuh); the combine is unchanged
+ void attn_verify_gr
+ (
+     const at::Tensor& q,
+@@ -36,5 +39,6 @@
+     float scale_log2,
+     const c10::optional<at::Tensor>& gate,
+     cudaStream_t stream,
+-    Graph* graph
++    Graph* graph,
++    const c10::optional<at::Tensor>& tree
+ );
+--- a/exllamav3_ext/attn_verify_gr.cu
++++ b/exllamav3_ext/attn_verify_gr.cu
+@@ -10,16 +10,22 @@
+     return (int) (cache.size(-1) / (n_kv_heads * (AV_HD / 32)));
+ }
+ 
+-static void* split_fn(int bits)
++static void* split_fn(int bits, bool tree)
+ {
+     TORCH_CHECK(bits == 3 || bits == 4, "attn_verify: no split kernel for this bitrate");
++    if (tree) return bits == 3 ? (void*) attn_verify_split_k3v3_tree : (void*) attn_verify_split_k4v4_tree;
+     return bits == 3 ? (void*) attn_verify_split_k3v3 : (void*) attn_verify_split_k4v4;
+ }
+ 
+-void attn_verify_prepare(int bits)
++static int split_smem(int bits, bool tree)
+ {
+-    cuda_check(cudaFuncSetAttribute(split_fn(bits), cudaFuncAttributeMaxDynamicSharedMemorySize,
+-                                    av_smem_bytes(bits, bits)));
++    return tree ? av_tree_smem_bytes(bits, bits) : av_smem_bytes(bits, bits);
++}
++
++void attn_verify_prepare(int bits, bool tree)
++{
++    cuda_check(cudaFuncSetAttribute(split_fn(bits, tree), cudaFuncAttributeMaxDynamicSharedMemorySize,
++                                    split_smem(bits, tree)));
+ }
+ 
+ void attn_verify_gr
+@@ -42,12 +48,14 @@
+     float scale_log2,
+     const c10::optional<at::Tensor>& gate,
+     cudaStream_t stream,
+-    Graph* graph
++    Graph* graph,
++    const c10::optional<at::Tensor>& tree
+ )
+ {
+     int bits = attn_verify_bits(cache_k, n_kv_heads);
+     TORCH_CHECK(attn_verify_bits(cache_v, n_kv_heads) == bits, "attn_verify: K and V bitrates differ");
+-    void* fn = split_fn(bits);
++    bool is_tree = tree.has_value();
++    void* fn = split_fn(bits, is_tree);
+     int bsz = (int) block_table.size(0);
+ 
+     const half* q_ptr = (const half*) q.data_ptr();
+@@ -66,14 +74,25 @@
+     TORCH_CHECK(partial_o.numel() >= (int64_t) bsz * n_kv_heads * splits * AV_ROWS * AV_HD &&
+                 partial_ml.numel() >= (int64_t) bsz * n_kv_heads * splits * AV_ROWS * 2,
+                 "attn_verify: partials hold fewer slots than the split grid stores");
++    // TREE (ext 3012): an 8-row bsz-1 round; the TreeDesc pointer is baked (not a patched site)
++    const uint8_t* tree_ptr = nullptr;
++    if (is_tree)
++    {
++        const at::Tensor& td = tree.value();
++        TORCH_CHECK(bsz == 1 && q_len == AV_QPOS, "attn_verify: the tree verify requires bsz 1 and q_len 8");
++        TORCH_CHECK(td.dtype() == at::kByte && td.is_cuda() && td.device() == q.device() && td.is_contiguous() &&
++                    td.numel() >= AV_TD_BYTES,
++                    "attn_verify: tree must be a contiguous uint8 device tensor holding a TreeDesc on q's device");
++        tree_ptr = (const uint8_t*) td.data_ptr();
++    }
+ 
+     void* split_args[] =
+     {
+         &q_ptr, &k_ptr, &v_ptr, &ks_ptr, &vs_ptr, &h32_ptr, &bt_ptr, &sl_ptr, &po_ptr, &pml_ptr,
+-        &num_pages, &q_len, &n_q_heads, &n_kv_heads, &scale_log2
++        &num_pages, &q_len, &n_q_heads, &n_kv_heads, &scale_log2, &tree_ptr
+     };
+     cuda_check(cudaLaunchKernel(fn, dim3(splits, n_kv_heads, bsz), dim3(AV_NW * 32), split_args,
+-                                av_smem_bytes(bits, bits), stream));
++                                split_smem(bits, is_tree), stream));
+     if (graph)
+     {
+         graph->record_param(fn, GP_attn_block_table, 6);
+--- a/exllamav3_ext/libtorch/attention.h
++++ b/exllamav3_ext/libtorch/attention.h
+@@ -16,7 +16,7 @@
+ // only per-call updates are the pointers patched into the graph: input x, output y,
+ // cache_seqlens, block_table and RoPE positions.
+ //
+-// One lazily configured slot per (bsz, q_len, regime) with bsz <= 4, q_len <= 16. The attention
++// One lazily configured slot per (bsz, q_len, regime, tree) with bsz <= 4, q_len <= 16. The attention
+ // kernels bake the split configuration per slot; the block-table width and split length are
+ // runtime kernel arguments frozen at capture, so when the generator's block table grows the slot
+ // is reconfigured (recapture, no recompile unless the split count changes). Instances are built
+@@ -170,6 +170,11 @@
+         // one partial slot per CTA. av_scale_log2 = softmax scale * log2(e)
+         int av_splits = 0;
+         float av_scale_log2 = 0.0f;
++        // TREE verify (ext 3012): the generator's device TreeDesc (uint8 [160]: 128 descriptor
++        // bytes, then int32 pos[8] = base + depth, the RoPE position_ids), baked into the TREE split
++        // kernel. Only tree slots (bsz 1, q_len 8, regime 0, av_splits > 0) hold one; every run of a
++        // tree slot must pass this very tensor and position_ids = its pos view
++        c10::optional<at::Tensor> tree;
+ 
+         // Static intermediates (python tensor cache) and precomputed views. gate_a/gate_b by
+         // gate mode: full = qg (2, R, qh*hd) with q aliasing qg[0]; interleaved = qg_i
+@@ -285,7 +290,7 @@
+         at::Tensor pool_plane
+     );
+ 
+-    bool needs_configure(int bsz, int q_len, int regime);
++    bool needs_configure(int bsz, int q_len, int regime, bool tree = false);
+ 
+     void configure_slot
+     (
+@@ -307,7 +312,8 @@
+         c10::optional<at::Tensor> xp,
+         c10::optional<at::Tensor> yp,
+         int av_splits = 0,
+-        float av_scale_log2 = 0.0f
++        float av_scale_log2 = 0.0f,
++        c10::optional<at::Tensor> tree = c10::nullopt
+     );
+ 
+     // Ext 3007: select the fused launches (mask, see small_fuse) and the pre-attention CTA shape;
+@@ -360,7 +366,8 @@
+         const c10::optional<at::Tensor>& position_ids,
+         const c10::optional<at::Tensor>& inv_freq_override,
+         int regime,
+-        int64_t t_total
++        int64_t t_total,
++        const c10::optional<at::Tensor>& tree
+     );
+ 
+     // Layer tail (ext 8202): run without o_proj; returns the o_proj input, this slot's static o2
+@@ -377,7 +384,8 @@
+         const c10::optional<at::Tensor>& position_ids,
+         const c10::optional<at::Tensor>& inv_freq_override,
+         int regime,
+-        int64_t t_total
++        int64_t t_total,
++        const c10::optional<at::Tensor>& tree
+     );
+ 
+     void run_mode
+@@ -394,7 +402,8 @@
+         const c10::optional<at::Tensor>& inv_freq_override,
+         int regime,
+         int64_t t_total,
+-        bool defer
++        bool defer,
++        const c10::optional<at::Tensor>& tree
+     );
+ 
+     void run_gr
+@@ -417,6 +426,6 @@
+     );
+ 
+ private:
+-    Slot& slot(int bsz, int q_len, int regime)
+-        { return slots[(regime * MAX_BSZ + bsz - 1) * MAX_QLEN + (q_len - 1)]; }
++    Slot& slot(int bsz, int q_len, int regime, bool tree)
++        { return slots[(((int) tree * 2 + regime) * MAX_BSZ + bsz - 1) * MAX_QLEN + (q_len - 1)]; }
+ };
+--- a/exllamav3_ext/libtorch/attention.cpp
++++ b/exllamav3_ext/libtorch/attention.cpp
+@@ -141,7 +141,7 @@
+     TORCH_CHECK(gate_mode >= 0 && gate_mode <= 3, "BC_Attention: unsupported gate mode");
+     TORCH_CHECK(gate_mode != 1 || (g_weight && !qg_ptrs_trellis && !g_proj), "BC_Attention: headwise gate requires an fp16 gate weight");
+     TORCH_CHECK(!g_weight || gate_mode == 1 || (gate_mode == 2 && !qg_ptrs_trellis && !g_proj), "BC_Attention: fp16 gate weight requires full gate mode without a quantized g projection");
+-    slots.resize(2 * MAX_BSZ * MAX_QLEN);
++    slots.resize(4 * MAX_BSZ * MAX_QLEN);   // (tree, regime, bsz, q_len)
+ 
+     // Ext 3007 kill switch / knob (see attention.h)
+     if (const char* e = std::getenv("EXL3_ATTN_SMALL_FUSE"))
+@@ -207,11 +207,11 @@
+     qsa_pool_plane = std::move(_pool_plane);
+ }
+ 
+-bool BC_Attention::needs_configure(int bsz, int q_len, int regime)
++bool BC_Attention::needs_configure(int bsz, int q_len, int regime, bool tree)
+ {
+     TORCH_CHECK(1 <= bsz && bsz <= MAX_BSZ && 1 <= q_len && q_len <= MAX_QLEN, "BC_Attention: shape out of range");
+     TORCH_CHECK(regime == 0 || regime == 1, "BC_Attention: bad regime");
+-    return !slot(bsz, q_len, regime).configured;
++    return !slot(bsz, q_len, regime, tree).configured;
+ }
+ 
+ void BC_Attention::configure_slot
+@@ -234,11 +234,12 @@
+     c10::optional<at::Tensor> xp,
+     c10::optional<at::Tensor> yp,
+     int av_splits,
+-    float av_scale_log2
++    float av_scale_log2,
++    c10::optional<at::Tensor> tree
+ )
+ {
+     TORCH_CHECK(regime == 0 || qsa, "BC_Attention: sparse regime without QSA indexer");
+-    Slot& s = slot(bsz, q_len, regime);
++    Slot& s = slot(bsz, q_len, regime, tree.has_value());
+     int R = bsz * q_len;
+ 
+     s.q = std::move(q);
+@@ -255,6 +256,18 @@
+     s.splits_cap = splits_cap;
+     s.av_splits = av_splits;
+     s.av_scale_log2 = av_scale_log2;
++    if (tree)
++    {
++        // TREE verify (ext 3012): only the CUDA verify attention of a bsz-1, 8-row dense round
++        TORCH_CHECK(!qsa, "BC_Attention: no tree slots on a QSA indexer module");
++        const at::Tensor& td = tree.value();
++        TORCH_CHECK(regime == 0 && bsz == 1 && q_len == AV_QPOS && av_splits > 0,
++                    "BC_Attention: a tree slot requires bsz 1, q_len 8, the dense regime and the CUDA verify attention");
++        TORCH_CHECK(td.dtype() == at::kByte && td.is_cuda() && td.device() == s.q.device() && td.is_contiguous() &&
++                    td.dim() == 1 && td.numel() == AV_TD_BYTES + 4 * AV_QPOS,
++                    "BC_Attention: tree must be the contiguous uint8 [160] device TreeDesc + positions on q's device");
++    }
++    s.tree = tree;
+     if (av_splits)
+     {
+         // CUDA verify attention: quantized K/V of equal width 3 or 4 bits, head_dim 256, up to 6 q
+@@ -272,7 +285,7 @@
+         TORCH_CHECK(s.o.numel() >= (int64_t) bsz * q_len * num_q_heads * AV_HD &&
+                     s.q.numel() >= (int64_t) bsz * q_len * num_q_heads * AV_HD,
+                     "BC_Attention: q/o too small for the CUDA verify attention");
+-        attn_verify_prepare(kb);
++        attn_verify_prepare(kb, tree.has_value());
+     }
+ 
+     if (hidden_size_padded != hidden_size || g_weight)
+@@ -394,7 +407,7 @@
+ )
+ {
+     TORCH_CHECK(qsa, "BC_Attention: configure_slot_qsa without set_qsa");
+-    Slot& s = slot(bsz, q_len, regime);
++    Slot& s = slot(bsz, q_len, regime, false);
+     TORCH_CHECK(s.configured, "BC_Attention: configure_slot before configure_slot_qsa");
+     TORCH_CHECK(k_stage && k_raw_append && k_pool_update, "BC_Attention: QSA plane kernels missing");
+ 
+@@ -887,11 +900,11 @@
+         // CUDA verify attention (ext 3003): absolute 64-token tiles, CTA x of the grid (av_splits,
+         // kv heads, bsz) over tiles x, x + av_splits, ..., live tiles from cache_seqlens in-kernel;
+         // the combine merges the per-CTA slots in slot order, so a row's result depends only on its
+-        // absolute position
++        // absolute position. Tree slots (ext 3012) run the TREE split kernel on the baked TreeDesc
+         attn_verify_gr(s.q, cache_k, cache_v, cache_k_scales.value(), cache_v_scales.value(), h32,
+                        block_table, cache_seqlens, s.partial_o, s.partial_ml, s.o, s.av_splits,
+                        q_len, num_q_heads, num_kv_heads, s.av_scale_log2,
+-                       fuse_post ? c10::optional<at::Tensor>(s.g2) : c10::nullopt, stream, graph);
++                       fuse_post ? c10::optional<at::Tensor>(s.g2) : c10::nullopt, stream, graph, s.tree);
+     }
+     else
+     {
+@@ -998,10 +1011,11 @@
+     const c10::optional<at::Tensor>& position_ids,
+     const c10::optional<at::Tensor>& inv_freq_override,
+     int regime,
+-    int64_t t_total
++    int64_t t_total,
++    const c10::optional<at::Tensor>& tree
+ )
+ {
+-    run_mode(bsz, q_len, x, y, cache_seqlens, block_table, position, positions, position_ids, inv_freq_override, regime, t_total, false);
++    run_mode(bsz, q_len, x, y, cache_seqlens, block_table, position, positions, position_ids, inv_freq_override, regime, t_total, false, tree);
+ }
+ 
+ at::Tensor BC_Attention::run_defer
+@@ -1016,13 +1030,14 @@
+     const c10::optional<at::Tensor>& position_ids,
+     const c10::optional<at::Tensor>& inv_freq_override,
+     int regime,
+-    int64_t t_total
++    int64_t t_total,
++    const c10::optional<at::Tensor>& tree
+ )
+ {
+     TORCH_CHECK(hidden_size_padded == hidden_size && !o_proj->bias, "BC_Attention::run_defer: padded or biased o_proj");
+     at::Tensor unused;
+-    run_mode(bsz, q_len, x, unused, cache_seqlens, block_table, position, positions, position_ids, inv_freq_override, regime, t_total, true);
+-    Slot& s = slot(bsz, q_len, regime);
++    run_mode(bsz, q_len, x, unused, cache_seqlens, block_table, position, positions, position_ids, inv_freq_override, regime, t_total, true, tree);
++    Slot& s = slot(bsz, q_len, regime, tree.has_value());
+     return s.o2.view({(int64_t) bsz * q_len, -1});
+ }
+ 
+@@ -1040,17 +1055,30 @@
+     const c10::optional<at::Tensor>& inv_freq_override,
+     int regime,
+     int64_t t_total,
+-    bool defer
++    bool defer,
++    const c10::optional<at::Tensor>& tree
+ )
+ {
+     py::gil_scoped_release release;
+     c10::cuda::CUDAGuard device_guard(x.device());
+     cudaStream_t stream = at::cuda::getCurrentCUDAStream().stream();
+ 
+-    Slot& s = slot(bsz, q_len, regime);
++    Slot& s = slot(bsz, q_len, regime, tree.has_value());
+     TORCH_CHECK(s.configured, "BC_Attention: slot not configured");
+     TORCH_CHECK(x.is_contiguous() && (defer || y.is_contiguous()), "BC_Attention: x and y must be contiguous");
+     TORCH_CHECK(regime == 0 || qsa, "BC_Attention: sparse regime without QSA indexer");
++    if (tree)
++    {
++        // TREE verify (ext 3012): the graph baked the slot's TreeDesc, and RoPE reads the round's
++        // positions base + depth[r] from its pos[8] (position_ids is a patched site, the tree is not)
++        const at::Tensor& td = tree.value();
++        TORCH_CHECK(s.tree && s.tree.value().data_ptr() == td.data_ptr() && td.numel() == s.tree.value().numel(),
++                    "BC_Attention: tree differs from the TreeDesc baked into the tree slot");
++        TORCH_CHECK(!positions && position_ids && position_ids.value().scalar_type() == at::kInt &&
++                    position_ids.value().numel() == AV_QPOS && position_ids.value().is_contiguous() &&
++                    position_ids.value().data_ptr() == (void*) ((uint8_t*) td.data_ptr() + AV_TD_BYTES),
++                    "BC_Attention: a tree round takes its RoPE positions from position_ids = the tree's pos[8]");
++    }
+ 
+     // defer (layer tail, ext 8202): the same workload without o_proj, its own graph and warmup
+     Graph& gr = defer ? *s.graph_defer : *s.graph;
+--- a/exllamav3_ext/libtorch/attention_bc.h
++++ b/exllamav3_ext/libtorch/attention_bc.h
+@@ -126,7 +126,12 @@
+     py::arg("h32"),
+     py::arg("sinks")
+ )
+-.def("needs_configure", &BC_Attention::needs_configure)
++.def("needs_configure", &BC_Attention::needs_configure,
++    py::arg("bsz"),
++    py::arg("q_len"),
++    py::arg("regime"),
++    py::arg("tree") = false
++)
+ .def("set_qsa", &BC_Attention::set_qsa,
+     py::arg("qk_proj"),
+     py::arg("q_norm_w"),
+@@ -158,7 +163,8 @@
+     py::arg("xp"),
+     py::arg("yp"),
+     py::arg("av_splits") = 0,
+-    py::arg("av_scale_log2") = 0.0f
++    py::arg("av_scale_log2") = 0.0f,
++    py::arg("tree") = c10::nullopt
+ )
+ .def("configure_slot_qsa", &BC_Attention::configure_slot_qsa,
+     py::arg("bsz"),
+--- a/modules/attention_fn/bc_attn.py
++++ b/modules/attention_fn/bc_attn.py
+@@ -293,8 +293,11 @@
+                 pool_plane = qsa_layer.pooled.view(-1, idx.head_dim),
+             )
+         self.slot_widths = {}
++        # TREE verify (ext 3012): the generator's device TreeDesc (uint8 [160]), baked into the
++        # tree slot at its configure; every tree call must pass this very tensor
++        self.tree_desc = None
+ 
+-    def _configure(self, bsz: int, q_len: int, causal: bool, regime: int):
++    def _configure(self, bsz: int, q_len: int, causal: bool, regime: int, tree_desc: torch.Tensor | None = None):
+         import triton
+         from .triton_paged import (
+             _paged_attn_decode_split_kernel,
+@@ -439,6 +442,12 @@
+             pn_ml = max(pn_ml, bsz * kvh * av_splits * 48 * 2)
+         if regime == 1:
+             pn_o, pn_ml = self._qsa_partial_sizes(bsz * q_len)
++        # TREE verify (ext 3012): only on the CUDA verify attention of a bsz-1, 8-row dense round;
++        # there is no Triton fallback for a tree round
++        if tree_desc is not None and not (av_splits > 0 and bsz == 1 and q_len == 8 and regime == 0 and not self.qsa):
++            raise RuntimeError(
++                f"BC attention: a tree verify slot needs the CUDA verify attention on a bsz-1, 8-row dense "
++                f"round (bsz {bsz}, q_len {q_len}, regime {regime}, av_splits {av_splits}, qsa {self.qsa})")
+         partial_o = g_tensor_cache.get_bucketed(dev, pn_o, torch.float, "bca_po")
+         partial_ml = g_tensor_cache.get_bucketed(dev, pn_ml, torch.float, "bca_ml")
+         if regime == 0:
+@@ -470,7 +479,10 @@
+             xp, yp,
+             av_splits,
+             float(self.sm_scale) * math.log2(math.e),
++            tree = tree_desc,
+         )
++        if tree_desc is not None:
++            self.tree_desc = tree_desc
+ 
+         if self.qsa:
+             self._configure_qsa(bsz, q_len, regime)
+@@ -643,13 +655,24 @@
+         causal: bool = True,
+         host_seqlens: torch.Tensor | None = None,
+         defer: bool = False,
++        tree_desc: torch.Tensor | None = None,
+     ) -> torch.Tensor | None:
+         """
+-        One graph replay of the slot (bsz, q_len). Returns the block output (bsz, q_len, hidden),
+-        or with defer (o_deferrable only) the o_proj input (bsz * q_len, heads * head_dim) half,
+-        a slot static valid until the next call; None when the call must take the python path
++        One graph replay of the slot (bsz, q_len, regime, tree). Returns the block output (bsz,
++        q_len, hidden), or with defer (o_deferrable only) the o_proj input (bsz * q_len, heads *
++        head_dim) half, a slot static valid until the next call; None when the call must take the
++        python path. tree_desc (ext 3012, a tree verify round): the generator's device TreeDesc,
++        baked into the tree slot, with position_ids its pos[8] view; such a call never returns None
+         """
+         bsz, q_len, _ = x.shape
++        tree = tree_desc is not None
++        if tree:
++            if self.qsa or bsz != 1 or q_len != 8 or not causal or positions is not None or position_ids is None:
++                raise RuntimeError(
++                    f"BC attention: a tree verify round is a causal bsz-1, 8-row round with position_ids "
++                    f"on a non-QSA module (bsz {bsz}, q_len {q_len}, causal {causal}, qsa {self.qsa})")
++            if self.tree_desc is not None and tree_desc is not self.tree_desc:
++                raise RuntimeError("BC attention: tree_desc is not the TreeDesc tensor baked into the tree slot")
+ 
+         # QSA regime: dense below the sparse threshold (top-k cannot exclude anything there, so
+         # dense attention is exact), gathered sparse above it. Sparse slots are decode-only;
+@@ -674,16 +697,17 @@
+         # position source, block-table pointer/width, split configuration -- is a runtime
+         # argument patched into the graph
+         skey = (tuple(inv_freq.shape) if inv_freq is not None else None, causal)
+-        if self.slot_widths.get((bsz, q_len, regime), ...) != skey:
+-            self._configure(bsz, q_len, causal, regime)
+-            self.slot_widths[(bsz, q_len, regime)] = skey
++        slot = (bsz, q_len, regime, tree)
++        if self.slot_widths.get(slot, ...) != skey:
++            self._configure(bsz, q_len, causal, regime, tree_desc)
++            self.slot_widths[slot] = skey
+         if defer:
+             assert self.o_deferrable
+             return self.bc.run_defer(bsz, q_len, x, cache_seqlens, block_table, position, positions,
+-                                     position_ids, inv_freq, regime, t_total)
++                                     position_ids, inv_freq, regime, t_total, tree_desc)
+         y = torch.empty((bsz, q_len, self.hidden_size), dtype = self.o_dtype, device = x.device)
+         self.bc.run(bsz, q_len, x, y, cache_seqlens, block_table, position, positions,
+-                    position_ids, inv_freq, regime, t_total)
++                    position_ids, inv_freq, regime, t_total, tree_desc)
+         return y
+ 
+ 
+--- a/modules/attn.py
++++ b/modules/attn.py
+@@ -609,6 +609,8 @@
+                 case "flash_attn":
+                     x = self.decode_flash_attn(x, bsz, seqlen, params)
+                 case "flash_attn_nc":
++                    if params.get("tree_desc") is not None:
++                        raise RuntimeError("Attention: a tree verify round requires the paged BC attention path")
+                     x = self.decode_flash_attn_nc(x, bsz, seqlen, params)
+                 case _:
+                     raise ValueError(f"Unknown attn_mode: {attn_mode}")
+@@ -950,6 +952,9 @@
+         position_ids = get_for_device(params, "position_ids", self.device, None)
+         inv_freq = get_for_device(params, "inv_freq", self.device, None)
+         position = params.get("position", 0)
++        # TREE verify (ext 3012): the generator's device TreeDesc, passed by identity (the slot bakes
++        # it); a tree round has no fallback, so a declining BC path raises below
++        tree_desc = params.get("tree_desc")
+ 
+         layer = cache if isinstance(cache, CacheLayer) else cache.layers[self.layer_idx, params.get("layer_instance") or 0]
+         key = id(layer)
+@@ -957,12 +962,15 @@
+         if bca is None:
+             bca = self.bc_attn[key] = (build_bc_attn(self, layer) or False)
+         if bca is False:
++            if tree_desc is not None:
++                raise RuntimeError("Attention: a tree verify round requires the BC attention path")
+             return None
+         # Layer tail (ext 8202): leave o_proj to the enclosing block's tail launch when it asked
+         defer = bool(params.get("defer_o_proj")) and bca.o_deferrable and not self.tp_reduce
+         o = bca.step(
+             x, cache_seqlens, block_table, position, positions, position_ids, inv_freq,
+-            causal = params.get("causal", True), host_seqlens = host_seqlens, defer = defer
++            causal = params.get("causal", True), host_seqlens = host_seqlens, defer = defer,
++            tree_desc = tree_desc,
+         )
+         if defer and o is not None:
+             params["o_proj_deferred"] = True
+@@ -1083,6 +1091,8 @@
+                                   host_seqlens = qsa_seqlens_cpu)
+             if o is not None:
+                 return o
++        if params.get("tree_desc") is not None:
++            raise RuntimeError("Attention: a tree verify round requires the BC attention path")
+         # A (left, right) window (DFlash2 draft block mask) is only expressed by the BC kernels:
+         # the dispatch backends below read an int window as (window, 0)
+         if isinstance(self.sliding_window, tuple):

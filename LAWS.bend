@@ -140,3 +140,24 @@ import ./bend/gdn_replay_gather_laws.bend as GdnReplayGatherLaws
 # load, the loads precede the warp barrier and the discard, and every load observes its own launch's store (or its
 # slot-0 sum) with discards on or off; EXL3_SPLITK_DISCARD parses 0 / 1 (default 1, else refused), discard(x) keeps 0..1.
 import ./bend/m16_discard_laws.bend as M16DiscardLaws
+# ext 3012 TREE verify attention (bend/attn_tree.bend, reference bend/attn_tree_spec.bend): for every legal 8-row shape the
+# TreeDesc passes the kernel's traps, every row is admitted by exactly one pass of each tail tile, the serving leaf's path extends
+# the row's path, and over the pass loop in-round column base + j enters row r once iff j <= depth[r], holding r's depth-j
+# ancestor; committed tail-tile columns enter once; T0/T1 cover the round and are its last live tiles; CHAIN is the 3006 kernel.
+import ./bend/attn_tree_laws.bend as AttnTreeLaws
+# ext 5109 GDN tree verify (bend/gdn_tree.bend): for all 5040 8-row parent arrays the DFS program (<= 14 steps) emits every row once from state history path[r], dot1 buffers alternate per arithmetic step, each row's conv window is its ancestors' raw inputs after the committed window, and every accepted-path commit (row_map replay, src_off conv window) reads exactly the path; CHAIN = ADV 0..7 / identity maps.
+import ./bend/gdn_tree_laws.bend as GdnTreeLaws
+# 8-row tree verify acceptance (DESIGN.md §3(d), bend/exl3_tree_accept.bend, emitted via
+# bend/EXL3_TREE_ACCEPT.bend): the scalar accept_tree / derive leaves equal the list reference
+# bend/exl3_tree_accept_spec.bend (derive on every legal parent array); the chain shape is the
+# chain leaf with k = 7 and derives CHAIN; the matching path is maximal and every committed row
+# extends its predecessor; a round ends early only with eos or at the checkpoint; the reference
+# descriptor satisfies §2.2 (paths, masks, leaves, leaf_of, the GDN program by emulation).
+import ./bend/exl3_tree_accept_laws.bend as Exl3TreeAcceptLaws
+# Tree speculation invariance (bend/spec_inv_tree.bend over the tree acceptance reference and the
+# exl3_round advance): under ~rinv with row prefixes along the tree's ancestor paths, one tree
+# round commits the greedy continuation and any tree rounds emit a prefix of greedy decoding.
+import ./bend/spec_inv_tree_laws.bend as SpecInvTreeLaws
+# The host TreeDesc reference (exl3_tree_accept_spec.derive) and the tree-attention reference
+# (attn_tree_spec.desc) agree on the fields both read, on every legal parent array.
+import ./bend/tree_desc_agree_laws.bend as TreeDescAgreeLaws
