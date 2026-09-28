@@ -2,8 +2,6 @@
 
 **Qwen3.8-27B · EXL3 4.00 bpw · DFlash2 + 8-row token tree · 262,144 context · one RTX 3090 at 350 W, quiet fans · output = plain greedy · acceptance proved in Bend.**
 
-> Numbers below: 250 W (protocol v4). Since 2026-09-28: 350 W + quiet fan curve; 350 W (v5) runs queued.
-
 ## How it compares with other RTX 3090 results for this model
 
 Other projects' figures below are quoted from their repositories, not re-run here. No
@@ -12,77 +10,82 @@ project reports, not as a ranking.
 
 | One RTX 3090 | Weights | Speculation | Context / KV | Power | Reported tok/s |
 |---|---|---|---|---|---|
-| **eta, this repo** (measured) | 4.00 bpw | DFlash2 + 8-row token tree | 262,144 / 3-bit | 250 W cap; SM 0.96-1.19 GHz under load | **122.3** reasoning + code lane, **153.3** GSM8K (whole request, prefill included); 113.6 decode only at 1K context (*computed*) |
+| **eta, this repo** (measured) | 4.00 bpw | DFlash2 + 8-row token tree | 262,144 / 3-bit | 350 W cap; SM 1.24-1.62 GHz per call (median 1.51) | **161.8** reasoning + code lane, **202.9** GSM8K (whole request, prefill included); decode only: 151.1 at 1K (RoundBench), 214.8 on GSM8K (*computed*) |
 | [trellis-serve](https://github.com/0xSero/trellis-serve/tree/1ace59c4b43ca16a50fb6b7acf8b3fd7e2351f96) README headline, by 0xSero | 3.00 bpw | MTP, 3 steps / 4 tokens | 212,992 / fp8 | not published | 96.2 prose, 141.1 code (thinking off); 141.3 prose, 129.3 code (thinking on); decode only ([sweep](https://github.com/0xSero/local-ai-registry/blob/c6e6f4c796304229a3c11442af6f09673180d4f6/data/registry/speed-sweep/qwen38-27b-exl3-3bpw-mtp-vision-rtx3090-sglang-tp1-sweep.json)) |
 | trellis-serve's fastest 3090 recipe ([DFlash2](https://github.com/0xSero/local-ai-registry/blob/c6e6f4c796304229a3c11442af6f09673180d4f6/data/registry/recipe/qwen38-27b-exl3-3bpw-dflash2-rtx3090-sglang-tp1.json), registry status "candidate") | 3.00 bpw | DFlash2, 5.0 bpw draft, block 8 | 131,072 / fp8 | not published; SM 1.74 GHz in its soak | 98.2 prose, 225.1 code (thinking off); 227.0 prose, 195.4 code (thinking on); decode only |
 | [r0b0tlab](https://github.com/r0b0tlab/qwen38-exl3-dflash2) | 4.00 bpw | DFlash2 | 8,192 / FP16 in this run | 350 W cap | 162.9 GSM8K (in-process, per request) |
 
 What differs:
 
-- **Prompts.** Only GSM8K is shared: eta 153.3 at 250 W vs r0b0tlab 162.9 at 350 W on the
-  same 40 questions ([details](#gsm8k-the-same-test-as-r0b0tlabs-published-number)).
+- **Prompts.** Only GSM8K is shared: eta 202.9 vs r0b0tlab 162.9 (+24.6 %), both at a 350 W cap, same
+  40 questions ([details](#gsm8k-the-same-test-as-r0b0tlabs-published-number)).
   trellis-serve's prose and code panel prompts are not published.
 - **Metric.** trellis-serve reports decode only: (completion tokens − 1) / (last − first
   streamed token). eta's lane and GSM8K rates divide by the whole request wall time; its
-  decode-only figure is RoundBench's 3.89 tokens per 34.2 ms round.
-- **Power.** eta is capped at 250 W. trellis-serve publishes no power limit; its DFlash2
-  soak held the SMs at 1.74 GHz, against eta's 1.03 GHz median. On an older eta stack,
-  350 W instead of 250 W gave +38.5 % tok/s on the same calls ([What 250 W costs](#what-250-w-costs)).
+  decode-only figures: RoundBench 3.89 tokens per 25.7 ms round (1K); GSM8K 5.66 tokens per
+  26.3 ms round (*computed*, regression over 200 requests).
+- **Power.** eta and r0b0tlab: 350 W cap. trellis-serve publishes no power limit; its DFlash2
+  soak held the SMs at 1.74 GHz, against eta's 1.51 GHz median per call. eta at 250 W:
+  −24 % tok/s at the same tok/J ([250 W vs 350 W](#250-w-vs-350-w)).
 - **Bits.** 3.00 bpw reads 25 % fewer weight bits per token than 4.00 bpw (*computed*),
   at a larger quantization error; quality is not compared here.
 - **Cost per verify step** (*computed*: reported tok/s ÷ reported accept length, assuming
   the accept length counts the bonus token): trellis-serve 23.4-24.9 ms at short context,
-  eta 34.2 ms at 1K and 35.0 ms at 8K. Tokens per step at temperature 0: trellis-serve
-  2.25-3.48 (MTP) and 2.45-5.65 (DFlash2) on its panel; eta 3.93 on the lane's C1 rows,
-  5.70 on GSM8K.
+  eta 25.7 ms at 1K and 26.5 ms at 8K (RoundBench, 350 W). Tokens per step at temperature 0:
+  trellis-serve 2.25-3.48 (MTP) and 2.45-5.65 (DFlash2) on its panel; eta 3.93 on the lane's
+  C1 rows, 5.66 on GSM8K.
 
-Longest prompt shown working: eta 262,136 tokens (537 s prefill); r0b0tlab 262,080 (needle
-test); trellis-serve 208,858 (MTP, 294 s to first token) and 126,782 (DFlash2, 187 s).
-eta also reports energy, 0.495 tok/J on the lane and 0.616 on GSM8K; no other row
+Longest prompt shown working: eta 262,136 tokens (537 s prefill at 250 W); r0b0tlab 262,080
+(needle test); trellis-serve 208,858 (MTP, 294 s to first token) and 126,782 (DFlash2, 187 s).
+eta also reports energy at 350 W: 0.497 tok/J on the lane, 0.617 on GSM8K; no other row
 publishes tok/J.
 
-In short: trellis-serve's DFlash2 recipe reports the fastest decode in this table, 225-227
-tok/s on its code and thinking-on prose panels, with 3.00 bpw weights, a 131K window and SM
-clocks 1.7× eta's median (*computed*); its README headline (MTP) reports 96-141 tok/s. eta
-serves the full 262K window with 4.00 bpw weights under a 250 W cap. No row shares both
-eta's prompts and its power; r0b0tlab's GSM8K shares the prompts only.
+In short: same test, same 350 W cap: eta 202.9 vs r0b0tlab 162.9 tok/s (+24.6 %).
+trellis-serve's DFlash2 recipe reports 225-227 tok/s decode only on its code and thinking-on
+prose panels (3.00 bpw, 131K window, SM 1.74 GHz, power unpublished); eta decodes GSM8K at
+214.8 (*computed*) with 4.00 bpw weights and the full 262K window. trellis-serve's README
+headline (MTP) reports 96-141 tok/s.
 
 ## Speed
 
-**Target:** most tok/s at the native 262K context, one RTX 3090, 350 W. **Status** (live `tree3s`, 2026-09-28, measured at 250 W):
+**Target:** most tok/s at the native 262K context, one RTX 3090, 350 W. **Status** (live `tree3s`, 350 W, memory offset 0, 2026-09-28):
 
 | Workload | tok/s | Tokens / round | tok/J |
 |---|---|---|---|
-| **Lane**: 20 calls, AIME 2025 · MMLU-Pro · I3 Logic · LiveCodeBench v6, thinking on, whole request (#67) | **122.33** | — | **0.495** |
-| **GSM8K**: 40 questions, 512 tokens, median of 5 runs | **153.3** | 5.70 | **0.616** |
-| C1 whole request, 1K / 8K / 32K-token prompt, 1,024 tokens out | 140.8 / 54.3 / 21.9 | 5.81 / 3.40 / 3.37 | 0.578 / 0.218 / 0.088 |
-| Decode only, 1K / 8K context (RoundBench, *computed*) | 113.6 / 94.5 | 3.89 / 3.31 | 0.451 / 0.380 |
+| **Lane**: 20 calls, AIME 2025 · MMLU-Pro · I3 Logic · LiveCodeBench v6, thinking on, whole request (#68) | **161.79** | — | **0.497** |
+| **GSM8K**: 40 questions, 512 tokens, median of 5 runs | **202.9** | 5.66 | **0.617** |
+| C1 whole request, 1K / 8K / 32K-token prompt, 1,024 tokens out | 185.3 / 73.3 / 29.0 | 5.81 / 3.40 / 3.37 | 0.578 / 0.217 / 0.085 |
+| Decode only, 1K / 8K context (RoundBench, 12 reps) | 151.1 / 125.2 | 3.89 / 3.31 | 0.456 / 0.380 |
 
-<details><summary>Lane per task (#67)</summary>
+<details><summary>Lane per task (#68, 350 W)</summary>
 
 | Task set | Calls | Budget / call | Output tokens | Wall s | tok/s | Mean W | tok/J | Score | At budget |
 |---|---|---|---|---|---|---|---|---|---|
-| AIME 2025 | 3 | 32,768 | 36,985 | 279.4 | 132.36 | 247.6 | 0.534 | 3/3 | 0 |
-| MMLU-Pro | 10 | 8,192 | 11,991 | 100.7 | 119.08 | 238.5 | 0.499 | 8/10 | 1 |
-| I3 Logic | 4 | 16,384 | 39,876 | 294.3 | 135.49 | 247.9 | 0.546 | 2/4 | 1 |
-| LiveCodeBench v6 | 3 | 16,384 | 36,018 | 346.3 | 104.00 | 248.4 | 0.419 | 1/3 | 2 |
-| **All** | **20** | | **124,870** | **1,020.8** | **122.33** | **247.1** | **0.495** | | **4** |
+| AIME 2025 | 3 | 32,768 | 36,985 | 216.5 | 170.86 | 324.2 | 0.527 | 3/3 | 0 |
+| MMLU-Pro | 10 | 8,192 | 11,991 | 76.4 | 157.01 | 304.4 | 0.516 | 8/10 | 1 |
+| I3 Logic | 4 | 16,384 | 39,876 | 219.8 | 181.45 | 328.3 | 0.553 | 2/4 | 1 |
+| LiveCodeBench v6 | 3 | 16,384 | 36,018 | 259.2 | 138.96 | 329.6 | 0.422 | 1/3 | 2 |
+| **All** | **20** | | **124,870** | **771.8** | **161.79** | **325.2** | **0.497** | | **4** |
 
 - tok/s = completion tokens (reasoning included) / request wall time, prefill and HTTP included.
 - Power: host `nvidia-smi` sampler, 250 ms, over each call.
 
 </details>
 
-<details><summary>Decode rounds (RoundBench: fresh process per repetition, 90 s heat-up, 4 repetitions)</summary>
+<details><summary>Decode rounds (RoundBench: fresh process per repetition, 90 s heat-up)</summary>
 
-| Depth | Mode | ms / round | Tokens / round | tok/s (*computed*) | J / round | tok/J |
-|---|---|---|---|---|---|---|
-| 1K | tree | 34.23 | 3.89 | 113.6 | 8.63 | 0.451 |
-| 8K | tree | 35.01 | 3.31 | 94.5 | 8.71 | 0.380 |
-| 1K | chain (`EXL3_TREE=0`) | 34.29 | 3.39 | 98.9 | 8.65 | 0.392 |
-| 8K | chain (`EXL3_TREE=0`) | 35.03 | 2.90 | 82.8 | 8.78 | 0.330 |
-| 1K | every draft token rejected (`cs12`) | 33.89 | 1.00 | 29.5 | 8.49 | 0.118 |
-| 8K | every draft token rejected (`cs12`) | 34.71 | 1.00 | 28.8 | 8.65 | 0.116 |
+| Power | Depth | Mode | ms / round | Tokens / round | tok/s (*computed*) | J / round | tok/J |
+|---|---|---|---|---|---|---|---|
+| 350 W | 1K | tree | 25.73 | 3.89 | 151.1 | 8.52 | 0.456 |
+| 350 W | 8K | tree | 26.46 | 3.31 | 125.2 | 8.72 | 0.380 |
+| 250 W | 1K | tree | 34.23 | 3.89 | 113.6 | 8.63 | 0.451 |
+| 250 W | 8K | tree | 35.01 | 3.31 | 94.5 | 8.71 | 0.380 |
+| 250 W | 1K | chain (`EXL3_TREE=0`) | 34.29 | 3.39 | 98.9 | 8.65 | 0.392 |
+| 250 W | 8K | chain (`EXL3_TREE=0`) | 35.03 | 2.90 | 82.8 | 8.78 | 0.330 |
+| 250 W | 1K | every draft token rejected (`cs12`) | 33.89 | 1.00 | 29.5 | 8.49 | 0.118 |
+| 250 W | 8K | every draft token rejected (`cs12`) | 34.71 | 1.00 | 28.8 | 8.65 | 0.116 |
+
+- 350 W: memory offset 0, 12 paired reps; 250 W: memory −1500, 4 reps.
 
 </details>
 
@@ -92,7 +95,8 @@ eta's prompts and its power; r0b0tlab's GSM8K shares the prompts only.
 |---|---|---|
 | The draft never changes the text | invariance gate (`cs10`): 15 prompts × normal / capped / all-rejected draft | 45/45 identical token ids |
 | Speedups never change the text | lane 20 + C1 15 answers, `cs10` → `cs11` → `cs12` → `tree3s` | byte-identical |
-| | GSM8K 40 answers × 16 runs, `cs12` + `tree3s` | byte-identical |
+| Power and clocks never change the text | lane 20 + C1 15 answers, 250 W (#67) vs 350 W (#68); memory offsets 0 … −2000 (RoundBench ids) | byte-identical |
+| | GSM8K 40 answers × 21 runs, `cs12` + `tree3s`, 250 W + 350 W | byte-identical |
 | Forced chain = old engine | `EXL3_TREE_FORCE_CHAIN=1` vs `cs12`, 17 prompts: ids, every round, drafted ids, usage | identical |
 | Accept / commit logic | `bend PROOF.bend`: 41 modules, chain + tree acceptance, speculation invariance over trees | "All terms check." |
 | Kernel changes | GDN state hashes, 1-8 steps (5108); 64 layers × rows 1-8 × 30 graph replays (2113); all 5,040 tree shapes vs the chain kernel (3012) | bit-exact |
@@ -107,7 +111,7 @@ eta's prompts and its power; r0b0tlab's GSM8K shares the prompts only.
 | | |
 |---|---|
 | Context / cache | 262,144 / 270,336 tokens, 3-bit K and V |
-| Longest prompt run | 262,136 tokens, prefill 537 s (`cs10`) |
+| Longest prompt run | 262,136 tokens, prefill 537 s (`cs10`, 250 W) |
 | KV size | 12 KiB / token: only 16 of 64 layers keep KV; 3.1 GiB at 270,336 tokens (*computed*) |
 | GPU memory, live | 21,888 / 24,576 MiB |
 
@@ -115,36 +119,40 @@ eta's prompts and its power; r0b0tlab's GSM8K shares the prompts only.
 
 [`bench/gsm8k_compare.py`](bench/gsm8k_compare.py) = r0b0tlab's [`acceptance_check.py`](https://github.com/r0b0tlab/qwen38-exl3-dflash2/blob/main/scripts/acceptance_check.py) workload: first 40 GSM8K test questions (pinned), raw ChatML, greedy, 512 tokens, mean of per-request tok/s.
 
-| | r0b0tlab (published) | eta `cs12` (11 runs) | eta `tree3s` (live, 5 runs) |
-|---|---|---|---|
-| Power | 350 W cap; 336 W mean (their telemetry, another run) | 250 W cap; 249.4 W median | 250 W cap; 249.4 W median |
-| Engine | ExLlamaV3 `355c6ee`, unpatched | + 36 patches | + 41 patches |
-| Context / KV | 8,192 / FP16 | 262,144 (cache 270,336) / 3-bit | same |
-| Transport | in-process `generate()` | HTTP `/v1/completions` | same |
-| tok/s | 162.9 | 148.8 median (147.9-154.3) | **153.3** median (151.9-159.7) |
-| Tokens / round | 5.657 | 5.552 | 5.695 |
-| Answers at the 512-token cap | 5/40 | 4/40 | 4/40 |
-| tok/J | not published | 0.598 median (0.593-0.623) | **0.616** median (0.610-0.646) |
-
-- Answers: byte-identical across all 16 eta runs.
-- Tree gain: +3.0 % here vs +9.4 % on the lane; the chain already commits 5.55 of 8 tokens per round.
-- Spread: fresh window, quiet host fastest (`cs12` 153.9-154.3, `tree3s` 159.7); warm card (67 °C) slower; host load ≈ 10: 148.8 (`cs12`); live endpoint, idle host: 161.9 (`cs12`, 34.0 ms/round).
-
-## What 250 W costs
-
-`cs5`, memory offset 0, 3 AIME 2025 calls, 35,081 tokens, token-identical:
-
-| Power cap | tok/s | Mean W | tok/J | SM clock |
+| | r0b0tlab (published) | eta `cs12`, 250 W (11 runs) | eta `tree3s`, 250 W (5 runs) | eta `tree3s`, 350 W (live, 5 runs) |
 |---|---|---|---|---|
-| 350 W (#56) | 158.90 | 322.8 | 0.492 | 1,455-1,479 MHz |
-| 250 W (#57) | 114.69 | 247.9 | 0.463 | 892-1,042 MHz |
+| Power | 350 W cap; 336 W mean (their telemetry, another run) | 250 W cap; 249.4 W median | 250 W cap; 249.4 W median | 350 W cap; 329.5 W median |
+| Engine | ExLlamaV3 `355c6ee`, unpatched | + 36 patches | + 41 patches | + 41 patches |
+| Context / KV | 8,192 / FP16 | 262,144 (cache 270,336) / 3-bit | same | same |
+| Transport | in-process `generate()` | HTTP `/v1/completions` | same | same |
+| tok/s | 162.9 | 148.8 median (147.9-154.3) | 153.3 median (151.9-159.7) | **202.9** median (200.2-203.7) |
+| Tokens / round | 5.657 | 5.552 | 5.695 | 5.695 |
+| Answers at the 512-token cap | 5/40 | 4/40 | 4/40 | 4/40 |
+| tok/J | not published | 0.598 median (0.593-0.623) | 0.616 median (0.610-0.646) | **0.617** median (0.604-0.637) |
+
+- Same test, same 350 W cap: eta +24.6 % over r0b0tlab.
+- Answers: byte-identical across all 21 eta runs (both images, both caps).
+- Tree gain (250 W): +3.0 % here vs +9.4 % on the lane; the chain already commits 5.55 of 8 tokens per round.
+- Spread: fresh window, quiet host fastest (250 W: `cs12` 153.9-154.3, `tree3s` 159.7; 350 W: 203.7); warm card slower.
+
+## 250 W vs 350 W
+
+Same image, token-identical outputs:
+
+| Workload | Cap, memory offset | tok/s | Mean W | tok/J | SM clock |
+|---|---|---|---|---|---|
+| Lane, `tree3s` (#67) | 250 W, −1500 | 122.33 | 247.1 | 0.495 | 1,029 MHz median per call |
+| Lane, `tree3s` (#68) | 350 W, 0 | **161.79** | 325.2 | **0.497** | 1,511 MHz median per call |
+| GSM8K, `tree3s` | 250 W, −1500 | 153.3 | 249.4 | 0.616 | — |
+| GSM8K, `tree3s` | 350 W, 0 | **202.9** | 329.5 | **0.617** | — |
+| 3 AIME calls, `cs5` (#57 / #56) | 250 W / 350 W, 0 | 114.69 / 158.90 | 247.9 / 322.8 | 0.463 / 0.492 | 892-1,042 / 1,455-1,479 MHz |
 
 ## How
 
 | Lever | Measured |
 |---|---|
-| DFlash2 draft: one pass proposes 7 tokens from the target's hidden states | 1.00 → 3.39 tokens / round, 29.5 → 98.9 tok/s (1K, ~34 ms / round either way) |
-| 8-row token tree: 7 nodes best-first; commit the longest matching root path + 1 | 3.39 → 3.89 tokens / round (1K); lane 111.85 → 122.33 tok/s; round time unchanged |
+| DFlash2 draft: one pass proposes 7 tokens from the target's hidden states | 1.00 → 3.39 tokens / round, 29.5 → 98.9 tok/s (1K, 250 W, ~34 ms / round either way) |
+| 8-row token tree: 7 nodes best-first; commit the longest matching root path + 1 | 3.39 → 3.89 tokens / round (1K); lane 111.85 → 122.33 tok/s (250 W); round time unchanged |
 | 1-8 verify rows share one weight pass (16-row tensor-core tiles) | 16 rows: +21 % per verify forward |
 | 4-bit EXL3 weights | 15.4 GiB target + 1.2 GiB draft |
 | 41 engine patches, each bit-exact or numerics-gated | per area below |
@@ -165,7 +173,7 @@ eta's prompts and its power; r0b0tlab's GSM8K shares the prompts only.
 
 </details>
 
-<details><summary>Where one verify round goes (CUPTI trace, <code>cs12</code>: 31.77 ms / round, 6.17 tokens / round)</summary>
+<details><summary>Where one verify round goes (CUPTI trace, <code>cs12</code>, 250 W: 31.77 ms / round, 6.17 tokens / round)</summary>
 
 | Phase | ms / round | % | Note |
 |---|---|---|---|
@@ -198,7 +206,8 @@ Kept lane runs. Compare within one protocol only.
 | #60 | cs10 | v4: v3 + declared memory offset −1500 MHz | 250 W | 107.03 | 0.433 |
 | #61, #62 | cs11 | v4 | 250 W | 109.65, 109.81 | 0.444, 0.444 |
 | #63 | cs12 | v4 | 250 W | 111.85 | 0.452 |
-| **#67** | **tree3s (live)** | v4 | 250 W | **122.33** | **0.495** |
+| #67 | tree3s | v4 | 250 W | 122.33 | 0.495 |
+| **#68** | **tree3s (live)** | v5: v4 tasks at 350 W, memory offset 0 | 350 W | **161.79** | **0.497** |
 
 Every change and every dropped attempt: [docs/benchmarks.md](docs/benchmarks.md).
 
@@ -233,7 +242,7 @@ python3 -m bench.gsm8k_compare --api-key-file /path/to/api-key --data gsm8k-test
 | GPU | RTX 3090 24 GiB (GA102, SM86), VBIOS 94.02.42.80.1F, PCIe 4.0 ×16, driver 595.71.05 |
 | Power, clocks | **350 W** cap since 2026-09-28 (250 W before); core +0; memory +0 (stock; −1500 MHz at 250 W); NixOS `nvidia-quiet-power-limit.service`; the lane checks all three via NVML |
 | Fans | CoolerControl: 70 % at 70 °C, 77 % at 80 °C, 80 % at 84 °C, 100 % at 90 °C; above 83 °C the card lowers its clocks |
-| Under load, 350 W | 337 W mean; SM mean 1,533 MHz; 77-81 °C; fan 77-78 %; throttle: power cap only (3 min, fine-tune data job) |
+| Under load, 350 W (#68) | 325.2 W mean; SM per-call mean 1,240-1,618 MHz (median 1,511); 77 °C median, 83 °C max; fan 75 % median, 79 % max; throttle: power cap (thermal slowdown: 1 of 355 samples in a 30 min soak) |
 | Under load, 250 W (#67) | 247.1 W mean; SM per-call mean 957-1,194 MHz (median 1,029); ≤ 68 °C |
 | Host | Ryzen 7 5800X (8 cores / 16 threads), 125.7 GiB, NixOS 26.05, Linux 6.18.50 |
 | Runtime | rootless Docker 29.7.2, CDI, read-only root; Ubuntu 24.04 CUDA base; Python 3.13.10, PyTorch 2.10.0+cu130, CUDA 13.0.96, cuBLAS 13.1.0.3, Triton 3.6.0 |
@@ -253,6 +262,8 @@ python3 -m bench.gsm8k_compare --api-key-file /path/to/api-key --data gsm8k-test
   p = 0.28775 each; normal and all-rejected draft agree). Compare at equal request params.
 - Speed varies with the text (3.37-6.69 tokens / round), host CPU load and card temperature.
 - Quality: lane samples only. Full Prime Envs suite and 4-bit vs BF16 loss: not measured.
+- Long-context reasoning with 3-bit KV vs fp16 KV: not measured.
+- GDDR6X temperature is not readable on this card; memory runs at the stock clock.
 - In progress: DFlash2 fine-tune on the target's own outputs (prompts disjoint from all eval sets).
 ```
 
