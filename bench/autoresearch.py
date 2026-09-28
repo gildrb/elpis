@@ -54,7 +54,7 @@ METRIC_NAMES = (
     *(f"c1_request_tok_s_{depth}" for depth in exl3.DEPTHS),
 )
 OPTIONAL_METRIC = "spec_accept_length"
-SUITE_PROTOCOL = "exl3-native-broad-c1-request-v6"
+SUITE_PROTOCOL = "exl3-native-broad-c1-request-v5"
 SUITE_ORDER = (*(taskset.name for taskset in exl3.TASKSETS), "c1")
 SUITE_SCOPE = (
     "exl3_bend_sampled_broad_tasksets_and_c1_whole_request_not_full_qualification"
