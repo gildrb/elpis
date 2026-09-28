@@ -6,6 +6,49 @@ capped at 250 W. Bend states and proves the decision logic the serving path must
 get right; every speedup below left the model's greedy output unchanged.
 Optimize C1 agent latency and useful code/reasoning output at native context.
 
+## How it compares with other RTX 3090 results for this model
+
+Other projects' figures below are quoted from their repositories, not re-run here. No
+other result shares eta's prompts, power cap and metric, so read this as what each
+project reports, not as a ranking.
+
+| One RTX 3090 | Weights | Speculation | Context / KV | Power | Reported tok/s |
+|---|---|---|---|---|---|
+| **eta, this repo** (measured) | 4.00 bpw | DFlash2 + 8-row token tree | 262,144 / 3-bit | 250 W cap; SM 0.96-1.19 GHz under load | **122.3** reasoning + code lane, **153.3** GSM8K (whole request, prefill included); 113.6 decode only at 1K context (*computed*) |
+| [trellis-serve](https://github.com/0xSero/trellis-serve/tree/1ace59c4b43ca16a50fb6b7acf8b3fd7e2351f96) README headline, by 0xSero | 3.00 bpw | MTP, 3 steps / 4 tokens | 212,992 / fp8 | not published | 96.2 prose, 141.1 code (thinking off); 141.3 prose, 129.3 code (thinking on); decode only ([sweep](https://github.com/0xSero/local-ai-registry/blob/c6e6f4c796304229a3c11442af6f09673180d4f6/data/registry/speed-sweep/qwen38-27b-exl3-3bpw-mtp-vision-rtx3090-sglang-tp1-sweep.json)) |
+| trellis-serve's fastest 3090 recipe ([DFlash2](https://github.com/0xSero/local-ai-registry/blob/c6e6f4c796304229a3c11442af6f09673180d4f6/data/registry/recipe/qwen38-27b-exl3-3bpw-dflash2-rtx3090-sglang-tp1.json), registry status "candidate") | 3.00 bpw | DFlash2, 5.0 bpw draft, block 8 | 131,072 / fp8 | not published; SM 1.74 GHz in its soak | 98.2 prose, 225.1 code (thinking off); 227.0 prose, 195.4 code (thinking on); decode only |
+| [r0b0tlab](https://github.com/r0b0tlab/qwen38-exl3-dflash2) | 4.00 bpw | DFlash2 | 8,192 / FP16 in this run | 350 W cap | 162.9 GSM8K (in-process, per request) |
+
+What differs:
+
+- **Prompts.** Only GSM8K is shared: eta 153.3 at 250 W vs r0b0tlab 162.9 at 350 W on the
+  same 40 questions ([details](#gsm8k-the-same-test-as-r0b0tlabs-published-number)).
+  trellis-serve's prose and code panel prompts are not published.
+- **Metric.** trellis-serve reports decode only: (completion tokens − 1) / (last − first
+  streamed token). eta's lane and GSM8K rates divide by the whole request wall time; its
+  decode-only figure is RoundBench's 3.89 tokens per 34.2 ms round.
+- **Power.** eta is capped at 250 W. trellis-serve publishes no power limit; its DFlash2
+  soak held the SMs at 1.74 GHz, against eta's 1.03 GHz median. On an older eta stack,
+  350 W instead of 250 W gave +38.5 % tok/s on the same calls ([What 250 W costs](#what-250-w-costs)).
+- **Bits.** 3.00 bpw reads 25 % fewer weight bits per token than 4.00 bpw (*computed*),
+  at a larger quantization error; quality is not compared here.
+- **Cost per verify step** (*computed*: reported tok/s ÷ reported accept length, assuming
+  the accept length counts the bonus token): trellis-serve 23.4-24.9 ms at short context,
+  eta 34.2 ms at 1K and 35.0 ms at 8K. Tokens per step at temperature 0: trellis-serve
+  2.25-3.48 (MTP) and 2.45-5.65 (DFlash2) on its panel; eta 3.93 on the lane's C1 rows,
+  5.70 on GSM8K.
+
+Longest prompt shown working: eta 262,136 tokens (537 s prefill); r0b0tlab 262,080 (needle
+test); trellis-serve 208,858 (MTP, 294 s to first token) and 126,782 (DFlash2, 187 s).
+eta also reports energy, 0.495 tok/J on the lane and 0.616 on GSM8K; no other row
+publishes tok/J.
+
+In short: trellis-serve's DFlash2 recipe reports the fastest decode in this table, 225-227
+tok/s on its code and thinking-on prose panels, with 3.00 bpw weights, a 131K window and SM
+clocks 1.7× eta's median (*computed*); its README headline (MTP) reports 96-141 tok/s. eta
+serves the full 262K window with 4.00 bpw weights under a 250 W cap. No row shares both
+eta's prompts and its power; r0b0tlab's GSM8K shares the prompts only.
+
 ## Current numbers
 
 Live image `tree3s` (`sha256:ec9751b0…`, the patch series of commit `c10606d`: `cs12` plus
