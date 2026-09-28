@@ -49,9 +49,11 @@ GPU_NAME = "NVIDIA GeForce RTX 3090"
 POWER_LIMIT_WATTS = 350.0
 # Declared clock-vs-voltage offsets (host NixOS policy, applied with the power limit at boot and
 # resume). At 350 W stock memory is fastest (RoundBench memsweep350, 12 paired reps, bit-exact,
-# 0 Xid; vs -1500: 0 +5.4 % tok/s / +6.4 % tok/J, -500 +3.7 %, -1000 +1.8 %, -2000 -1.8 %).
-# At the former 250 W cap the opposite held (-1500 best).
-CORE_CLOCK_OFFSET_MHZ = 0
+# 0 Xid; vs -1500: 0 +5.4 % tok/s / +6.4 % tok/J, -500 +3.7 %, -1000 +1.8 %, -2000 -1.8 %;
+# at the former 250 W cap -1500 was best). A positive core offset is an undervolt at the cap
+# (coresweep350, 10 paired reps, bit-exact, 0 Xid; vs 0: +60 +0.5 %, +120 +1.0 % tok/s and
+# +1.7 % tok/J, +150 +0.8 % / +1.9 %).
+CORE_CLOCK_OFFSET_MHZ = 120
 MEMORY_CLOCK_OFFSET_MHZ = 0
 NVML_LIBRARY = "/run/opengl-driver/lib/libnvidia-ml.so.1"
 DRAFT_PROPOSALS = 7
@@ -829,8 +831,9 @@ class NativeTaskset:
     """Module whose hardcoded DATASET_NAME/DATASET_REVISION must equal the lock."""
 
 
-# Frozen order of protocol exl3-native-broad-c1-request-v5 (= v4 tasks and offsets at the
-# declared 350 W; v4 = v3 tasks + the declared clock offsets); C1 runs afterwards.
+# Frozen order of protocol exl3-native-broad-c1-request-v6 (= v4 tasks at the declared 350 W,
+# core +120 / memory 0 MHz; v5: core 0; v4 = v3 tasks + the declared clock offsets); C1 runs
+# afterwards.
 # v3 = v2 with mmlu-pro 20 -> 10 and i3-logic 6 -> 4 tasks (the first tasks of the same
 # native shuffles): v2 took 1935-2084 s at 350 W and did not fit its 2400 s deadline at
 # the former 250 W operating point.

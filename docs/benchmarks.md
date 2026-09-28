@@ -9,7 +9,8 @@ native context 262144, CQ3 cache) on one RTX 3090. The frozen lane below is prot
 | v2 | AIME 2025 ×3, MMLU-Pro ×20, I3 Logic ×6, LiveCodeBench ×3 + C1 | 350 W; offsets not declared (stock) |
 | v3 | v2 with MMLU-Pro ×10, I3 Logic ×4 (the first tasks of the same native shuffles; v2 did not fit its 2400 s deadline at 250 W) | 250 W; offsets not declared (stock) |
 | v4 | v3 tasks | 250 W; core 0, memory −1500 MHz |
-| **v5** (since 2026-09-28) | v3 tasks | **350 W; core 0, memory 0** |
+| v5 | v3 tasks | 350 W; core 0, memory 0 |
+| **v6** (since 2026-09-28) | v3 tasks | **350 W; core +120, memory 0** |
 
 - Each version is a new comparison segment with a fresh baseline; numbers do not carry across versions or to `exl3-native-math3-c1-request-v1` (math-only primary).
 - `aime25_*` keeps the v1 math definition (same producer, tasks, config and budget): a whole-stack comparison only.
@@ -216,10 +217,11 @@ Not measured by this lane: TTFT, committed decode throughput, power/energy and
 
 ## 3. Power
 
-| Since | Declared cap | Memory offset | Fan curve (host, CoolerControl) | Why |
+| Since | Declared cap | Core / memory offset | Fan curve (host, CoolerControl) | Why |
 |---|---|---|---|---|
-| 2026-09-25 | 250 W | −1500 MHz (from 2026-09-26) | 100 % at 75 °C | 350 W with that curve was too loud |
-| 2026-09-28 (v5) | 350 W | 0 (stock) | ≤ 80 % up to 84 °C, 100 % at 90 °C; above 83 °C the card lowers its own clocks | quiet at 350 W; 350 W measured 0.492 vs 0.463 tok/J at 250 W (`cs5`, §6) |
+| 2026-09-25 | 250 W | 0 / −1500 MHz (memory from 2026-09-26) | 100 % at 75 °C | 350 W with that curve was too loud |
+| 2026-09-28 (v5) | 350 W | 0 / 0 (stock) | ≤ 80 % up to 84 °C, 100 % at 90 °C; above 83 °C the card lowers its own clocks | quiet at 350 W; 350 W measured 0.492 vs 0.463 tok/J at 250 W (`cs5`, §6) |
+| 2026-09-28 (v6) | 350 W | **+120 / 0 MHz** | same | core sweep below |
 
 Memory offset at 350 W (RoundBench, tree3s, C1 1K / 8K, 12 paired reps per arm, 2026-09-28):
 
@@ -232,7 +234,18 @@ Memory offset at 350 W (RoundBench, tree3s, C1 1K / 8K, 12 paired reps per arm, 
 | −2000 | −1.84 / −1.73 % | −2.57 / −2.11 % | 1,582 | yes | 0 |
 
 - At 350 W the round is memory-bandwidth sensitive: memory clock beats SM clock. At 250 W the reverse held (§6).
-- Positive offsets (memory overclock) not tested: GDDR6X temperature is not readable on this card.
+- Positive offsets (memory overclock) not tested: GDDR6X temperature is not readable on this card (NVML: not supported); user decision 2026-09-28: stay at stock.
+
+Core offset at 350 W, memory 0 (RoundBench, tree3s, C1 1K / 8K, 10 paired reps per arm, 2026-09-28):
+
+| Offset | Δ tok/s vs 0 | Δ tok/J vs 0 | SM MHz mean (1K) | Bit-exact | Xid |
+|---|---|---|---|---|---|
+| 0 | ref: 25.81 / 26.55 ms per round | ref: 0.452 / 0.378 | 1,492 | ref | 0 |
+| +60 | +0.49 ±0.14 / +0.62 ±0.14 % | +0.98 ±0.68 / +0.58 ±0.55 % | 1,530 | yes | 0 |
+| **+120** | **+0.92 ±0.68 / +1.03 ±0.19 %** | **+1.73 ±1.07 / +1.59 ±0.65 %** | 1,557 | yes | 0 |
+| +150 | +0.79 ±0.48 / +0.85 ±0.38 % | +2.22 ±0.78 / +1.61 ±0.86 % | 1,583 | yes | 0 |
+
+- Adopted +120 (user, 2026-09-28): best tok/s; 105 MHz below the +225 MHz that faulted (Xid 109) at 250 W.
 
 - Applied by the host (`nvidia-quiet-power-limit.service`, boot and resume); the lane checks it, never changes it.
 - Segments at different caps are not comparable.

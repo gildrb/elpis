@@ -6,12 +6,12 @@ umask 077
 if [[ ${1:-} == --help || ${1:-} == -h ]]; then
     cat <<'USAGE'
 Usage: bash autoresearch.sh
-Protocol exl3-native-broad-c1-request-v5: EXL3 + native DFlash2 serving, with the
+Protocol exl3-native-broad-c1-request-v6: EXL3 + native DFlash2 serving, with the
 Bend acceptance identity and engine patch manifest recorded when the image bakes
-them (explicit null when absent). v5 = the v4 tasks and clock offsets at a declared
-350 W (v4: 250 W). A new comparison segment: not comparable to v4, v2 (350 W, 20
-mmlu-pro / 6 i3-logic tasks), exl3-native-math3-c1-request-v1 or earlier segments;
-it needs a fresh baseline.
+them (explicit null when absent). v6 = the v4 tasks at a declared 350 W with clock
+offsets core +120 / memory 0 MHz (v5: core 0; v4: 250 W). A new comparison segment:
+not comparable to v5, v4, v2 (350 W, 20 mmlu-pro / 6 i3-logic tasks),
+exl3-native-math3-c1-request-v1 or earlier segments; it needs a fresh baseline.
 Required private operator descriptor (no inferred inputs or environment fallback):
   /run/user/1000/eta-autoresearch-operator.json
 Exactly these JSON keys (replace placeholders; schema_version is integer 1):
@@ -30,7 +30,7 @@ Docker access (read-only inspect, one read-only in-container hashing probe via
 docker exec, and the native evaluator's own sandbox containers), host nvidia-smi,
 and a healthy owned EXL3 instance at http://127.0.0.1:18020 serving qwen3.8-27b
 with max_model_len 262144, target/draft mounted under /models, on one RTX 3090 at
-350 W with clock offsets core 0 / memory 0 MHz (host policy; checked, never set). The server must accept the native client's identity sampling fields
+350 W with clock offsets core +120 / memory 0 MHz (host policy; checked, never set). The server must accept the native client's identity sampling fields
 (top_p 1, min_p 0, frequency/presence penalty 0, repetition penalty 1).
 Rootless Docker is fixed to unix:///run/user/1000/docker.sock.
 The prepared Python supervisor enters pinned offline Nix only for its worker;
