@@ -1467,21 +1467,25 @@ class RawTokenizer:
         return len(self.tokenizer.encode(content, add_special_tokens=False).ids)
 
 
-def corpus_document(source: Path) -> str:
-    """The frozen C1 prompt corpus repeated to cover the deepest row."""
+def corpus_prompts(source: Path) -> list[str]:
+    """The frozen corpus prompts in file order, each a nonempty first turn."""
     prompts: list[str] = []
     for line in source.read_bytes().decode("utf-8").splitlines():
         conversations = sequence(mapping(loads(line)).get("conversations"))
         require(bool(conversations), "Invalid frozen prompt conversations")
         prompts.append(text(mapping(conversations[0]).get("value")))
-    return "\n\n".join(prompts * 96)
+    return prompts
 
 
-def natural_prompt(
+def corpus_document(source: Path) -> str:
+    """The frozen C1 prompt corpus repeated to cover the deepest row."""
+    return "\n\n".join(corpus_prompts(source) * 96)
+
+
+def sized_content(
     tokenizer: RawTokenizer, document_text: str, depth: int, nonce: str
 ) -> tuple[str, int, int]:
     """Cut the corpus so raw content lands within two tokens of the depth."""
-    require(depth in DEPTHS, "Unsupported C1 depth")
     low, high = 0, len(document_text)
     for _ in range(24):
         middle = (low + high) // 2
@@ -1493,7 +1497,15 @@ def natural_prompt(
             low = middle
         else:
             high = middle
-    raise ValueError("C1 depth sizing did not converge")
+    raise ValueError(f"Raw-content sizing did not converge at depth {depth}")
+
+
+def natural_prompt(
+    tokenizer: RawTokenizer, document_text: str, depth: int, nonce: str
+) -> tuple[str, int, int]:
+    """Size one C1 row's raw content; only the frozen C1 depths are accepted."""
+    require(depth in DEPTHS, "Unsupported C1 depth")
+    return sized_content(tokenizer, document_text, depth, nonce)
 
 
 def _row_name(depth: int, repetition: int) -> str:

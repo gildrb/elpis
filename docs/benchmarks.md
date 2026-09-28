@@ -1,8 +1,9 @@
 # Measurement protocol
 
 **Status:** EXL3 with native DFlash2 speculative decoding (greedy, one sequence,
-native context 262144, CQ3 cache) on one RTX 3090. The frozen lane below is protocol
-`exl3-native-broad-c1-request-v5`.
+native context 262144, CQ3 cache) on one RTX 3090. `bash autoresearch.sh` runs the
+cold-prefill suite `exl3-native-prefill-ttft-v1` (§2a); the broad suite
+`exl3-native-broad-c1-request-v5` (§2) stays selectable with `--suite broad`.
 
 | Protocol | Tasks | Declared power, clock offsets |
 |---|---|---|
@@ -10,6 +11,7 @@ native context 262144, CQ3 cache) on one RTX 3090. The frozen lane below is prot
 | v3 | v2 with MMLU-Pro ×10, I3 Logic ×4 (the first tasks of the same native shuffles; v2 did not fit its 2400 s deadline at 250 W) | 250 W; offsets not declared (stock) |
 | v4 | v3 tasks | 250 W; core 0, memory −1500 MHz |
 | **v5** (since 2026-09-28) | v3 tasks | **350 W; core 0, memory 0** |
+| **prefill-ttft-v1** (`exl3-native-prefill-ttft-v1`, since 2026-09-29) | Cold-prefill TTFT ladder 8192 ×3, 32768 ×3, 131072 ×2, 262000 ×1; no tasksets | 350 W; core 0, memory 0 |
 
 - Each version is a new comparison segment with a fresh baseline; numbers do not carry across versions or to `exl3-native-math3-c1-request-v1` (math-only primary).
 - `aime25_*` keeps the v1 math definition (same producer, tasks, config and budget): a whole-stack comparison only.
@@ -33,9 +35,9 @@ gated and its scorer can fall back to a remote LLM judge.
 
 ## 2. Frozen autoresearch lane
 
-`bash autoresearch.sh` (`bench/autoresearch.py` supervisor/worker,
-`bench/exl3.py` identity, native taskset and C1 logic) runs exactly once, in this
-order:
+`python -m bench.autoresearch --suite broad` (`bench/autoresearch.py`
+supervisor/worker, `bench/exl3.py` identity, native taskset and C1 logic; same
+environment as `autoresearch.sh`) runs exactly once, in this order:
 
 | Order | Workload | Frozen selection and settings |
 | --- | --- | --- |
@@ -213,6 +215,45 @@ lines, in this order: `model_call_output_tok_s`; `<ts>_output_tok_s`,
 
 Not measured by this lane: TTFT, committed decode throughput, power/energy and
 262144-token capacity.
+
+## 2a. Cold-prefill suite (`exl3-native-prefill-ttft-v1`)
+
+`bash autoresearch.sh` = `python -m bench.autoresearch --suite prefill` (`bench/prefill.py`). The suite is required, with no default. Operator contract, serving identity, guard checkpoints, 2400 s deadline and evidence retention are those of §2.
+
+| Depth (raw content, ±2 tokens) | Repetitions | Rendered prompt tokens (live plan, 2026-09-29) |
+|---|---|---|
+| 8192 | 3 | 8244 |
+| 32768 | 3 | 32821 |
+| 131072 | 2 | 131122 |
+| 262000 | 1 | 262052 (+ 32 ≤ 262144) |
+
+| Item | Frozen definition |
+|---|---|
+| Row content | `[prefill measurement R of N at depth D]`, newline, corpus prefix, blank line, the C1 instruction; sized by binary search on the served tokenizer (no specials) |
+| Corpus | the 8 `bench/throughput-prompts.jsonl` prompts joined by a blank line as in C1, repeated to ≥ 1.05 × 262000 tokens (382 passes, 275803 tokens); short coverage rejects |
+| Requests per row | TTFT: `max_tokens` 1; then continuation: same messages, `max_tokens` 32. Greedy, `top_p` 1, `n` 1, non-streaming, concurrency 1, ascending depth, repetitions consecutive |
+| Freeze | both request bodies written and rendered (`/v1/chat/completions/render`) before any generation; rendered ID count and sha256 recorded; both renders must be identical |
+| Clock | monotonic, request send through complete response body |
+| Row admission | TTFT: `prompt_tokens` = rendered, `completion_tokens` 1, totals consistent, finish `length`/`stop`, `exl3_spec` per the C1 rule. Continuation: `prompt_tokens` = rendered, 1–32 tokens, `stop` or exactly 32. No overlapping requests; every request inside the identity window |
+| Recorded per row | TTFT and continuation text (`content`, `reasoning_content`), continuation text sha256, `exl3_spec` |
+
+| METRIC (print order) | Definition |
+|---|---|
+| `prefill_tok_s` (primary) | geometric mean over the four depths of `prefill_tok_s_<d>` |
+| `prefill_tok_s_<d>` | sum of native `prompt_tokens` / sum of TTFT wall seconds at depth d |
+| `ttft_s_<d>` | mean TTFT wall seconds at depth d |
+| `reuse_request_s_<d>` | mean continuation wall seconds at depth d (informational) |
+| `elapsed_seconds` | whole command, as §2 |
+
+| Guarantee / limit | Detail |
+|---|---|
+| Cold prefill | the leading nonce makes each row's first 256-token KV page unique, so no page of any TTFT request matches an earlier request of the ladder; no flush, no warmup |
+| Deterministic nonces | a server instance that already served this ladder would reuse pages; run on a freshly started candidate |
+| TTFT scope | streaming TTFT is unavailable (buffered SSE): TTFT = wall of a 1-token non-streaming request = prefill + first verify round + HTTP |
+| Reuse | continuation reuse is expected, not observed: usage has no cache telemetry |
+| Not measured | quality, reward, decode throughput, power/energy, 262144-token capacity |
+| Comparability | new segment; not comparable with v5 or any earlier protocol |
+| Time budget | estimate from observed cold TTFTs (8K ~6 s, 32K ~25 s, 262K ~445 s): ~1,000–1,200 s including ~45 s of CPU planning and identity captures, inside the 2400 s deadline; an overrun is rejected, never shortened |
 
 ## 3. Power
 

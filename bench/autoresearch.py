@@ -1,10 +1,11 @@
 # Copyright (c) 2026 inference contributors.
-"""Finite EXL3 + Bend native broad-taskset and C1 whole-request measurement; see autoresearch.sh.
+"""Finite EXL3 + Bend lane: one explicitly selected suite; see autoresearch.sh.
 
-This supervisor never operates Docker lifecycle, promotion, power policy or the
-maintenance guardian. The latter must independently recover the owned candidate.
-Only the unchanged native taskset producers, frozen C1 requests and raw-evidence
-replays in ``bench.exl3`` admit results.
+Suites: ``broad`` (native tasksets + C1 whole requests) and ``prefill`` (the
+cold-prefill TTFT ladder in ``bench.prefill``). This supervisor never operates
+Docker lifecycle, promotion, power policy or the maintenance guardian. The
+latter must independently recover the owned candidate. Only the unchanged
+native taskset producers, frozen requests and raw-evidence replays admit results.
 """
 
 from __future__ import annotations
@@ -21,11 +22,12 @@ import stat
 import subprocess
 import sys
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from types import FrameType
 
-from bench import exl3
+from bench import exl3, prefill
 from bench.exl3 import mapping, number, sequence
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -44,28 +46,6 @@ LAUNCH_IDENTITY = {
     "nlink": 1,
 }
 TASKSET_METRICS = ("output_tok_s", "reward", "truncated")
-METRIC_NAMES = (
-    "model_call_output_tok_s",
-    *(
-        f"{taskset.metric}_{name}"
-        for taskset in exl3.TASKSETS
-        for name in TASKSET_METRICS
-    ),
-    *(f"c1_request_tok_s_{depth}" for depth in exl3.DEPTHS),
-)
-OPTIONAL_METRIC = "spec_accept_length"
-SUITE_PROTOCOL = "exl3-native-broad-c1-request-v5"
-SUITE_ORDER = (*(taskset.name for taskset in exl3.TASKSETS), "c1")
-SUITE_SCOPE = (
-    "exl3_bend_sampled_broad_tasksets_and_c1_whole_request_not_full_qualification"
-)
-SUITE_SOURCES = (
-    "autoresearch.sh",
-    "bench/autoresearch.py",
-    "bench/exl3.py",
-    "bench/throughput-prompts.jsonl",
-    "prepare/exl3-manifest.json",
-)
 # Every rejected observation is recorded privately; nothing is retried.
 FAILURES = (
     OSError,
@@ -507,14 +487,42 @@ def model_call_observations(
     }
 
 
-def _freeze(
-    settings: Settings,
-    identity_sha256: str,
-    client: exl3.Client,
-    tokenizer: exl3.RawTokenizer,
+Window = tuple[int, int]
+Metrics = dict[str, float]
+
+
+@dataclass(frozen=True)
+class Suite:
+    """One frozen workload: protocol, metrics, sources and its three worker phases.
+
+    ``freeze`` binds suite inputs before any generation and returns the suite's
+    workload fields; ``collect`` sends the frozen workload once; ``admit``
+    replays raw evidence into metrics plus the suite's admitted.json fields.
+    """
+
+    name: str
+    protocol: str
+    scope: str
+    order: tuple[str, ...]
+    primary_metric: str
+    primary_scope: str
+    metric_names: tuple[str, ...]
+    optional_metrics: tuple[str, ...]
+    sources: tuple[str, ...]
+    record: dict[str, object]
+    trees: tuple[str, ...]
+    freeze: Callable[[Settings, exl3.Client, exl3.RawTokenizer], dict[str, object]]
+    collect: Callable[[Settings, exl3.Client], None]
+    admit: Callable[
+        [Settings, exl3.Evidence, dict[str, object], Window],
+        tuple[Metrics, dict[str, object]],
+    ]
+
+
+def _broad_freeze(
+    settings: Settings, client: exl3.Client, tokenizer: exl3.RawTokenizer
 ) -> dict[str, object]:
-    """Bind taskset inputs, C1 prompts/IDs and producer bytes before any generation."""
-    supervisor = exl3.document(settings.output / "supervisor.json")
+    """Bind taskset inputs and C1 prompts/IDs before any generation."""
     tasksets: dict[str, object] = {}
     for taskset in exl3.TASKSETS:
         inputs = exl3.freeze_taskset(settings.output / taskset.name, taskset)
@@ -528,59 +536,17 @@ def _freeze(
             "call_sampling": exl3.expected_call_sampling(taskset),
         }
     plan = exl3.plan_c1(settings.output / "c1", client, tokenizer)
-    sources = sequence(supervisor["sources"])
-    for value in sources:
-        item = mapping(value)
-        name = exl3.text(item["path"]).removeprefix("sources/")
-        require(
-            item.get("sha256") == exl3.digest(ROOT / name),
-            f"Benchmark source changed after its initial snapshot: {name}",
-        )
-    workload: dict[str, object] = {
-        "protocol": SUITE_PROTOCOL,
-        "order": list(SUITE_ORDER),
-        "primary_metric": "model_call_output_tok_s",
-        "primary_scope": "every native model call of all four tasksets pooled: sum of completion tokens / sum of model-call wall time",
-        "identity_before_sha256": identity_sha256,
+    return {
         "tasksets": tasksets,
         "c1": {
             "plan_sha256": exl3.digest(settings.output / "c1/plan.json"),
             "rows": plan["rows"],
         },
-        "sources": sources,
     }
-    benchmark = {
-        **supervisor,
-        "workload": workload,
-        "workload_sha256": hashlib.sha256(exl3.canonical(workload)).hexdigest(),
-    }
-    exl3.save(settings.output / "benchmark.json", benchmark)
-    return benchmark
 
 
-def worker(settings: Settings) -> int:
-    """Collect the frozen workloads once, then replay raw-evidence admission."""
-    state = guard(settings)
-    verify_container(settings, state)
-    candidate = mapping(state.get("candidate"))
-    client = exl3.Client(api_key(settings.key_file))
-    before_path = settings.output / "identity-before.json"
-    after_path = settings.output / "identity-after.json"
-    before = exl3.capture_file(settings.container, client, before_path, None)
-    identity = mapping(before["identity"])
-    instance = mapping(identity["container"])
-    require(
-        instance.get("id") == settings.container
-        and instance.get("image") == candidate.get("image"),
-        "Captured identity selected another container or image",
-    )
-    tokenizer_record = mapping(identity["tokenizer"])
-    tokenizer = exl3.RawTokenizer(
-        Path(exl3.text(tokenizer_record["host_path"])),
-        exl3.text(tokenizer_record["sha256"]),
-    )
-    benchmark = _freeze(settings, exl3.digest(before_path), client, tokenizer)
-    frozen_workload = mapping(benchmark["workload"])
+def _broad_collect(settings: Settings, client: exl3.Client) -> None:
+    """Run every native taskset once, then the frozen C1 rows."""
     for taskset in exl3.TASKSETS:
         group = settings.output / taskset.name
         command, cwd = exl3.native_command(group, taskset)
@@ -601,19 +567,19 @@ def worker(settings: Settings) -> int:
         exl3.document(settings.output / "c1/plan.json"),
         lambda: guard(settings),
     )
-    after = exl3.capture_file(settings.container, client, after_path, before_path)
-    evidence = exl3.Evidence(settings.output / "admitted.json")
-    for path in (before_path, after_path):
-        evidence.retain(path)
-    require(after["identity"] == identity, "Measurement changed serving instance")
-    window = (
-        exl3.integer(before["finished_unix_ns"]),
-        exl3.integer(after["started_unix_ns"]),
-    )
+
+
+def _broad_admit(
+    settings: Settings,
+    evidence: exl3.Evidence,
+    frozen_workload: dict[str, object],
+    window: Window,
+) -> tuple[Metrics, dict[str, object]]:
+    """Replay every taskset, the pooled primary and C1 from raw evidence."""
     frozen_tasksets = mapping(frozen_workload["tasksets"])
     qualities: dict[str, object] = {}
     native_calls: dict[str, object] = {}
-    metrics: dict[str, float] = {}
+    metrics: Metrics = {}
     pooled_tokens = 0
     pooled_durations: list[float] = []
     for taskset in exl3.TASKSETS:
@@ -668,7 +634,238 @@ def worker(settings: Settings) -> int:
     metrics.update({
         name: number(value) for name, value in mapping(c1["metrics"]).items()
     })
-    for value in sequence(frozen_workload["sources"]):
+    return metrics, {
+        "quality_scope": "sampled native tasksets (3 AIME25, 20 MMLU-Pro, 6 I3 Logic, 3 LiveCodeBench); native rewards per taskset, no combined quality score",
+        "tasksets": qualities,
+        "native_model_calls": native_calls,
+        "c1": c1,
+        "not_measured": {
+            "ttft": c1["ttft"],
+            "committed_decode_tps": c1["committed_decode_tps"],
+            "power_energy": "not sampled by this lane",
+            "context_capacity": "/v1/models max_model_len is the reported limit, not a 262144-token capacity test",
+        },
+    }
+
+
+def _prefill_freeze(
+    settings: Settings, client: exl3.Client, tokenizer: exl3.RawTokenizer
+) -> dict[str, object]:
+    """Size, freeze and render every ladder row before any generation."""
+    plan = prefill.plan(settings.output / "prefill", client, tokenizer, prefill.LADDER)
+    return {
+        "prefill": {
+            "plan_sha256": exl3.digest(settings.output / "prefill/plan.json"),
+            "rows": plan["rows"],
+        },
+    }
+
+
+def _prefill_collect(settings: Settings, client: exl3.Client) -> None:
+    """Send each frozen row's TTFT then continuation request once, in order."""
+    prefill.run(
+        settings.output / "prefill",
+        client,
+        exl3.document(settings.output / "prefill/plan.json"),
+        lambda: guard(settings),
+    )
+
+
+def _prefill_admit(
+    settings: Settings,
+    evidence: exl3.Evidence,
+    frozen_workload: dict[str, object],
+    window: Window,
+) -> tuple[Metrics, dict[str, object]]:
+    """Replay every ladder row from raw evidence inside the identity window."""
+    result = prefill.admit(evidence, settings.output / "prefill", prefill.LADDER)
+    require(
+        mapping(frozen_workload["prefill"])["plan_sha256"]
+        == exl3.digest(settings.output / "prefill/plan.json"),
+        "Prefill plan differs from the pre-suite frozen workload",
+    )
+    require(
+        all(
+            window[0]
+            < exl3.integer(mapping(mapping(row)[kind])["request_started_unix_ns"])
+            < window[1]
+            for row in sequence(result["rows"])
+            for kind in prefill.BUDGETS
+        ),
+        "Prefill requests fall outside the identity capture window",
+    )
+    guard(settings)
+    metrics = {
+        name: number(value) for name, value in mapping(result["metrics"]).items()
+    }
+    return metrics, {
+        "prefill": result,
+        "not_measured": {
+            "streaming_ttft": prefill.TTFT_SCOPE,
+            "committed_decode_tps": "unavailable: EXL3 exposes no incremental committed counters",
+            "prefix_reuse": "the continuation is expected to reuse the TTFT prefix; usage carries no cache telemetry, so reuse is not observed",
+            "quality": "this suite measures no task quality or reward",
+            "power_energy": "not sampled by this lane",
+        },
+    }
+
+
+BROAD = Suite(
+    name="broad",
+    protocol="exl3-native-broad-c1-request-v5",
+    scope="exl3_bend_sampled_broad_tasksets_and_c1_whole_request_not_full_qualification",
+    order=(*(taskset.name for taskset in exl3.TASKSETS), "c1"),
+    primary_metric="model_call_output_tok_s",
+    primary_scope="every native model call of all four tasksets pooled: sum of completion tokens / sum of model-call wall time",
+    metric_names=(
+        "model_call_output_tok_s",
+        *(
+            f"{taskset.metric}_{name}"
+            for taskset in exl3.TASKSETS
+            for name in TASKSET_METRICS
+        ),
+        *(f"c1_request_tok_s_{depth}" for depth in exl3.DEPTHS),
+    ),
+    optional_metrics=("spec_accept_length",),
+    sources=(
+        "autoresearch.sh",
+        "bench/autoresearch.py",
+        "bench/exl3.py",
+        "bench/throughput-prompts.jsonl",
+        "prepare/exl3-manifest.json",
+    ),
+    record={
+        "tasksets": [
+            {
+                "taskset": taskset.name,
+                "profile": taskset.config,
+                "tasks": taskset.tasks,
+                "rollouts": 1,
+                "shuffle": True,
+                "seed": 0,
+                "output_budget": taskset.output_tokens,
+                "sampling": "eval/configs/local.toml; greedy, thinking enabled; only max_tokens set per taskset",
+            }
+            for taskset in exl3.TASKSETS
+        ],
+        "c1": {
+            "protocol": exl3.C1_PROTOCOL,
+            "depths": list(exl3.DEPTHS),
+            "repetitions": exl3.REPETITIONS,
+            "output_budget": exl3.OUTPUT_TOKENS,
+            "concurrency": 1,
+            "order": "depth_then_repetition",
+            "sampling": {"temperature": 0, "top_p": 1, "n": 1, "stream": False},
+            "cache_policy": "deterministic_per_row_nonce_no_flush_no_warmup",
+        },
+    },
+    trees=(
+        *(
+            f"{taskset.name}/{part}"
+            for taskset in exl3.TASKSETS
+            for part in ("provenance", taskset.name)
+        ),
+        "c1",
+    ),
+    freeze=_broad_freeze,
+    collect=_broad_collect,
+    admit=_broad_admit,
+)
+PREFILL = Suite(
+    name="prefill",
+    protocol="exl3-native-prefill-ttft-v1",
+    scope="exl3_cold_prefill_ttft_ladder_nonstreaming_not_capacity_or_quality",
+    order=("prefill",),
+    primary_metric="prefill_tok_s",
+    primary_scope=prefill.PRIMARY_SCOPE,
+    metric_names=prefill.metric_names(prefill.LADDER),
+    optional_metrics=(),
+    sources=(
+        "autoresearch.sh",
+        "bench/autoresearch.py",
+        "bench/exl3.py",
+        "bench/prefill.py",
+        "bench/throughput-prompts.jsonl",
+        "prepare/exl3-manifest.json",
+    ),
+    record={
+        "prefill": {
+            "protocol": prefill.PROTOCOL,
+            "ladder": [[depth, reps] for depth, reps in prefill.LADDER],
+            "output_budgets": dict(prefill.BUDGETS),
+            "concurrency": 1,
+            "order": prefill.ORDER,
+            "sampling": dict(prefill.SAMPLING),
+            "cache_policy": prefill.CACHE_POLICY,
+        },
+    },
+    trees=("prefill",),
+    freeze=_prefill_freeze,
+    collect=_prefill_collect,
+    admit=_prefill_admit,
+)
+SUITES = {suite.name: suite for suite in (BROAD, PREFILL)}
+
+
+def worker(settings: Settings, suite: Suite) -> int:
+    """Collect the frozen workload once, then replay raw-evidence admission."""
+    state = guard(settings)
+    verify_container(settings, state)
+    candidate = mapping(state.get("candidate"))
+    client = exl3.Client(api_key(settings.key_file))
+    before_path = settings.output / "identity-before.json"
+    after_path = settings.output / "identity-after.json"
+    before = exl3.capture_file(settings.container, client, before_path, None)
+    identity = mapping(before["identity"])
+    instance = mapping(identity["container"])
+    require(
+        instance.get("id") == settings.container
+        and instance.get("image") == candidate.get("image"),
+        "Captured identity selected another container or image",
+    )
+    tokenizer_record = mapping(identity["tokenizer"])
+    tokenizer = exl3.RawTokenizer(
+        Path(exl3.text(tokenizer_record["host_path"])),
+        exl3.text(tokenizer_record["sha256"]),
+    )
+    identity_sha256 = exl3.digest(before_path)
+    supervisor = exl3.document(settings.output / "supervisor.json")
+    fields = suite.freeze(settings, client, tokenizer)
+    sources = sequence(supervisor["sources"])
+    for value in sources:
+        item = mapping(value)
+        name = exl3.text(item["path"]).removeprefix("sources/")
+        require(
+            item.get("sha256") == exl3.digest(ROOT / name),
+            f"Benchmark source changed after its initial snapshot: {name}",
+        )
+    workload: dict[str, object] = {
+        "protocol": suite.protocol,
+        "order": list(suite.order),
+        "primary_metric": suite.primary_metric,
+        "primary_scope": suite.primary_scope,
+        "identity_before_sha256": identity_sha256,
+        **fields,
+        "sources": sources,
+    }
+    benchmark = {
+        **supervisor,
+        "workload": workload,
+        "workload_sha256": hashlib.sha256(exl3.canonical(workload)).hexdigest(),
+    }
+    exl3.save(settings.output / "benchmark.json", benchmark)
+    suite.collect(settings, client)
+    after = exl3.capture_file(settings.container, client, after_path, before_path)
+    evidence = exl3.Evidence(settings.output / "admitted.json")
+    for path in (before_path, after_path):
+        evidence.retain(path)
+    require(after["identity"] == identity, "Measurement changed serving instance")
+    window = (
+        exl3.integer(before["finished_unix_ns"]),
+        exl3.integer(after["started_unix_ns"]),
+    )
+    metrics, admitted = suite.admit(settings, evidence, workload, window)
+    for value in sources:
         item = mapping(value)
         path = settings.output / exl3.text(item["path"])
         require(
@@ -682,33 +879,22 @@ def worker(settings: Settings) -> int:
         evidence.retain(path)
     evidence.tree(settings.output / "sources")
     evidence.tree(settings.output / "logs")
-    for taskset in exl3.TASKSETS:
-        evidence.tree(settings.output / taskset.name / "provenance")
-        evidence.tree(settings.output / taskset.name / taskset.name)
-    evidence.tree(settings.output / "c1")
+    for tree in suite.trees:
+        evidence.tree(settings.output / tree)
     exl3.save(
         settings.output / "admitted.json",
         {
             "schema_version": 1,
             "status": "complete_admitted_measurement",
-            "protocol": SUITE_PROTOCOL,
-            "scope": SUITE_SCOPE,
-            "quality_scope": "sampled native tasksets (3 AIME25, 20 MMLU-Pro, 6 I3 Logic, 3 LiveCodeBench); native rewards per taskset, no combined quality score",
-            "order": list(SUITE_ORDER),
+            "protocol": suite.protocol,
+            "scope": suite.scope,
+            "order": list(suite.order),
             "workload_sha256": benchmark["workload_sha256"],
             "benchmark_sha256": exl3.digest(settings.output / "benchmark.json"),
             "identity": identity,
             "metrics": metrics,
-            "primary_metric": "model_call_output_tok_s",
-            "tasksets": qualities,
-            "native_model_calls": native_calls,
-            "c1": c1,
-            "not_measured": {
-                "ttft": c1["ttft"],
-                "committed_decode_tps": c1["committed_decode_tps"],
-                "power_energy": "not sampled by this lane",
-                "context_capacity": "/v1/models max_model_len is the reported limit, not a 262144-token capacity test",
-            },
+            "primary_metric": suite.primary_metric,
+            **admitted,
             "evidence_sha256": evidence.hashes,
         },
     )
@@ -899,8 +1085,8 @@ def terminate(child: subprocess.Popen[bytes], deadline: float) -> bool:
             os.close(descriptor)
 
 
-def supervise(settings: Settings, started: float) -> int:
-    """Enforce one deadline across capture, every native workload and admission."""
+def supervise(settings: Settings, suite: Suite, started: float) -> int:
+    """Enforce one deadline across capture, every frozen workload and admission."""
     require(not os.path.lexists(settings.output), "Output directory must be fresh")
     state = guard(settings)
     deadline = min(
@@ -913,7 +1099,7 @@ def supervise(settings: Settings, started: float) -> int:
     )
     settings.output.mkdir(mode=0o700)
     try:
-        return supervise_created(settings, started, state, deadline)
+        return supervise_created(settings, suite, started, state, deadline)
     except FAILURES as error:
         exl3.save(
             settings.output / "failure.json",
@@ -929,6 +1115,7 @@ def supervise(settings: Settings, started: float) -> int:
 
 def supervise_created(
     settings: Settings,
+    suite: Suite,
     started: float,
     state: dict[str, object],
     deadline: float,
@@ -936,13 +1123,13 @@ def supervise_created(
     """Use only the fresh output directory exclusively created by this invocation."""
     _enable_subreaper()
     (settings.output / "logs").mkdir(mode=0o700)
-    sources = exl3.snapshot_sources(settings.output, SUITE_SOURCES)
+    sources = exl3.snapshot_sources(settings.output, suite.sources)
     exl3.save(
         settings.output / "supervisor.json",
         {
             "schema_version": 1,
-            "protocol": SUITE_PROTOCOL,
-            "scope": SUITE_SCOPE,
+            "protocol": suite.protocol,
+            "scope": suite.scope,
             "started_monotonic": started,
             "deadline_monotonic": deadline,
             "hard_limit_seconds": LIMIT_SECONDS,
@@ -957,30 +1144,8 @@ def supervise_created(
                 "sha256": settings.operator_sha256,
             },
             "guardian_before": state,
-            "tasksets": [
-                {
-                    "taskset": taskset.name,
-                    "profile": taskset.config,
-                    "tasks": taskset.tasks,
-                    "rollouts": 1,
-                    "shuffle": True,
-                    "seed": 0,
-                    "output_budget": taskset.output_tokens,
-                    "sampling": "eval/configs/local.toml; greedy, thinking enabled; only max_tokens set per taskset",
-                }
-                for taskset in exl3.TASKSETS
-            ],
-            "c1": {
-                "protocol": exl3.C1_PROTOCOL,
-                "depths": list(exl3.DEPTHS),
-                "repetitions": exl3.REPETITIONS,
-                "output_budget": exl3.OUTPUT_TOKENS,
-                "concurrency": 1,
-                "order": "depth_then_repetition",
-                "sampling": {"temperature": 0, "top_p": 1, "n": 1, "stream": False},
-                "cache_policy": "deterministic_per_row_nonce_no_flush_no_warmup",
-            },
-            "order": list(SUITE_ORDER),
+            **suite.record,
+            "order": list(suite.order),
             "sources": sources,
         },
     )
@@ -1004,6 +1169,8 @@ def supervise_created(
                     sys.executable,
                     "-m",
                     "bench.autoresearch",
+                    "--suite",
+                    suite.name,
                     "--worker",
                 ],
                 cwd=ROOT,
@@ -1071,9 +1238,10 @@ def supervise_created(
         require(
             admitted.get("status") == "complete_admitted_measurement"
             and admitted.get("schema_version") == 1
-            and admitted.get("protocol") == SUITE_PROTOCOL
-            and admitted.get("scope") == SUITE_SCOPE
-            and admitted.get("order") == list(SUITE_ORDER),
+            and admitted.get("protocol") == suite.protocol
+            and admitted.get("scope") == suite.scope
+            and admitted.get("order") == list(suite.order)
+            and admitted.get("primary_metric") == suite.primary_metric,
             "Missing complete frozen EXL3 admission",
         )
         benchmark = exl3.document(settings.output / "benchmark.json")
@@ -1086,14 +1254,14 @@ def supervise_created(
             "Admitted measurement is not bound to this complete frozen workload",
         )
         values = mapping(admitted.get("metrics"))
-        names = set(METRIC_NAMES)
+        names = set(suite.metric_names)
         require(
-            set(values) in (names, names | {OPTIONAL_METRIC}),
+            names <= set(values) <= names | set(suite.optional_metrics),
             "Missing or unexpected admitted metrics",
         )
         ordered = [
-            *METRIC_NAMES,
-            *([OPTIONAL_METRIC] if OPTIONAL_METRIC in values else []),
+            *suite.metric_names,
+            *(name for name in suite.optional_metrics if name in values),
         ]
         metrics = {name: number(values[name]) for name in ordered}
         metrics["elapsed_seconds"] = time.monotonic() - started
@@ -1102,7 +1270,7 @@ def supervise_created(
             {
                 "schema_version": 1,
                 "status": "complete_admitted_measurement",
-                "protocol": SUITE_PROTOCOL,
+                "protocol": suite.protocol,
                 "workload_sha256": admitted["workload_sha256"],
                 "metrics": metrics,
                 "admitted_sha256": exl3.digest(settings.output / "admitted.json"),
@@ -1123,14 +1291,32 @@ def supervise_created(
             signal.signal(sig, handler)
 
 
+def arguments(values: list[str]) -> tuple[Suite, bool]:
+    """Parse the required suite choice (no default) and the internal worker flag."""
+    require(bool(values), "A suite is required: --suite broad|prefill")
+    require(
+        values[0] == "--suite" and len(values) >= 2,
+        "Expected --suite broad|prefill first",
+    )
+    suite = SUITES.get(values[1])
+    if suite is None:
+        raise ValueError(f"Unknown suite {values[1]!r}; expected broad or prefill")
+    require(values[2:] in ([], ["--worker"]), "Unexpected arguments after the suite")
+    return suite, values[2:] == ["--worker"]
+
+
 def main() -> int:
     """Run the finite supervisor; preserve sanitized failure diagnostics privately."""
     started = time.monotonic()
     os.umask(0o077)
-    settings: Settings | None = None
+    try:
+        suite, is_worker = arguments(sys.argv[1:])
+    except ValueError as error:
+        sys.stderr.write(f"{error}; use bash autoresearch.sh --help\n")
+        return 2
     try:
         settings = Settings.descriptor()
-        if sys.argv[1:] == ["--worker"]:
+        if is_worker:
             binding = mapping(exl3.loads(sys.stdin.buffer.read(4097)))
             require(
                 binding
@@ -1141,7 +1327,7 @@ def main() -> int:
                 "Worker operator descriptor differs from supervisor startup",
             )
             try:
-                return worker(settings)
+                return worker(settings, suite)
             except FAILURES as error:
                 exl3.save(
                     settings.output / "worker-failure.json",
@@ -1152,8 +1338,7 @@ def main() -> int:
                     },
                 )
                 raise
-        require(len(sys.argv) == 1, "Use bash autoresearch.sh --help")
-        return supervise(settings, started)
+        return supervise(settings, suite, started)
     except FAILURES:
         sys.stderr.write(
             "EXL3 autoresearch rejected; no admitted metrics. Inspect private artifacts.\n"
