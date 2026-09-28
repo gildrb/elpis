@@ -1,17 +1,19 @@
 # Measurement protocol
 
-**Status:** the serving stack is EXL3 with native DFlash2 speculative decoding
-(greedy, one sequence, native context 262144, CQ3 cache) on one RTX 3090. The
-frozen lane below is protocol `exl3-native-broad-c1-request-v3`, a **new
-comparison segment that needs a fresh baseline**. v3 is v2 with mmlu-pro cut from
-20 to 10 tasks and i3-logic from 6 to 4 (the first tasks of the same native
-shuffles), measured at the 250 W operating point: v2 took 1935-2084 s at 350 W
-and does not fit its 2400 s deadline at 250 W. Its primary pools four native
-tasksets, so it is not comparable with v2, `exl3-native-math3-c1-request-v1`
-(math-only primary) or any earlier segment. Only its `aime25_*` metrics keep the
-v1 math definition (same producer, tasks, config and budget); they are a
-whole-stack comparison only. No lane here is full quality, capacity or promotion
-qualification.
+**Status:** EXL3 with native DFlash2 speculative decoding (greedy, one sequence,
+native context 262144, CQ3 cache) on one RTX 3090. The frozen lane below is protocol
+`exl3-native-broad-c1-request-v5`.
+
+| Protocol | Tasks | Declared power, clock offsets |
+|---|---|---|
+| v2 | AIME 2025 ×3, MMLU-Pro ×20, I3 Logic ×6, LiveCodeBench ×3 + C1 | 350 W; offsets not declared (stock) |
+| v3 | v2 with MMLU-Pro ×10, I3 Logic ×4 (the first tasks of the same native shuffles; v2 did not fit its 2400 s deadline at 250 W) | 250 W; offsets not declared (stock) |
+| v4 | v3 tasks | 250 W; core 0, memory −1500 MHz |
+| **v5** (since 2026-09-28) | v3 tasks | **350 W; core 0, memory 0** |
+
+- Each version is a new comparison segment with a fresh baseline; numbers do not carry across versions or to `exl3-native-math3-c1-request-v1` (math-only primary).
+- `aime25_*` keeps the v1 math definition (same producer, tasks, config and budget): a whole-stack comparison only.
+- No lane here is full quality, capacity or promotion qualification.
 
 ## 1. Freeze the comparison
 
@@ -192,6 +194,8 @@ hashed and loaded before and after its run) and evaluator startups. That leaves
 roughly 900 s for longer outputs; output-bound worst cases (every call reaching
 its budget, about 2600 s of generation alone) exceed the deadline. Such a run
 is rejected, never shortened or retried.
+
+Measured end to end: #67 (v4, 250 W) 1,649 s; #68 (v5, 350 W) 1,312 s.
 
 ### Admission and output
 
@@ -598,3 +602,27 @@ Proof boundary. `bend PROOF.bend` covers:
 It does not prove the CUDA or Python code. The kernels' conformance to the models, the floating-point facts that hypothesis
 rests on (an all-masked attention pass leaves (m, l, acc) unchanged; PEEK and ADV share one arithmetic body), and the
 host plumbing are established by the bitwise differentials and rungs above, which are evidence, not proofs.
+
+## 7. Protocol v5: 350 W (2026-09-28)
+
+Declared 350 W, core 0, memory 0 (§3). Image `tree3s` (`sha256:ec9751b0…`), #67's stack unchanged.
+
+| Run | Lane tok/s | tok/J | aime25 / mmlu-pro / i3-logic / lcb tok/s | C1 1K / 8K / 32K tok/s | Accept length | Rewards, truncations | Texts |
+|---|---|---|---|---|---|---|---|
+| #68 | **161.79** | **0.497** | 170.86 / 157.01 / 181.45 / 138.96 | 185.30 / 73.25 / 28.98 | 3.933 | = #67 | 85/85 byte-identical to #67 (250 W) |
+
+- GSM8K (`bench/gsm8k_compare.py`, 5 isolated runs): 202.9 tok/s median (200.2-203.7), 0.617 tok/J; wall = 87 ms + 26.34 ms × rounds over 200 requests; answers identical to all 16 runs at 250 W.
+- RoundBench (memory sweep, offset-0 arm, 12 paired reps): 25.73 ms per round at 1K, 26.46 at 8K.
+- 32K prompt (*computed*: C1 regression intercept, 95 % CI): 26.2 ± 2.4 s at 350 W vs 35.3 ± 4.1 s at 250 W.
+- Lane thermals (quiet curve): 77 °C median, 83 °C max; fan 75 % median, 79 % max. 60-min soak: 81 °C median, 84 °C max; fan 79 % median; thermal slowdown 4 of 657 samples.
+
+**Measured and dropped: tree policy** (CPU simulation on the cs12 lattice capture; lane-mix committed tokens per round; leave-one-prompt-out fits, 95 % paired bootstrap over prompts; the shipped policy simulates 4.677 vs 4.675 measured on the GPU):
+
+| Change | Δ tokens / round |
+|---|---|
+| Calibration (T, q) refit per held-out prompt | −0.02 % (−0.06..+0.01) |
+| Depth prior on the tree shape | −0.17 % (−0.46..+0.04) |
+| Confidence-keyed children per node | −0.06 % (−0.10..−0.01) |
+| 3 or 5-6 children per popped node | −0.11 % / −0.02 % |
+| Suffix/copy candidates from the full history (longest earlier match ≤ 32 tokens, merged into the 8 rows) | −0.02 % (−0.10..+0.03); used in 1.4 % of rounds |
+| Oracle 8-row tree (true path always present) | +43.8 %: the headroom is candidate quality (the draft), not the shape |

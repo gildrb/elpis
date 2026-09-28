@@ -35,16 +35,23 @@ What differs:
   trellis-serve 2.25-3.48 (MTP) and 2.45-5.65 (DFlash2) on its panel; eta 3.93 on the lane's
   C1 rows, 5.66 on GSM8K.
 
-Longest prompt shown working: eta 262,136 tokens (537 s prefill at 250 W); r0b0tlab 262,080
-(needle test); trellis-serve 208,858 (MTP, 294 s to first token) and 126,782 (DFlash2, 187 s).
-eta also reports energy at 350 W: 0.497 tok/J on the lane, 0.617 on GSM8K; no other row
-publishes tok/J.
+Prefill and long context (others quoted; eta *computed* from the C1 whole-request regressions, 95 % CI):
 
-In short: same test, same 350 W cap: eta 202.9 vs r0b0tlab 162.9 tok/s (+24.6 %).
-trellis-serve's DFlash2 recipe reports 225-227 tok/s decode only on its code and thinking-on
-prose panels (3.00 bpw, 131K window, SM 1.74 GHz, power unpublished); eta decodes GSM8K at
-214.8 (*computed*) with 4.00 bpw weights and the full 262K window. trellis-serve's README
-headline (MTP) reports 96-141 tok/s.
+| One RTX 3090 | 32K prompt: time to first token | Longest prompt shown |
+|---|---|---|
+| **eta** (350 W) | ≈26.2 s ±2.4 (≈1,250 tok/s) | 262,136 tokens: 537 s prefill (250 W) |
+| trellis-serve MTP (README headline) | 21.9 s (1,497 tok/s) | 208,858 tokens: 294 s to first token |
+| trellis-serve DFlash2 | 35.9 s (914 tok/s) | 126,782 tokens: 187 s to first token |
+| r0b0tlab | not published (150K prompt: 594 tok/s) | 262,080 tokens (needle test) |
+
+eta also reports energy: 0.497 tok/J on the lane, 0.617 on GSM8K (350 W); no other row publishes tok/J.
+
+In short:
+
+- Same test, same 350 W cap: eta 202.9 vs r0b0tlab 162.9 tok/s (+24.6 %).
+- Decode only: trellis-serve DFlash2 225-227 tok/s on its code and thinking-on prose panels (3.00 bpw, 131K window, SM 1.74 GHz, power unpublished); eta 214.8 on GSM8K (*computed*; 4.00 bpw, 262K window).
+- Prefill at 32K: trellis-serve MTP fastest (21.9 s); eta ≈26.2 s (*computed*); trellis-serve DFlash2 35.9 s.
+- trellis-serve's README headline (MTP): 96-141 tok/s decode.
 
 ## Speed
 
@@ -55,6 +62,7 @@ headline (MTP) reports 96-141 tok/s.
 | **Lane**: 20 calls, AIME 2025 · MMLU-Pro · I3 Logic · LiveCodeBench v6, thinking on, whole request (#68) | **161.79** | — | **0.497** |
 | **GSM8K**: 40 questions, 512 tokens, median of 5 runs | **202.9** | 5.66 | **0.617** |
 | C1 whole request, 1K / 8K / 32K-token prompt, 1,024 tokens out | 185.3 / 73.3 / 29.0 | 5.81 / 3.40 / 3.37 | 0.578 / 0.217 / 0.085 |
+| Prefill, 32K prompt (*computed* from the C1 regression, 95 % CI) | ≈1,250 (1,150-1,380) | — | — |
 | Decode only, 1K / 8K context (RoundBench, 12 reps) | 151.1 / 125.2 | 3.89 / 3.31 | 0.456 / 0.380 |
 
 <details><summary>Lane per task (#68, 350 W)</summary>
@@ -100,7 +108,7 @@ headline (MTP) reports 96-141 tok/s.
 | Forced chain = old engine | `EXL3_TREE_FORCE_CHAIN=1` vs `cs12`, 17 prompts: ids, every round, drafted ids, usage | identical |
 | Accept / commit logic | `bend PROOF.bend`: 41 modules, chain + tree acceptance, speculation invariance over trees | "All terms check." |
 | Kernel changes | GDN state hashes, 1-8 steps (5108); 64 layers × rows 1-8 × 30 graph replays (2113); all 5,040 tree shapes vs the chain kernel (3012) | bit-exact |
-| The tree costs no time | tree − chain, ms per round, 4 fresh processes | 1K: −0.06 (95 % CI −0.31..+0.19); 8K: −0.02 (−0.21..+0.18) |
+| The tree costs no time (250 W) | tree − chain, ms per round, 4 fresh processes | 1K: −0.06 (95 % CI −0.31..+0.19); 8K: −0.02 (−0.21..+0.18) |
 | Scores | AIME 2025 3/3 · MMLU-Pro 8/10 · I3 Logic 2/4 · LiveCodeBench 1/3 | = `cs12` |
 
 - [`LAWS.bend`](LAWS.bend) = contract; [`PROOF.bend`](PROOF.bend) = proofs. Order for every engine change: law → proof → measurement.
@@ -112,6 +120,7 @@ headline (MTP) reports 96-141 tok/s.
 |---|---|
 | Context / cache | 262,144 / 270,336 tokens, 3-bit K and V |
 | Longest prompt run | 262,136 tokens, prefill 537 s (`cs10`, 250 W) |
+| 32K prompt to first token | ≈26.2 s ±2.4 at 350 W; ≈35.3 s ±4.1 at 250 W (*computed*: C1 regression intercept, 95 % CI) |
 | KV size | 12 KiB / token: only 16 of 64 layers keep KV; 3.1 GiB at 270,336 tokens (*computed*) |
 | GPU memory, live | 21,888 / 24,576 MiB |
 
@@ -137,15 +146,21 @@ headline (MTP) reports 96-141 tok/s.
 
 ## 250 W vs 350 W
 
-Same image, token-identical outputs:
+Same image (`tree3s`), token-identical outputs. 250 W: memory −1500 MHz, old fan curve (100 % at 75 °C). 350 W: memory 0, quiet curve (≤ 80 % to 84 °C).
 
-| Workload | Cap, memory offset | tok/s | Mean W | tok/J | SM clock |
-|---|---|---|---|---|---|
-| Lane, `tree3s` (#67) | 250 W, −1500 | 122.33 | 247.1 | 0.495 | 1,029 MHz median per call |
-| Lane, `tree3s` (#68) | 350 W, 0 | **161.79** | 325.2 | **0.497** | 1,511 MHz median per call |
-| GSM8K, `tree3s` | 250 W, −1500 | 153.3 | 249.4 | 0.616 | — |
-| GSM8K, `tree3s` | 350 W, 0 | **202.9** | 329.5 | **0.617** | — |
-| 3 AIME calls, `cs5` (#57 / #56) | 250 W / 350 W, 0 | 114.69 / 158.90 | 247.9 / 322.8 | 0.463 / 0.492 | 892-1,042 / 1,455-1,479 MHz |
+| Workload | 250 W | 350 W | Δ |
+|---|---|---|---|
+| Lane tok/s (#67 → #68) | 122.33 | **161.79** | +32.3 % |
+| Lane tok/J | 0.495 | **0.497** | +0.4 % |
+| GSM8K tok/s (median of 5 runs) | 153.3 | **202.9** | +32.4 % |
+| GSM8K tok/J | 0.616 | **0.617** | +0.2 % |
+| C1 whole request 1K / 8K / 32K, tok/s | 140.8 / 54.3 / 21.9 | 185.3 / 73.3 / 29.0 | +31.6 / +34.9 / +32.3 % |
+| Decode round 1K / 8K (RoundBench) | 34.23 / 35.01 ms | 25.73 / 26.46 ms | −24.8 / −24.4 % |
+| 32K prompt to first token (*computed*) | ≈35.3 s | ≈26.2 s | −26 % |
+| Board power, lane mean | 247.1 W | 325.2 W | +31.6 % |
+| SM clock, lane (median per call) | 1,029 MHz | 1,511 MHz | +46.8 % |
+| GPU temperature, lane (median / max) | 67 / 68 °C | 77 / 83 °C | +10 °C |
+| Fan, lane (median / max) | 71 / 77 % | 75 / 79 % | +4 points |
 
 ## How
 
@@ -156,6 +171,7 @@ Same image, token-identical outputs:
 | 1-8 verify rows share one weight pass (16-row tensor-core tiles) | 16 rows: +21 % per verify forward |
 | 4-bit EXL3 weights | 15.4 GiB target + 1.2 GiB draft |
 | 41 engine patches, each bit-exact or numerics-gated | per area below |
+| 350 W cap, quiet fan curve (≤ 80 % to 84 °C) | lane +32.3 % tok/s at equal tok/J (0.497 vs 0.495); fan 75 vs 71 % median ([250 W vs 350 W](#250-w-vs-350-w)) |
 | Memory clock: stock at 350 W (−1500 MHz was best at 250 W) | 350 W, vs −1500: 0 = +5.4 % tok/s, +6.4 % tok/J; −2000: −1.8 % ([sweep](docs/benchmarks.md#3-power)). 250 W: −1500 saved 1.0-1.4 ms / round (*computed* sum of two sweeps); core offsets: none (+225 MHz: Xid 109) |
 
 <details><summary>41 engine patches</summary>
@@ -190,6 +206,7 @@ Same image, token-identical outputs:
 
 - ≈ 14 GB of quantized weights read per round (shape-derived).
 - At 250 W, time per round tracks energy per round (8.5-8.7 J), not DRAM bandwidth.
+- At 350 W the round is memory-bandwidth sensitive: stock memory clock +5.4 % tok/s vs −1500 MHz ([sweep](docs/benchmarks.md#3-power)).
 
 </details>
 
@@ -242,8 +259,8 @@ python3 -m bench.gsm8k_compare --api-key-file /path/to/api-key --data gsm8k-test
 | GPU | RTX 3090 24 GiB (GA102, SM86), VBIOS 94.02.42.80.1F, PCIe 4.0 ×16, driver 595.71.05 |
 | Power, clocks | **350 W** cap since 2026-09-28 (250 W before); core +0; memory +0 (stock; −1500 MHz at 250 W); NixOS `nvidia-quiet-power-limit.service`; the lane checks all three via NVML |
 | Fans | CoolerControl: 70 % at 70 °C, 77 % at 80 °C, 80 % at 84 °C, 100 % at 90 °C; above 83 °C the card lowers its clocks |
-| Under load, 350 W (#68) | 325.2 W mean; SM per-call mean 1,240-1,618 MHz (median 1,511); 77 °C median, 83 °C max; fan 75 % median, 79 % max; throttle: power cap (thermal slowdown: 1 of 355 samples in a 30 min soak) |
-| Under load, 250 W (#67) | 247.1 W mean; SM per-call mean 957-1,194 MHz (median 1,029); ≤ 68 °C |
+| Under load, 350 W | lane (#68): 325.2 W mean; SM per-call mean 1,240-1,618 MHz (median 1,511); 77 °C median, 83 °C max; fan 75 % median, 79 % max. 60-min sustained soak (fine-tune data job): 81 °C median, 84 °C max; fan 79 % median, 80 % max; thermal slowdown 4 of 657 samples |
+| Under load, 250 W (#67) | 247.1 W mean; SM per-call mean 957-1,194 MHz (median 1,029); 67 °C median, 68 °C max; fan 71 % median, 77 % max (old curve) |
 | Host | Ryzen 7 5800X (8 cores / 16 threads), 125.7 GiB, NixOS 26.05, Linux 6.18.50 |
 | Runtime | rootless Docker 29.7.2, CDI, read-only root; Ubuntu 24.04 CUDA base; Python 3.13.10, PyTorch 2.10.0+cu130, CUDA 13.0.96, cuBLAS 13.1.0.3, Triton 3.6.0 |
 | Engine | ExLlamaV3 1.5.0 `355c6ee` (r0b0tlab `community`, native DFlash2) + 5 [`patches/exl3`](patches/exl3) + 36 [`patches/exl3-ext`](patches/exl3-ext), SHA256-pinned |
@@ -264,8 +281,17 @@ python3 -m bench.gsm8k_compare --api-key-file /path/to/api-key --data gsm8k-test
 - Quality: lane samples only. Full Prime Envs suite and 4-bit vs BF16 loss: not measured.
 - Long-context reasoning with 3-bit KV vs fp16 KV: not measured.
 - GDDR6X temperature is not readable on this card; memory runs at the stock clock.
-- In progress: DFlash2 fine-tune on the target's own outputs (prompts disjoint from all eval sets).
 ```
+
+## In progress
+
+| Work | Status | Measured so far |
+|---|---|---|
+| Draft fine-tune on agent traffic (tool calls, SWE turns) | data done: 2,869 prompts, 1.66M tokens, disjoint from all eval sets; training next | pilot, live engine: agent tokens / round +4.22 % (95 % CI +3.14..+5.65), control −0.01 % (−0.66..+0.60); generic self-distillation +0.23 % (−0.13..+0.62, replay estimate): dropped |
+| Draft precision 4 / 5 / 6 / 8 bpw | queued | — |
+| Core clock offset at 350 W: 0 / +60 / +120 / +150 MHz | running; bit-exact + Xid gate | — |
+| Prefill and decode kernel traces at 350 W | queued | 32K prefill ≈26.2 s (*computed*) |
+| Per-request overhead on short prompts | queued | GSM8K: 87 ms per request + 26.34 ms per round; removing all of it: +6.9 % (*computed*) |
 
 ## References
 
