@@ -46,11 +46,11 @@ BEND_DIRECTORY = "bend-exl3"
 BEND_IDENTITY = f"/opt/qwen/{BEND_DIRECTORY}/identity.json"
 BEND_SCHEMA = "eta-exl3-bend-accept/1"
 GPU_NAME = "NVIDIA GeForce RTX 3090"
-POWER_LIMIT_WATTS = 250.0
+POWER_LIMIT_WATTS = 350.0
 # Declared clock-vs-voltage offsets (host NixOS policy, applied with the power limit at boot and
-# resume). At the 250 W cap a lower memory clock moves watts from GDDR6X to the SMs
+# resume). At the former 250 W cap a lower memory clock moved watts from GDDR6X to the SMs
 # (RoundBench, bit-exact: -1000 MHz -0.8 ms/round vs stock; -1500 a further -0.25..-0.46 ms;
-# -2000 no better than -1500).
+# -2000 no better than -1500). At 350 W the offset is re-measured before it is re-declared.
 CORE_CLOCK_OFFSET_MHZ = 0
 MEMORY_CLOCK_OFFSET_MHZ = -1500
 NVML_LIBRARY = "/run/opengl-driver/lib/libnvidia-ml.so.1"
@@ -542,7 +542,8 @@ def _gpu() -> dict[str, object]:
         name == GPU_NAME
         and float(limit) == POWER_LIMIT_WATTS
         and float(enforced) == POWER_LIMIT_WATTS,
-        "Measurement requires the declared RTX 3090 at 250 W; policy is never changed here",
+        f"Measurement requires the declared RTX 3090 at {POWER_LIMIT_WATTS:.0f} W; policy is never "
+        "changed here",
     )
     core_offset, memory_offset = _clock_offsets()
     require(
@@ -828,11 +829,11 @@ class NativeTaskset:
     """Module whose hardcoded DATASET_NAME/DATASET_REVISION must equal the lock."""
 
 
-# Frozen order of protocol exl3-native-broad-c1-request-v4 (= v3 tasks; v4 adds the declared
-# clock offsets to the identity); C1 runs afterwards.
+# Frozen order of protocol exl3-native-broad-c1-request-v5 (= v4 tasks and offsets at the
+# declared 350 W; v4 = v3 tasks + the declared clock offsets); C1 runs afterwards.
 # v3 = v2 with mmlu-pro 20 -> 10 and i3-logic 6 -> 4 tasks (the first tasks of the same
-# native shuffles): v2 took 1935-2084 s at 350 W and does not fit its 2400 s deadline at
-# the 250 W operating point.
+# native shuffles): v2 took 1935-2084 s at 350 W and did not fit its 2400 s deadline at
+# the former 250 W operating point.
 TASKSETS = (
     NativeTaskset(
         "aime25", "aime25", "configs/tiny/aime25.toml", 3, 32768, "dataset_name"

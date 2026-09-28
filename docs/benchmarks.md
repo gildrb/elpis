@@ -102,7 +102,7 @@ byte-identical identity (`identity-before.json`, `identity-after.json`):
 - Authenticated `/health` and `/v1/models` (`max_model_len` 262144 is the
   reported limit, not a capacity test).
 - Host `nvidia-smi`: exactly one `NVIDIA GeForce RTX 3090`, power limit and
-  enforced limit 250 W (declared operating point; never changed here), UUID,
+  enforced limit 350 W (declared operating point; never changed here), UUID,
   bus, driver and memory.
 - The host tokenizer file behind the target mount, whose bytes must equal both
   the served file and its manifest pin.
@@ -212,16 +212,15 @@ Not measured by this lane: TTFT, committed decode throughput, power/energy and
 
 ## 3. Power
 
-The declared operating point is 250 W, chosen for a quiet and efficient card
-(2026-09-25: 350 W was too loud). The host applies it at every boot through a
-drop-in of `nvidia-quiet-power-limit.service` in
-`/usr/local/lib/systemd/system/nvidia-quiet-power-limit.service.d/`; the lane
-checks it but never changes it. Segments measured at 280 W or 350 W are not
-comparable with 250 W results.
-Sweep other caps only with explicit maintenance ownership, recording and
-restoring the original cap; containers must not modify host power or fans.
-Measure actual watts, clocks, temperature and throttle reasons over a stated
-interval before reporting tokens per joule.
+| Since | Declared cap | Fan curve (host, CoolerControl) | Why |
+|---|---|---|---|
+| 2026-09-25 | 250 W | 100 % at 75 °C | 350 W with that curve was too loud |
+| 2026-09-28 (v5) | 350 W | ≤ 80 % up to 84 °C, 100 % at 90 °C; above 83 °C the card lowers its own clocks | quiet at 350 W; 350 W measured 0.492 vs 0.463 tok/J at 250 W (`cs5`, §6) |
+
+- Applied by the host (`nvidia-quiet-power-limit.service`, boot and resume); the lane checks it, never changes it.
+- Segments at different caps are not comparable.
+- Bounded cap windows (tok/J sweeps): host `nvidia-power-window WATTS SECONDS` (250-350 W, ≤ 2 h, auto-restore).
+- Containers never touch host power or fans; tok/J needs watts, clocks, temperature and throttle reasons over a stated interval.
 
 ## 4. Engine state at the end of segment 4 (2026-09-25, 350 W)
 
