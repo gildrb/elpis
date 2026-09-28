@@ -1,6 +1,8 @@
-# eta: Qwen3.8-27B on one RTX 3090 at 250 W, 262K context, lossless speculative decoding
+# eta: Qwen3.8-27B on one RTX 3090 at 350 W, 262K context, lossless speculative decoding
 
-**Qwen3.8-27B · EXL3 4.00 bpw · DFlash2 + 8-row token tree · 262,144 context · one RTX 3090 at 250 W · output = plain greedy · acceptance proved in Bend.**
+**Qwen3.8-27B · EXL3 4.00 bpw · DFlash2 + 8-row token tree · 262,144 context · one RTX 3090 at 350 W, quiet fans · output = plain greedy · acceptance proved in Bend.**
+
+> Numbers below: 250 W (protocol v4). Since 2026-09-28: 350 W + quiet fan curve; 350 W (v5) runs queued.
 
 ## How it compares with other RTX 3090 results for this model
 
@@ -47,7 +49,7 @@ eta's prompts and its power; r0b0tlab's GSM8K shares the prompts only.
 
 ## Speed
 
-**Target:** most tok/s at the native 262K context, one RTX 3090, 250 W. **Status** (live `tree3s`, 2026-09-28):
+**Target:** most tok/s at the native 262K context, one RTX 3090, 350 W. **Status** (live `tree3s`, 2026-09-28, measured at 250 W):
 
 | Workload | tok/s | Tokens / round | tok/J |
 |---|---|---|---|
@@ -229,8 +231,10 @@ python3 -m bench.gsm8k_compare --api-key-file /path/to/api-key --data gsm8k-test
 | | |
 |---|---|
 | GPU | RTX 3090 24 GiB (GA102, SM86), VBIOS 94.02.42.80.1F, PCIe 4.0 ×16, driver 595.71.05 |
-| Power, clocks | **250 W** cap (default 350 W); core +0; **memory −1500 MHz**; NixOS `nvidia-quiet-power-limit.service`; the lane checks all three via NVML |
-| Under load (#67) | 247.1 W mean; SM per-call mean 957-1,194 MHz (median 1,029); ≤ 68 °C |
+| Power, clocks | **350 W** cap since 2026-09-28 (250 W before); core +0; **memory −1500 MHz**; NixOS `nvidia-quiet-power-limit.service`; the lane checks all three via NVML |
+| Fans | CoolerControl: 70 % at 70 °C, 77 % at 80 °C, 80 % at 84 °C, 100 % at 90 °C; above 83 °C the card lowers its clocks |
+| Under load, 350 W | 337 W mean; SM mean 1,533 MHz; 77-81 °C; fan 77-78 %; throttle: power cap only (3 min, fine-tune data job) |
+| Under load, 250 W (#67) | 247.1 W mean; SM per-call mean 957-1,194 MHz (median 1,029); ≤ 68 °C |
 | Host | Ryzen 7 5800X (8 cores / 16 threads), 125.7 GiB, NixOS 26.05, Linux 6.18.50 |
 | Runtime | rootless Docker 29.7.2, CDI, read-only root; Ubuntu 24.04 CUDA base; Python 3.13.10, PyTorch 2.10.0+cu130, CUDA 13.0.96, cuBLAS 13.1.0.3, Triton 3.6.0 |
 | Engine | ExLlamaV3 1.5.0 `355c6ee` (r0b0tlab `community`, native DFlash2) + 5 [`patches/exl3`](patches/exl3) + 36 [`patches/exl3-ext`](patches/exl3-ext), SHA256-pinned |
