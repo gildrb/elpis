@@ -148,7 +148,7 @@ eta's prompts and its power; r0b0tlab's GSM8K shares the prompts only.
 | 1-8 verify rows share one weight pass (16-row tensor-core tiles) | 16 rows: +21 % per verify forward |
 | 4-bit EXL3 weights | 15.4 GiB target + 1.2 GiB draft |
 | 41 engine patches, each bit-exact or numerics-gated | per area below |
-| Memory clock −1500 MHz: watts go to the SMs under the 250 W cap | −1000 MHz: −0.77..−0.90 ms / round; −1500: −0.25..−0.46 more; −2000: none; core offsets: none (+225 MHz: Xid 109) |
+| Memory clock: stock at 350 W (−1500 MHz was best at 250 W) | 350 W, vs −1500: 0 = +5.4 % tok/s, +6.4 % tok/J; −2000: −1.8 % ([sweep](docs/benchmarks.md#3-power)). 250 W: −1500 saved 1.0-1.4 ms / round (*computed* sum of two sweeps); core offsets: none (+225 MHz: Xid 109) |
 
 <details><summary>41 engine patches</summary>
 
@@ -231,7 +231,7 @@ python3 -m bench.gsm8k_compare --api-key-file /path/to/api-key --data gsm8k-test
 | | |
 |---|---|
 | GPU | RTX 3090 24 GiB (GA102, SM86), VBIOS 94.02.42.80.1F, PCIe 4.0 ×16, driver 595.71.05 |
-| Power, clocks | **350 W** cap since 2026-09-28 (250 W before); core +0; **memory −1500 MHz**; NixOS `nvidia-quiet-power-limit.service`; the lane checks all three via NVML |
+| Power, clocks | **350 W** cap since 2026-09-28 (250 W before); core +0; memory +0 (stock; −1500 MHz at 250 W); NixOS `nvidia-quiet-power-limit.service`; the lane checks all three via NVML |
 | Fans | CoolerControl: 70 % at 70 °C, 77 % at 80 °C, 80 % at 84 °C, 100 % at 90 °C; above 83 °C the card lowers its clocks |
 | Under load, 350 W | 337 W mean; SM mean 1,533 MHz; 77-81 °C; fan 77-78 %; throttle: power cap only (3 min, fine-tune data job) |
 | Under load, 250 W (#67) | 247.1 W mean; SM per-call mean 957-1,194 MHz (median 1,029); ≤ 68 °C |

@@ -48,11 +48,11 @@ BEND_SCHEMA = "eta-exl3-bend-accept/1"
 GPU_NAME = "NVIDIA GeForce RTX 3090"
 POWER_LIMIT_WATTS = 350.0
 # Declared clock-vs-voltage offsets (host NixOS policy, applied with the power limit at boot and
-# resume). At the former 250 W cap a lower memory clock moved watts from GDDR6X to the SMs
-# (RoundBench, bit-exact: -1000 MHz -0.8 ms/round vs stock; -1500 a further -0.25..-0.46 ms;
-# -2000 no better than -1500). At 350 W the offset is re-measured before it is re-declared.
+# resume). At 350 W stock memory is fastest (RoundBench memsweep350, 12 paired reps, bit-exact,
+# 0 Xid; vs -1500: 0 +5.4 % tok/s / +6.4 % tok/J, -500 +3.7 %, -1000 +1.8 %, -2000 -1.8 %).
+# At the former 250 W cap the opposite held (-1500 best).
 CORE_CLOCK_OFFSET_MHZ = 0
-MEMORY_CLOCK_OFFSET_MHZ = -1500
+MEMORY_CLOCK_OFFSET_MHZ = 0
 NVML_LIBRARY = "/run/opengl-driver/lib/libnvidia-ml.so.1"
 DRAFT_PROPOSALS = 7
 MANIFEST = ROOT / "prepare/exl3-manifest.json"

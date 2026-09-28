@@ -30,7 +30,7 @@ Docker access (read-only inspect, one read-only in-container hashing probe via
 docker exec, and the native evaluator's own sandbox containers), host nvidia-smi,
 and a healthy owned EXL3 instance at http://127.0.0.1:18020 serving qwen3.8-27b
 with max_model_len 262144, target/draft mounted under /models, on one RTX 3090 at
-350 W with clock offsets core 0 / memory -1500 MHz (host policy; checked, never set). The server must accept the native client's identity sampling fields
+350 W with clock offsets core 0 / memory 0 MHz (host policy; checked, never set). The server must accept the native client's identity sampling fields
 (top_p 1, min_p 0, frequency/presence penalty 0, repetition penalty 1).
 Rootless Docker is fixed to unix:///run/user/1000/docker.sock.
 The prepared Python supervisor enters pinned offline Nix only for its worker;

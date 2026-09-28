@@ -212,10 +212,23 @@ Not measured by this lane: TTFT, committed decode throughput, power/energy and
 
 ## 3. Power
 
-| Since | Declared cap | Fan curve (host, CoolerControl) | Why |
-|---|---|---|---|
-| 2026-09-25 | 250 W | 100 % at 75 °C | 350 W with that curve was too loud |
-| 2026-09-28 (v5) | 350 W | ≤ 80 % up to 84 °C, 100 % at 90 °C; above 83 °C the card lowers its own clocks | quiet at 350 W; 350 W measured 0.492 vs 0.463 tok/J at 250 W (`cs5`, §6) |
+| Since | Declared cap | Memory offset | Fan curve (host, CoolerControl) | Why |
+|---|---|---|---|---|
+| 2026-09-25 | 250 W | −1500 MHz (from 2026-09-26) | 100 % at 75 °C | 350 W with that curve was too loud |
+| 2026-09-28 (v5) | 350 W | 0 (stock) | ≤ 80 % up to 84 °C, 100 % at 90 °C; above 83 °C the card lowers its own clocks | quiet at 350 W; 350 W measured 0.492 vs 0.463 tok/J at 250 W (`cs5`, §6) |
+
+Memory offset at 350 W (RoundBench, tree3s, C1 1K / 8K, 12 paired reps per arm, 2026-09-28):
+
+| Offset | Δ tok/s vs −1500 | Δ tok/J vs −1500 | SM MHz mean (1K) | Bit-exact | Xid |
+|---|---|---|---|---|---|
+| **0** | **+5.51 ±0.16 / +5.21 ±0.11 %** | **+6.20 ±0.69 / +6.57 ±0.54 %** | 1,473 | yes | 0 |
+| −500 | +3.72 / +3.62 % | +4.42 / +4.55 % | 1,508 | yes | 0 |
+| −1000 | +1.80 / +1.72 % | +1.66 / +2.27 % | 1,537 | yes | 0 |
+| −1500 | ref: 27.15 / 27.84 ms per round | ref: 0.429 / 0.357 | 1,557 | ref | 0 |
+| −2000 | −1.84 / −1.73 % | −2.57 / −2.11 % | 1,582 | yes | 0 |
+
+- At 350 W the round is memory-bandwidth sensitive: memory clock beats SM clock. At 250 W the reverse held (§6).
+- Positive offsets (memory overclock) not tested: GDDR6X temperature is not readable on this card.
 
 - Applied by the host (`nvidia-quiet-power-limit.service`, boot and resume); the lane checks it, never changes it.
 - Segments at different caps are not comparable.
