@@ -1,0 +1,311 @@
+--- a/modules/gated_delta_net.py
++++ b/modules/gated_delta_net.py
+@@ -18,6 +18,19 @@
+ _qkv_slice_enable = os.environ.get("EXL3_QKV_SLICE", "1") != "0"
+ from ..model.model_tp_shared import TPTensorWrapper
+ from .gated_delta_net_fn import causal_conv1d_update, gated_delta_rule_fn
++from .gated_delta_net_fn.conv1d import conv1d_prefill_qkv
++
++
++def gdn_prefill_fuse_enabled() -> bool:
++    """Ext 5111 kill switch EXL3_GDN_PREFILL_FUSE: unset or "1" = on, "0" = off, anything else is an error."""
++    env = os.environ.get("EXL3_GDN_PREFILL_FUSE")
++    if env is None or env == "1":
++        return True
++    if env == "0":
++        return False
++    raise ValueError("EXL3_GDN_PREFILL_FUSE must be 0 or 1")
++
++
+ from ..cache.recurrent import (
+     mp_cache_recurrent_stash,
+     mp_cache_recurrent_unstash,
+@@ -1201,6 +1214,7 @@
+         # while Qwen3-Next uses fused projections. The fused C++ helper expects the
+         # packed layout used by fused projections; applying it to split qkv tensors
+         # causes incorrect head ordering and broken generations.
++        fuse_qkv = False
+         if self.qkvz_proj is not None and self.ba_proj is not None:
+             qkvz = self.qkvz_proj.forward(x, params)
+             ba = self.ba_proj.forward(x, params)
+@@ -1252,7 +1266,14 @@
+             b = self.b_proj.forward(x, params)
+             a = self.a_proj.forward(x, params)
+ 
+-            mixed_qkv = qkv.transpose(1, 2).to(torch.bfloat16).contiguous()
++            # Ext 5111: long single-sequence prefill chunks go through conv1d_prefill_qkv (reads the fp32 qkv, writes
++            # contiguous q / k / v; bit-identical, no transpose / cast / split copies). EXL3_GDN_PREFILL_FUSE=0 disables
++            fuse_qkv = (
++                bsz == 1 and seqlen > 256 and seqlen >= self.num_v_heads and not save_history and
++                conv_state is not None and qkv.dtype == torch.float and qkv.is_contiguous() and
++                recurrent_slots is not None and recurrent_slots.shape == (1,) and gdn_prefill_fuse_enabled()
++            )
++            mixed_qkv = None if fuse_qkv else qkv.transpose(1, 2).to(torch.bfloat16).contiguous()
+ 
+             beta = torch.empty((bsz, seqlen, self.num_v_heads), dtype = torch.bfloat16, device = self.device)
+             g = torch.empty((bsz, seqlen, self.num_v_heads), dtype = torch.float, device = self.device)
+@@ -1266,15 +1287,20 @@
+             )
+ 
+         # Convolution
+-        mixed_qkv = causal_conv1d_update(
+-            mixed_qkv = mixed_qkv,
+-            conv_state = conv_state,
+-            recurrent_slots = recurrent_slots,
+-            conv1d_weight = self.conv1d_weight_flat,
+-            conv1d_bias = self.conv1d_bias,
+-            history = save_history,
+-            params = params,
+-        )
++        qkv_split = None
++        if not self.kda and self.qkvz_proj is None and fuse_qkv:
++            qkv_split = conv1d_prefill_qkv(
++                qkv, conv_state, recurrent_slots, self.conv1d_weight_flat, self.conv1d_bias, self.k_dim, save_history)
++        else:
++            mixed_qkv = causal_conv1d_update(
++                mixed_qkv = mixed_qkv,
++                conv_state = conv_state,
++                recurrent_slots = recurrent_slots,
++                conv1d_weight = self.conv1d_weight_flat,
++                conv1d_bias = self.conv1d_bias,
++                history = save_history,
++                params = params,
++            )
+ 
+         # Delta rule
+         core_attn_out = gated_delta_rule_fn(
+@@ -1293,6 +1319,7 @@
+             v_head_dim = self.v_head_dim,
+             params = params,
+             channelwise_g = self.kda,
++            qkv_split = qkv_split,
+         )
+ 
+         # Norm
+--- a/modules/gated_delta_net_fn/conv1d.py
++++ b/modules/gated_delta_net_fn/conv1d.py
+@@ -338,6 +338,166 @@
+     return out
+ 
+ 
++# Ext 5111: prefill conv reading the fp32 qkv projection (bsz 1, [seq, dim]) directly and writing q / k / v as three
++# contiguous bf16 blocks. The kernels below are _causal_conv1d_update_slotted_output_kernel / _state_kernel with only
++# the x addressing and the output addressing changed: x is loaded as fp32 and cast to bf16 in-kernel (the same
++# round-to-nearest cast torch's .to(torch.bfloat16) applies), then every value flows through the unchanged bf16
++# arithmetic; the output element (s, d) is stored at its q / k / v block offset. This removes the transpose + cast
++# copy and the three .contiguous() copies of the split q / k / v views (fla input_guard), bit-identically.
++@triton.jit
++def _conv1d_prefill_qkv_output_kernel(
++    x,                   # fp32 (seq_len, dim)
++    conv_state,
++    slots,
++    weight,
++    bias,
++    out,                 # bf16: q block (seq_len, KD), k block (seq_len, KD), v block (seq_len, dim - 2 KD)
++    dim: tl.constexpr,
++    KD: tl.constexpr,
++    seq_len,
++    state_size: tl.constexpr,
++    conv_kernel_size: tl.constexpr,
++    has_bias: tl.constexpr,
++    BLOCK_D: tl.constexpr,
++    BLOCK_S: tl.constexpr,
++    BLOCK_K: tl.constexpr,
++):
++    pid_d = tl.program_id(1)
++    pid_s = tl.program_id(2)
++
++    offs_d = pid_d * BLOCK_D + tl.arange(0, BLOCK_D)
++    offs_s = pid_s * BLOCK_S + tl.arange(0, BLOCK_S)
++
++    slot = tl.load(slots)
++    mask_d = offs_d < dim
++    mask_s = offs_s < seq_len
++
++    acc = tl.zeros((BLOCK_D, BLOCK_S), dtype = tl.float32)
++
++    for k in range(BLOCK_K):
++        if k < conv_kernel_size:
++            src_t = offs_s + k + 1
++            from_x = src_t >= conv_kernel_size
++            x_t = src_t - conv_kernel_size
++
++            state_vals = tl.load(
++                conv_state + (slot * dim + offs_d[:, None]) * state_size + src_t[None, :],
++                mask = mask_d[:, None] & mask_s[None, :] & (src_t[None, :] < conv_kernel_size),
++                other = 0.0,
++            )
++            x_vals = tl.load(
++                x + x_t[None, :].to(tl.int64) * dim + offs_d[:, None],
++                mask = mask_d[:, None] & mask_s[None, :] & from_x[None, :] & (x_t[None, :] >= 0),
++                other = 0.0,
++            ).to(tl.bfloat16)
++            vals = tl.where(from_x[None, :], x_vals, state_vals)
++            w = tl.load(weight + offs_d * conv_kernel_size + k, mask = mask_d, other = 0.0)
++            acc += vals * w[:, None]
++
++    if has_bias:
++        b = tl.load(bias + offs_d, mask = mask_d, other = 0.0)
++        acc += b[:, None]
++
++    acc = acc * tl.sigmoid(acc)
++    s64 = offs_s[None, :].to(tl.int64)
++    d64 = offs_d[:, None].to(tl.int64)
++    VD: tl.constexpr = dim - 2 * KD
++    dst = tl.where(
++        d64 < KD, s64 * KD + d64,
++        tl.where(d64 < 2 * KD, seq_len * KD + s64 * KD + (d64 - KD), 2 * seq_len * KD + s64 * VD + (d64 - 2 * KD)),
++    )
++    tl.store(out + dst, acc, mask = mask_d[:, None] & mask_s[None, :])
++
++
++@triton.jit
++def _conv1d_prefill_qkv_state_kernel(
++    x,                   # fp32 (seq_len, dim)
++    conv_state,
++    slots,
++    dim: tl.constexpr,
++    seq_len,
++    state_size: tl.constexpr,
++    conv_kernel_size: tl.constexpr,
++    history: tl.constexpr,
++    BLOCK_D: tl.constexpr,
++    BLOCK_STATE: tl.constexpr,
++):
++    pid_d = tl.program_id(1)
++
++    offs_d = pid_d * BLOCK_D + tl.arange(0, BLOCK_D)
++    offs_state = tl.arange(0, BLOCK_STATE)
++
++    slot = tl.load(slots)
++    mask_d = offs_d < dim
++    mask_state = offs_state < state_size
++
++    history_write_size = tl.where(state_size < conv_kernel_size + seq_len, state_size, conv_kernel_size + seq_len)
++    state_write_size = tl.where(history, history_write_size, conv_kernel_size)
++    dst_start = tl.where(history, state_size - state_write_size, 0)
++    history_src_start = tl.where(conv_kernel_size + seq_len > state_size, conv_kernel_size + seq_len - state_size, 0)
++    no_history_start = seq_len
++    src_t = tl.where(history, history_src_start + offs_state - dst_start, no_history_start + offs_state)
++    valid_state = (offs_state >= dst_start) & (offs_state < dst_start + state_write_size)
++    from_x = src_t >= conv_kernel_size
++    x_t = src_t - conv_kernel_size
++    state_vals = tl.load(
++        conv_state + (slot * dim + offs_d[:, None]) * state_size + src_t[None, :],
++        mask = mask_d[:, None] & valid_state[None, :] & (src_t[None, :] >= 0) & (src_t[None, :] < conv_kernel_size),
++        other = 0.0,
++    )
++    x_vals = tl.load(
++        x + x_t[None, :].to(tl.int64) * dim + offs_d[:, None],
++        mask = mask_d[:, None] & valid_state[None, :] & from_x[None, :] & (x_t[None, :] >= 0),
++        other = 0.0,
++    ).to(tl.bfloat16)
++    new_state = tl.where(from_x[None, :], x_vals, state_vals)
++    tl.store(
++        conv_state + (slot * dim + offs_d[:, None]) * state_size + offs_state[None, :],
++        new_state,
++        mask = mask_d[:, None] & mask_state[None, :] & valid_state[None, :],
++    )
++
++
++def conv1d_prefill_qkv(
++    qkv: torch.Tensor,
++    conv_state: torch.Tensor,
++    slots: torch.Tensor,
++    weight: torch.Tensor,
++    bias: torch.Tensor | None,
++    k_dim: int,
++    history: bool,
++) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
++    """qkv fp32 (1, seq_len, dim) contiguous -> contiguous bf16 q (1, S, k_dim), k (1, S, k_dim), v (1, S, dim - 2 k_dim),
++    and the conv state update; bit-identical to causal_conv1d_update(qkv.transpose(1, 2).to(bf16).contiguous(), ...)
++    for seq_len > 256 followed by torch.split(out, [k_dim, k_dim, v_dim], -1) and .contiguous()."""
++    bsz, seq_len, dim = qkv.shape
++    if (bsz != 1 or seq_len <= 256 or qkv.dtype != torch.float32 or not qkv.is_contiguous() or not
++            conv_state.is_contiguous() or not weight.is_contiguous() or conv_state.dtype != torch.bfloat16 or
++            slots.shape != (1,)):
++        raise ValueError("conv1d_prefill_qkv: unsupported input")
++    state_size = conv_state.shape[-1]
++    conv_kernel_size = weight.shape[-1]
++    if conv_state.size(1) != dim or weight.shape[0] != dim or conv_kernel_size > 16 or state_size < conv_kernel_size:
++        raise ValueError("conv1d_prefill_qkv: bad conv_state / weight")
++    v_dim = dim - 2 * k_dim
++    buf = torch.empty((seq_len * dim,), dtype = torch.bfloat16, device = qkv.device)
++    block_d, block_s = 32, 256
++    with torch.cuda.device(qkv.device):
++        _conv1d_prefill_qkv_output_kernel[(1, triton.cdiv(dim, block_d), triton.cdiv(seq_len, block_s))](
++            qkv, conv_state, slots, weight, bias if bias is not None else weight, buf,
++            dim, k_dim, seq_len, state_size, conv_kernel_size, bias is not None,
++            BLOCK_D = block_d, BLOCK_S = block_s, BLOCK_K = triton.next_power_of_2(conv_kernel_size), num_warps = 4,
++        )
++        _conv1d_prefill_qkv_state_kernel[(1, triton.cdiv(dim, block_d))](
++            qkv, conv_state, slots, dim, seq_len, state_size, conv_kernel_size, history,
++            BLOCK_D = block_d, BLOCK_STATE = triton.next_power_of_2(state_size), num_warps = 4,
++        )
++    q = buf[: seq_len * k_dim].view(1, seq_len, k_dim)
++    k = buf[seq_len * k_dim: 2 * seq_len * k_dim].view(1, seq_len, k_dim)
++    v = buf[2 * seq_len * k_dim:].view(1, seq_len, v_dim)
++    return q, k, v
++
++
+ def causal_conv1d_update_function_torch(
+     x,
+     conv_state,
+--- a/modules/gated_delta_net_fn/gated_delta_rule.py
++++ b/modules/gated_delta_net_fn/gated_delta_rule.py
+@@ -101,11 +101,21 @@
+     v_head_dim: int,
+     params: dict = None,
+     channelwise_g: bool = False,
++    qkv_split: tuple | None = None,
+ ):
++    """qkv_split (ext 5111): contiguous (q, k, v) from conv1d_prefill_qkv in place of mixed_qkv's split views
++    (bsz 1, scalar-g chunked prefill only); the values are identical, only the copies are gone."""
+     if params is None:
+         params = {}
+ 
+-    bsz, seqlen, _ = mixed_qkv.shape
++    if qkv_split is not None:
++        if channelwise_g or history or mixed_qkv is not None:
++            raise ValueError("qkv_split is the scalar-g prefill path only")
++        bsz, seqlen = 1, qkv_split[0].shape[1]
++        if seqlen < num_v_heads:
++            raise ValueError("qkv_split needs the chunked rule")
++    else:
++        bsz, seqlen, _ = mixed_qkv.shape
+ 
+     # KDA (per-k-channel decay, g shaped (b, s, h, dk)): fla chunk kernel for prefill, the
+     # channelwise CUDA recurrent kernel (in-kernel q/k l2norm, history-capable) otherwise
+@@ -166,7 +176,12 @@
+     if seqlen >= num_v_heads and not history:
+         from ...vendor.fla import chunk_gated_delta_rule
+ 
+-        q, k, v = torch.split(mixed_qkv, [k_dim, k_dim, v_dim], dim = -1)
++        if qkv_split is not None:
++            q, k, v = qkv_split
++            dev = q.device
++        else:
++            q, k, v = torch.split(mixed_qkv, [k_dim, k_dim, v_dim], dim = -1)
++            dev = mixed_qkv.device
+         q = q.view(bsz, seqlen, -1, k_head_dim)
+         k = k.view(bsz, seqlen, -1, k_head_dim)
+         v = v.view(bsz, seqlen, -1, v_head_dim)
+@@ -174,7 +189,7 @@
+         # (Grouped attn supported in fla-core now)
+         recurrent_slots_cpu = get_for_device(params, "recurrent_slots", "cpu", None)
+         if recurrent_slots_cpu is None:
+-            recurrent_slots_cpu = buffered_arange(bsz, mixed_qkv.device)
++            recurrent_slots_cpu = buffered_arange(bsz, dev)
+         core_attn_out = []
+         for i, s in enumerate(recurrent_slots_cpu.tolist()):
+             state = recurrent_state[s, 0].unsqueeze(0) if recurrent_state is not None else None
+@@ -190,7 +205,8 @@
+                 state.copy_(new_state)
+             core_attn_out.append(core_attn)
+ 
+-        core_attn_out = torch.cat(core_attn_out, dim = 0)
++        # Ext 5111: one sequence needs no concatenation copy (same values)
++        core_attn_out = core_attn_out[0] if len(core_attn_out) == 1 else torch.cat(core_attn_out, dim = 0)
+ 
+     # Fused recurrent rule
+     else:

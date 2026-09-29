@@ -1,0 +1,357 @@
+--- a/exllamav3_ext/bindings.cpp
++++ b/exllamav3_ext/bindings.cpp
+@@ -10,6 +10,7 @@
+ 
+ #include "norm.cuh"
+ #include "hgemm.cuh"
++#include "hgemm_act.cuh"
+ #include "rope.cuh"
+ #include "activation.cuh"
+ #include "softcap.cuh"
+@@ -185,6 +186,7 @@
+     m.def("hgemm", &hgemm, "hgemm");
+     m.def("hgemm_batched", &hgemm_batched, "hgemm_batched");
+     m.def("hgemm_recon", &hgemm_recon, "hgemm_recon");
++    m.def("hgemm_recon_silu_mul", &hgemm_recon_silu_mul, "hgemm_recon_silu_mul");
+     m.def("hgemm_f16acc", &hgemm_f16acc, "hgemm_f16acc");
+     m.def("hgemm_f16acc_status", &hgemm_f16acc_status, "hgemm_f16acc_status");
+     m.def("rope", &rope, "rope");
+--- a/modules/mlp.py
++++ b/modules/mlp.py
+@@ -748,6 +748,28 @@
+         return d
+ 
+ 
++    def up_silu_fused(self, s: int, x: torch.Tensor, g: torch.Tensor, params: dict):
++        """
++        Ext 5112: silu(g) * up(x) as one GEMM with the gate product in its epilogue, bit-identical to
++        up(x) followed by silu_mul(g, u, u). Taken only where up(x) would be the plain EXL3 fused-reconstruct GEMM
++        (no padding, trim, LoRA, scaling, softcap, override or capture) and the activation is SiLU into fp16;
++        returns None otherwise.
++        """
++        up = self.ups[s]
++        inner = getattr(up, "inner", None)
++        if (
++            self.activation_fn_call is not ext.silu_mul or self.interm_dtype != torch.half or
++            not hasattr(inner, "reconstruct_hgemm_silu") or params.get("reconstruct") is not None or
++            "ovr" in params or "capture" in params or up.lora_a_tensors or x.shape[-1] != up.in_features or
++            (up.trim_padded_out and up.out_features != up.out_features_unpadded) or up.pre_scale != 1.0 or
++            up.post_scale != 1.0 or up.softcap != 0.0 or not x.is_contiguous()
++        ):
++            return None
++        if inner.config.infer_params.no_reconstruct:
++            return None
++        return inner.reconstruct_hgemm_silu(x, g, self.act_limit)
++
++
+     @override
+     def forward(
+         self,
+@@ -775,9 +797,11 @@
+ 
+                 elif self.multi_gu[s] is None or bsz * q_len > 32:
+                     g = self.gates[s].forward(x, params)
+-                    u = self.ups[s].forward(x, params)
+-                    a = torch.empty_like(u, dtype = torch.half) if self.interm_dtype != torch.half else u
+-                    self.activation_fn_call(g, u, a, self.act_limit)
++                    a = self.up_silu_fused(s, x, g, params)
++                    if a is None:
++                        u = self.ups[s].forward(x, params)
++                        a = torch.empty_like(u, dtype = torch.half) if self.interm_dtype != torch.half else u
++                        self.activation_fn_call(g, u, a, self.act_limit)
+                     d_ = self.downs[s].forward(a, params)
+ 
+                     if d is None: d = d_
+--- a/modules/quant/exl3.py
++++ b/modules/quant/exl3.py
+@@ -218,6 +218,31 @@
+         return y
+ 
+ 
++    def reconstruct_hgemm_silu(self, x: torch.Tensor, gate: torch.Tensor, act_limit: float):
++        """
++        Ext 5112: silu(gate) * (x @ W) in one GEMM (the up projection of a SiLU-gated MLP), bit-identical to
++        reconstruct_hgemm(x, half) followed by ext.silu_mul(gate, u, u, act_limit). Only the fused-reconstruct
++        single-slice fp16 path (rows >= 1024) qualifies; returns None otherwise and the caller runs the two steps.
++        """
++        shape = x.shape
++        rows = x.numel() // shape[-1]
++        if self._fused_reconstruct is None:
++            self._fused_reconstruct = (
++                self.in_features % 128 == 0 and self.out_features % 128 == 0
++                and not no_fused_reconstruct
++            )
++        if (not self._fused_reconstruct or rows < 1024 or self.out_features > MAX_RECONSTRUCT_SLICE_N or
++                self.bias is not None or self.default_out_dtype != torch.half or gate.dtype != torch.half or
++                gate.shape != shape[:-1] + (self.out_features,) or not gate.is_contiguous()):
++            return None
++        y = torch.empty(shape[:-1] + (self.out_features,), dtype = torch.half, device = x.device)
++        w = torch.empty((self.in_features, self.out_features), dtype = torch.half, device = self.trellis.device)
++        ext.reconstruct_had_slice(w, self.trellis, self.suh, self.svh, self.K, self.mcg, self.mul1, 0)
++        ext.hgemm_recon_silu_mul(x.view(rows, self.in_features), w, y.view(rows, self.out_features),
++                                 gate.view(rows, self.out_features), act_limit)
++        return y
++
++
+     def get_inner_weight_tensor(self, n_offset: int = 0, n_features: int | None = None):
+         w = torch.empty((self.in_features, self.out_features), dtype = torch.half, device = self.trellis.device)
+         ext.reconstruct(w, self.trellis, self.K, self.mcg, self.mul1)
+--- /dev/null
++++ b/exllamav3_ext/hgemm_act.cu
+@@ -0,0 +1,245 @@
++// Ext 5112: the prefill MLP's up-projection GEMM with the SiLU-gate product fused into its epilogue.
++//
++// Served path (prefill, M >= 1024): u = hgemm_recon(x, W_up) -> the 3011 wide kernel (fp16 out, one
++// __floats2half2_rn per element pair), then act_mul_kernel_h<ACT_SILU>(g, u -> u) computes, per half2 pair,
++// x2 = _silu(g2) (h2exp / h2rcp / __hmul2 in fp16), the optional act_limit clamps, and __hmul2(x2, u2).
++// gemm_wide_silu_kernel below is gemm_wide_kernel<false, Wide> (hgemm_f16acc_wide.cuh) verbatim up to its
++// store: it rounds each accumulator pair exactly as the wide kernel does into u2, loads g2 from the same (row, col)
++// pair of the gate tensor and applies act_mul_kernel_h's SiLU-gate sequence (silu_h2 = activation_kernels.cuh
++// _silu(half2), same intrinsics in the same order), then stores. act_mul_kernel_h's half2 pairs are the flat
++// element pairs (2i, 2i + 1); with N even and col even they are exactly the epilogue's (row, col), (row, col + 1)
++// pairs, so every output value is bit-identical. u is never written; one kernel and the u round trip disappear.
++// Routed only where the served path runs the wide kernel on this shape (sm86, wide route on, f16acc enabled,
++// M >= 1024, the MLP gate/up shape K 5120 x N 17408, unbatched, contiguous, aligned); anything else runs
++// hgemm_recon + silu_mul unchanged. Kill switch EXL3_MLP_ACT_FUSE: unset or "1" = on, "0" = off.
++
++#include "hgemm_act.cuh"
++#include "hgemm.cuh"
++#include "activation.cuh"
++#include "hgemm_f16acc_wide.cuh"
++#include <c10/cuda/CUDAGuard.h>
++#include <ATen/cuda/CUDAContext.h>
++#include <cstdlib>
++#include <cstring>
++#include "util.h"
++#include "util.cuh"
++
++namespace f16acc_wide
++{
++
++__device__ __forceinline__ half2 silu_h2(half2 x)
++{
++    half2 one = __float2half2_rn(1.0f);
++    half2 neg_x = __hneg2(x);
++    half2 e = h2exp(neg_x);
++    half2 sum = __hadd2(one, e);
++    half2 r = h2rcp(sum);
++    half2 result = __hmul2(x, r);
++    return result;
++}
++
++template <class CF>
++__global__ void __launch_bounds__(CF::THREADS, CF::MINB)
++gemm_wide_silu_kernel(const half* __restrict__ A, const half* __restrict__ B, half* __restrict__ C,
++                      const half* __restrict__ G, int M, int N, int K, int ldc, float act_limit)
++{
++    constexpr int BM = CF::BM, BN = CF::BN, BK = CF::BK, THREADS = CF::THREADS;
++    constexpr int STAGES = CF::STAGES, GROUP_M = CF::GROUP_M, WARPS_N = CF::WARPS_N;
++    constexpr int WM = CF::WM, WN = CF::WN, MT = CF::MT, NT = CF::NT;
++    constexpr int A_CPR = CF::A_CPR, B_CPR = CF::B_CPR, A_STAGE = CF::A_STAGE, B_STAGE = CF::B_STAGE;
++
++    extern __shared__ __align__(128) half smem[];
++    half* As = smem;
++    half* Bs = smem + STAGES * A_STAGE;
++
++    const int grid_n = gridDim.x, grid_m = gridDim.y;
++    const int bid = blockIdx.y * grid_n + blockIdx.x;
++    const int group_size = GROUP_M * grid_n;
++    const int group = bid / group_size;
++    const int first_m = group * GROUP_M;
++    const int gm_eff = min(GROUP_M, grid_m - first_m);
++    const int in_group = bid - group * group_size;
++    const int bm = (first_m + in_group % gm_eff) * BM;
++    const int bn = (in_group / gm_eff) * BN;
++
++    const int tid = threadIdx.x, warp = tid >> 5, lane = tid & 31;
++    const int wm = warp / WARPS_N, wn = warp % WARPS_N;
++
++    auto load_tile = [&](int stage, int kt)
++    {
++        const int k0 = kt * BK;
++        half* as = As + stage * A_STAGE;
++        half* bs = Bs + stage * B_STAGE;
++        #pragma unroll
++        for (int i = 0; i < BM * A_CPR / THREADS; ++i)
++        {
++            int c = tid + i * THREADS;
++            int row = c / A_CPR, chunk = c % A_CPR;
++            int grow = bm + row;
++            bool pred = grow < M;
++            const half* src = A + (long long) (pred ? grow : 0) * K + k0 + chunk * 8;
++            cp_async16(as + a_off<A_CPR, BK>(row, chunk), src, pred);
++        }
++        #pragma unroll
++        for (int i = 0; i < BK * B_CPR / THREADS; ++i)
++        {
++            int c = tid + i * THREADS;
++            int row = c / B_CPR, chunk = c % B_CPR;
++            const half* src = B + (long long) (k0 + row) * N + bn + chunk * 8;
++            cp_async16(bs + b_off<BN>(row, chunk), src, true);
++        }
++    };
++
++    float acc[MT][NT][4];
++    #pragma unroll
++    for (int i = 0; i < MT; ++i)
++        #pragma unroll
++        for (int j = 0; j < NT; ++j)
++            acc[i][j][0] = acc[i][j][1] = acc[i][j][2] = acc[i][j][3] = 0.f;
++
++    const int KT = K / BK;
++    #pragma unroll
++    for (int s = 0; s < STAGES - 1; ++s)
++    {
++        if (s < KT) load_tile(s, s);
++        cp_async_commit();
++    }
++
++    const int a_row = wm * WM + (lane & 15), a_ch = lane >> 4;
++    const int b_row = (lane & 7) + ((lane >> 3) & 1) * 8, b_ch = (wn * WN) / 8 + (lane >> 4);
++
++    for (int kt = 0; kt < KT; ++kt)
++    {
++        cp_async_wait<STAGES - 2>();
++        __syncthreads();
++        {
++            int nk = kt + STAGES - 1;
++            if (nk < KT) load_tile(nk % STAGES, nk);
++            cp_async_commit();
++        }
++        const half* as = As + (kt % STAGES) * A_STAGE;
++        const half* bs = Bs + (kt % STAGES) * B_STAGE;
++
++        #pragma unroll
++        for (int kk = 0; kk < BK / 16; kk += 2)
++        {
++            uint32_t af[2][MT][4];
++            uint32_t bf[2][NT][2];
++            #pragma unroll
++            for (int s = 0; s < 2; ++s)
++            {
++                #pragma unroll
++                for (int i = 0; i < MT; ++i)
++                    ldsm_x4(af[s][i], as + a_off<A_CPR, BK>(a_row + i * 16, (kk + s) * 2 + a_ch));
++                #pragma unroll
++                for (int j = 0; j < NT; j += 2)
++                {
++                    uint32_t r[4];
++                    ldsm_x4_t(r, bs + b_off<BN>((kk + s) * 16 + b_row, b_ch + j));
++                    bf[s][j][0] = r[0]; bf[s][j][1] = r[1]; bf[s][j + 1][0] = r[2]; bf[s][j + 1][1] = r[3];
++                }
++            }
++            #pragma unroll
++            for (int i = 0; i < MT; ++i)
++                #pragma unroll
++                for (int j = 0; j < NT; ++j)
++                {
++                    uint32_t h[2] = {0u, 0u};
++                    mma_h(h, af[0][i], bf[0][j]);
++                    mma_h(h, af[1][i], bf[1][j]);
++                    float2 f0 = __half22float2(*reinterpret_cast<half2*>(&h[0]));
++                    float2 f1 = __half22float2(*reinterpret_cast<half2*>(&h[1]));
++                    acc[i][j][0] += f0.x; acc[i][j][1] += f0.y;
++                    acc[i][j][2] += f1.x; acc[i][j][3] += f1.y;
++                }
++        }
++    }
++
++    const int g = lane >> 2, t = lane & 3;
++    const bool limit = act_limit != 0.0f;
++    #pragma unroll
++    for (int i = 0; i < MT; ++i)
++        #pragma unroll
++        for (int j = 0; j < NT; ++j)
++        {
++            int col = bn + wn * WN + j * 8 + t * 2;
++            #pragma unroll
++            for (int h = 0; h < 2; ++h)
++            {
++                int row = bm + wm * WM + i * 16 + g + h * 8;
++                if (row >= M) continue;
++                float v0 = acc[i][j][h * 2], v1 = acc[i][j][h * 2 + 1];
++                half2 y2 = __floats2half2_rn(v0, v1);
++                half2 x2 = silu_h2(*reinterpret_cast<const half2*>(G + (long long) row * ldc + col));
++                if (limit)
++                {
++                    y2 = __hmax2(y2, __float2half2_rn(-act_limit));
++                    y2 = __hmin2(y2, __float2half2_rn(act_limit));
++                    x2 = __hmin2(x2, __float2half2_rn(act_limit));
++                }
++                *reinterpret_cast<half2*>(C + (long long) row * ldc + col) = __hmul2(x2, y2);
++            }
++        }
++}
++
++} // namespace f16acc_wide
++
++namespace
++{
++
++using WideAct = f16acc_wide::Cfg<128, 128, 32, 2, 2, 3, 8, 2>;   // hgemm_f16acc.cu Wide (3011)
++
++bool env_on(const char* name)
++{
++    const char* env = std::getenv(name);
++    if (!env || std::strcmp(env, "1") == 0) return true;
++    TORCH_CHECK(std::strcmp(env, "0") == 0, name, " must be 0 or 1");
++    return false;
++}
++
++bool fused_route(const at::Tensor& a, const at::Tensor& b, const at::Tensor& c, const at::Tensor& gate)
++{
++    if (!env_on("EXL3_MLP_ACT_FUSE") || !env_on("EXL3_HGEMM_F16ACC_WIDE")) return false;
++    if (!a.is_cuda() || a.device() != b.device() || a.device() != c.device() || a.device() != gate.device()) return false;
++    const auto* props = at::cuda::getDeviceProperties(a.device().index());
++    if (props->major != 8 || props->minor != 6) return false;
++    if (a.dtype() != at::kHalf || b.dtype() != at::kHalf || c.dtype() != at::kHalf || gate.dtype() != at::kHalf) return false;
++    if (a.dim() != 2 || b.dim() != 2 || c.dim() != 2 || gate.sizes() != c.sizes()) return false;
++    const int64_t M = a.size(0), K = a.size(1), N = b.size(1);
++    if (K != 5120 || N != 17408 || b.size(0) != K || c.size(0) != M || c.size(1) != N || M < 1024) return false;
++    if (M > (int64_t) 65535 * WideAct::BM) return false;
++    if (!a.is_contiguous() || !b.is_contiguous() || !c.is_contiguous() || !gate.is_contiguous()) return false;
++    if (((uintptr_t) a.data_ptr() & 15) || ((uintptr_t) b.data_ptr() & 15) || ((uintptr_t) c.data_ptr() & 3) ||
++        ((uintptr_t) gate.data_ptr() & 3)) return false;
++    if (gate.data_ptr() == c.data_ptr()) return false;
++    return hgemm_f16acc_status(a.device().index()) == 1;
++}
++
++} // namespace
++
++void hgemm_recon_silu_mul(at::Tensor a, at::Tensor b, at::Tensor c, at::Tensor gate, float act_limit)
++{
++    if (!fused_route(a, b, c, gate))
++    {
++        hgemm_recon(a, b, c);
++        silu_mul(gate, c, c, act_limit);
++        return;
++    }
++    const at::cuda::OptionalCUDAGuard device_guard(a.device());
++    cudaStream_t stream = at::cuda::getCurrentCUDAStream().stream();
++    auto kern = f16acc_wide::gemm_wide_silu_kernel<WideAct>;
++    static bool attr_set[64] = {};
++    int device = a.device().index();
++    TORCH_CHECK(device >= 0 && device < 64, "hgemm_recon_silu_mul: device index");
++    if (!attr_set[device])
++    {
++        cuda_check(cudaFuncSetAttribute(kern, cudaFuncAttributeMaxDynamicSharedMemorySize, (int) WideAct::SMEM_BYTES));
++        attr_set[device] = true;
++    }
++    int M = a.size(0), K = a.size(1), N = b.size(1);
++    dim3 grid(N / WideAct::BN, (M + WideAct::BM - 1) / WideAct::BM, 1);
++    kern<<<grid, WideAct::THREADS, WideAct::SMEM_BYTES, stream>>>(
++        (const half*) a.data_ptr(), (const half*) b.data_ptr(), (half*) c.data_ptr(), (const half*) gate.data_ptr(),
++        M, N, K, (int) c.stride(0), act_limit);
++    cuda_check(cudaPeekAtLastError());
++}
+--- /dev/null
++++ b/exllamav3_ext/hgemm_act.cuh
+@@ -0,0 +1,8 @@
++#pragma once
++
++// Ext 5112: up-projection GEMM with the SiLU-gate product in its epilogue (prefill MLP, see hgemm_act.cu).
++
++#include <ATen/Tensor.h>
++
++// c = silu(gate) * (a @ b), fp16, exactly as hgemm_recon(a, b, c) followed by silu_mul(gate, c, c, act_limit)
++void hgemm_recon_silu_mul(at::Tensor a, at::Tensor b, at::Tensor c, at::Tensor gate, float act_limit);

@@ -687,6 +687,8 @@ Declared 350 W, core 0, memory 0 (§3). Image `tree3s` (`sha256:ec9751b0…`), #
 |---|---|---|---|---|---|
 | #70 | `tree3s` `ec9751b0…` | #68 | 977.9 | 5.89 / 25.80 / 153.78 / 435.05 | baseline |
 | #71 | `p3020` `023c8662…` | + `3020-prefill-pattn8` (8-warp prefill attention, same per-element order) | **1072.8** (+9.7 %) | 5.81 / 24.44 / 135.00 / 365.90 | 9/9 rows = #70 |
+| #72 | `p3020f` `5174b18b…` | + `5111-gdn-prefill-fuse-nom4096` (GDN conv reads the fp32 qkv, writes contiguous q/k/v) + `5112-mlp-act-fuse` (SiLU·up in the gate/up GEMM store) | **1087.8** (+11.2 %) | 5.69 / 24.09 / 133.65 / 362.47 | 9/9 rows = #70 |
 
 - 3020 exactness: kernel 76/76 bitwise vs 3010; served ids identical on the lane mix (forced chain and tree, 57,651 ids).
+- 5111 / 5112 exactness: request-scoped prefill end state, served ids and rounds identical with each kill switch (`EXL3_GDN_PREFILL_FUSE`, `EXL3_MLP_ACT_FUSE`) on vs off at 32K (ABBA) and 128K (AB), proved on stacks that also carried 5110; the kept 5111 drops only 5110's b/a-split hunk. #72's 9 rows match #70.
 - `5110-prefill-m4096` (merge aligned 2048 pieces into 4096): prefill state, ids and rounds identical at 32K/128K (TTFT ×0.974 / ×0.970), but the 262K run ended in a swallowed job error; not kept.

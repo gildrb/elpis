@@ -16,7 +16,7 @@
     "path": "/opt/venv/lib/python3.13/site-packages/exllamav3_ext.cpython-313-x86_64-linux-gnu.so",
     "base_sha256": "6d30690fdb76b3c4ad3fb5e69f0479707e410fc9b6194e2a5e32f4d7fe1fd8b3"
   },
-  "series_sha256": "af38d73f62d860167c68d7d8594d11e2e4460ec11a201d99a95d0e19edc2249d",
+  "series_sha256": "efc033e74697c0d998957222d11d27ffc6722b9c8754d8eedd9ecb0b436087a8",
   "patches": [
     {
       "name": "0001-gdn-shared-carveout.patch",
@@ -165,6 +165,14 @@
     {
       "name": "3020-prefill-pattn8.patch",
       "sha256": "3d9247c8c357aee5a7c5856cce587e068fb87298b6c70dbbda1c1956f7de0e0d"
+    },
+    {
+      "name": "5111-gdn-prefill-fuse-nom4096.patch",
+      "sha256": "ed5a4677ea89583794ad9e3173dd5d3eec0293f14f0956984fcf0458772053ef"
+    },
+    {
+      "name": "5112-mlp-act-fuse.patch",
+      "sha256": "37807aeb2abe37e15c2640760f1ed2db521d5f17ffcf6132f4ed55d1276337bd"
     }
   ],
   "files": {
@@ -206,7 +214,7 @@
     },
     "exllamav3_ext/bindings.cpp": {
       "pre": "381d867b845335b15106f86aa79e284c9d6b7d316703dd555d8a86a13ed2b465",
-      "post": "72bc9e9b2e93e3452a2803a9974b9877aa5492d30ef4ac810b4237d0b20f2f81"
+      "post": "226d1f593d56eb4d97afc7b8453d4c338c4bd44a29f16a7ef7df418e8fb8f008"
     },
     "exllamav3_ext/dflash2.cu": {
       "pre": "dd5023eea10408948da25b68e4d6242628704886c261c1c63bd5213887298250",
@@ -243,6 +251,14 @@
     "exllamav3_ext/graph.cuh": {
       "pre": "6fe8e3d3ab39d885ff8447f6f8f3397c35387619722fca0222eddcc753b6d074",
       "post": "f24b0f6a2c80308244aa3670587ba24a50214fd9a7da10132400c511722a41fd"
+    },
+    "exllamav3_ext/hgemm_act.cu": {
+      "pre": null,
+      "post": "d4831e90cc92fcf8c108288f3b48dc31479a41b39970fd082c8ef7e4bb5e5a37"
+    },
+    "exllamav3_ext/hgemm_act.cuh": {
+      "pre": null,
+      "post": "acb3be2809701e95af68d2b51c2a5c854da7b025e2da444bec6712488468a36b"
     },
     "exllamav3_ext/hgemm_f16acc.cu": {
       "pre": "e2bf4f7769595b98feb2be066a6f8edfb60f30e99c46e2ed2e7d4ede16842c94",
@@ -438,11 +454,23 @@
     },
     "modules/gated_delta_net.py": {
       "pre": "955f2ae25509ccf695dac4b79721115bc51d9d63a7f6f1eeb0a42671b685cf5a",
-      "post": "86d90f0c9f4f27987401057196289b8ab2de4e1465c58a61c7db82bc9b4361a5"
+      "post": "4c6ffc9816b5b30ceff1be2793ee5433e48fc51e6c862c1e0449c63d8e6b0deb"
+    },
+    "modules/gated_delta_net_fn/conv1d.py": {
+      "pre": "a08e99093b0d76e33cf256931ad027b019404caf7b92ffd07b2d84b8187c0452",
+      "post": "edd8e2b7e284361a53733514f55c940c5435275dc42d4113bb3b2ed2718e2697"
+    },
+    "modules/gated_delta_net_fn/gated_delta_rule.py": {
+      "pre": "1cff6e3b4239111ce22b212f8501858228c644373e4549fc889c1d5453caea9f",
+      "post": "4bce6ed9ad808026a8636f11cbcce39e1270879a14e87f60e94639840119f570"
     },
     "modules/mlp.py": {
       "pre": "ca921d38cdf607a2dd272bc4f2ddfd9db8f4da7de9df91af32262a0fef611587",
-      "post": "7fc7f276ff7ca1e00d27a2483c81a2948f7526ffeeb0dbfa6536628a87b50c6d"
+      "post": "79a50301fd1bd5f4441566859ff5a5898b08f708a9c087067caa4ec413996770"
+    },
+    "modules/quant/exl3.py": {
+      "pre": "8433896023d5fc4d5a8225e0ca8b05592d63e1a5622a18be956500697e35ac7a",
+      "post": "2ab9f238a2763224ac3ddb3806715cbbfac64d6914568d7cd90770ef2e6dd432"
     },
     "modules/transformer.py": {
       "pre": "6ea3147ffaf54568688a7fa10c385672ec06a1c21c3ab2cb30a1189b2d76bc4a",
