@@ -1,0 +1,348 @@
+--- a/exllamav3_ext/pattn.cu
++++ b/exllamav3_ext/pattn.cu
+@@ -1,10 +1,24 @@
+ #include "pattn.cuh"
+ #include "pattn_kernel.cuh"
++#include "pattn8_kernel.cuh"
+ #include <c10/cuda/CUDAGuard.h>
+ #include <ATen/cuda/CUDAContext.h>
++#include <cstdlib>
++#include <cstring>
+ #include "util.h"
+ #include "util.cuh"
+ 
++// Ext 3020: route to the 8-warp kernel (pattn8_kernel.cuh, bit-identical output). Kill switch
++// EXL3_PATTN8: unset or "1" = on, "0" = off, anything else is an error (read per call, so one process
++// can A/B it).
++static bool pattn8_enabled()
++{
++    const char* env = std::getenv("EXL3_PATTN8");
++    if (!env || std::strcmp(env, "1") == 0) return true;
++    TORCH_CHECK(std::strcmp(env, "0") == 0, "EXL3_PATTN8 must be 0 or 1");
++    return false;
++}
++
+ void pattn_prefill
+ (
+     const at::Tensor& q,
+@@ -34,8 +48,28 @@
+     {
+         cuda_check(cudaFuncSetAttribute(pattn_detail::pattn_kernel<true>, cudaFuncAttributeMaxDynamicSharedMemorySize, PA_SMEM));
+         cuda_check(cudaFuncSetAttribute(pattn_detail::pattn_kernel<false>, cudaFuncAttributeMaxDynamicSharedMemorySize, PA_SMEM));
++        cuda_check(cudaFuncSetAttribute(pattn_detail::pattn8_kernel<true>, cudaFuncAttributeMaxDynamicSharedMemorySize, P8_SMEM));
++        cuda_check(cudaFuncSetAttribute(pattn_detail::pattn8_kernel<false>, cudaFuncAttributeMaxDynamicSharedMemorySize, P8_SMEM));
+         init = true;
+     }
++    if (pattn8_enabled())
++    {
++        const int nqc = (q_len + P8_NB * PA_BQ - 1) / (P8_NB * PA_BQ);
++        TORCH_CHECK(nqc <= 65535 && bsz <= 65535, "pattn8: grid");
++        dim3 grid(n_kv_heads * P8_PAIRS, nqc, bsz);
++        if (mode == 1)
++            pattn_detail::pattn8_kernel<true><<<grid, P8_THREADS, P8_SMEM, stream>>>(
++                (const half*) q.data_ptr(), (const half*) k16.data_ptr(), (const half*) v16.data_ptr(),
++                (const int*) block_table.data_ptr(), (const int*) cache_seqlens.data_ptr(), (half*) out.data_ptr(),
++                (int) block_table.size(1), q_len, kv_append_len, n_q_heads, n_kv_heads, scale_log2);
++        else
++            pattn_detail::pattn8_kernel<false><<<grid, P8_THREADS, P8_SMEM, stream>>>(
++                (const half*) q.data_ptr(), (const half*) k16.data_ptr(), (const half*) v16.data_ptr(),
++                (const int*) block_table.data_ptr(), (const int*) cache_seqlens.data_ptr(), (half*) out.data_ptr(),
++                (int) block_table.size(1), q_len, kv_append_len, n_q_heads, n_kv_heads, scale_log2);
++        cuda_check(cudaPeekAtLastError());
++        return;
++    }
+     dim3 grid((q_len + PA_BQ - 1) / PA_BQ, n_kv_heads, bsz);
+     if (mode == 1)
+         pattn_detail::pattn_kernel<true><<<grid, PA_THREADS, PA_SMEM, stream>>>(
+--- /dev/null
++++ b/exllamav3_ext/pattn8_kernel.cuh
+@@ -0,0 +1,289 @@
++#pragma once
++
++// Ext 3020 (pattn8): the ext 3010 prefill attention kernel with 8 warps per CTA instead of 6.
++// 3010's CTA is (16 query positions, 6 q heads of one kv head): 6 warps on the SM's 4 schedulers, so two
++// schedulers carry two warps and two carry one, and every K / V tile barrier waits for the doubly loaded
++// ones. Here a CTA is (64 query positions = 4 blocks of 16, 2 of the kv head's 6 q heads): warp w owns
++// block w % 4 of q head 2 * pair + w / 4, so each scheduler (w % 4) carries two warps of the same block.
++// Every warp runs exactly 3010's per-warp arithmetic over exactly 3010's tiles for its (q head, block):
++// the same 32-key tiles from key 0 up to its own block's last visible key (ceil(min(q_abs0 + 16, total)
++// / 32) tiles), the same fp16-scaled q, span / tile flush order, mask, online softmax, P rounding and
++// epilogue (all code below the warp mapping is 3010's text), so the output is bit-identical to 3010.
++// A warp past its own last tile (the CTA's earlier blocks need up to 2 fewer tiles) only joins the
++// barriers; a warp whose 16 positions all lie past q_len does no work and stores nothing.
++// K / V tiles are loaded once per CTA and shared by the 8 warps (3010: 6).
++#include "pattn_kernel.cuh"
++
++#define P8_NW 8
++#define P8_NB 4                                            // query blocks of PA_BQ per CTA
++#define P8_NH 2                                            // q heads per CTA
++#define P8_PAIRS (PA_G / P8_NH)                            // CTAs per kv head per 64 positions
++#define P8_THREADS (P8_NW * 32)
++#define P8_Q_OFF 0                                         // [128][256] fp16, swizzled (row = warp * 16 + pos)
++#define P8_K_OFF (P8_Q_OFF + P8_NW * PA_BQ * PA_HD * 2)     // [32][256] fp16, swizzled
++#define P8_V_OFF (P8_K_OFF + PA_BN * PA_HD * 2)
++#define P8_SMEM (P8_V_OFF + PA_BN * PA_HD * 2)
++
++static_assert(P8_NB * P8_NH == P8_NW && P8_NB == 4, "one query block per scheduler (warp % 4)");
++static_assert(P8_PAIRS * P8_NH == PA_G, "q head pairs tile the GQA group");
++static_assert(P8_SMEM <= 99 * 1024, "sm86 opt-in shared memory");
++
++namespace pattn_detail {
++
++template <bool F16>
++__global__ void __launch_bounds__(P8_THREADS, 1) pattn8_kernel(
++    const half* __restrict__ q,            // (bsz, q_len, n_q_heads, 256)
++    const half* __restrict__ k16,          // (pages, 256, n_kv_heads, 256) fp16 staged K
++    const half* __restrict__ v16,
++    const int* __restrict__ block_table,   // (bsz, num_pages_per_seq)
++    const int* __restrict__ cache_seqlens, // (bsz) keys before this chunk
++    half* __restrict__ out,                // like q
++    int num_pages_per_seq, int q_len, int kv_append_len, int n_q_heads, int n_kv_heads, float scale_log2)
++{
++    extern __shared__ __align__(16) unsigned char smem[];
++    half* qs = (half*) (smem + P8_Q_OFF);
++    half* ks = (half*) (smem + P8_K_OFF);
++    half* vs = (half*) (smem + P8_V_OFF);
++
++    const int kvh = blockIdx.x / P8_PAIRS, pair = blockIdx.x % P8_PAIRS;
++    const int qc = gridDim.y - 1 - blockIdx.y;    // longest (latest) query chunks first
++    const int b = blockIdx.z;
++    const int tid = threadIdx.x, warp = tid >> 5, lane = tid & 31, gid = lane >> 2, t = lane & 3;
++    const int wb = warp % P8_NB, wh = warp / P8_NB;
++    const int total = cache_seqlens[b] + kv_append_len;
++    const int c0 = qc * P8_NB * PA_BQ;            // the CTA's first query position
++    const int n_hi_cta = min(total - q_len + c0 + P8_NB * PA_BQ, total);
++    const int ntiles_cta = (n_hi_cta + PA_BN - 1) / PA_BN;
++    const int* bt = block_table + (size_t) b * num_pages_per_seq;
++
++    // this warp's 3010 CTA: query block p0 of q head hq
++    const int p0 = c0 + wb * PA_BQ;
++    const int hq = kvh * PA_G + pair * P8_NH + wh;
++    const int q_abs0 = total - q_len + p0;        // absolute position of the warp's first row
++    const int n_hi = min(q_abs0 + PA_BQ, total);  // keys [0, n_hi) are visible to some row
++    const int ntiles = p0 < q_len ? (n_hi + PA_BN - 1) / PA_BN : 0;
++
++    // one 32-key x 256-dim fp16 tile of K or V (512 B per key: 32 chunks of 16 B); keys >= total zero-filled
++    auto issue = [&] (const half* src, half* dst, int it)
++    {
++        const int n0 = it * PA_BN;
++        const size_t row0 = (size_t) bt[n0 / PA_PAGE] * PA_PAGE + (n0 % PA_PAGE);
++        #pragma unroll
++        for (int i = 0; i < (PA_BN * 32 + P8_THREADS - 1) / P8_THREADS; ++i)
++        {
++            int c = tid + i * P8_THREADS;
++            if (c < PA_BN * 32)
++            {
++                int tok = c >> 5, ch = c & 31;
++                bool valid = n0 + tok < total;
++                const half* g = src + (((row0 + (valid ? tok : 0)) * n_kv_heads + kvh) * PA_HD + ch * 8);
++                cp_async16(dst + swz(tok, ch * 8), g, valid);
++            }
++        }
++    };
++
++    if (ntiles_cta > 0) issue(k16, ks, 0);
++    cp_commit();
++    if (ntiles_cta > 0) issue(v16, vs, 0);
++    cp_commit();
++
++    // q rows, scaled into the log2 domain, fp16; smem row r = warp * 16 + pos
++    for (int c = tid; c < P8_NW * PA_BQ * 32; c += P8_THREADS)
++    {
++        int row = c >> 5, ch = c & 31, w = row / PA_BQ, pos = row - w * PA_BQ;
++        int p = c0 + (w % P8_NB) * PA_BQ + pos, h = kvh * PA_G + pair * P8_NH + w / P8_NB;
++        bool valid = p < q_len;
++        uint4 u = make_uint4(0, 0, 0, 0);
++        if (valid)
++            u = *reinterpret_cast<const uint4*>(q + (((size_t) b * q_len + p) * n_q_heads + h) * PA_HD + ch * 8);
++        half2* h2 = reinterpret_cast<half2*>(&u);
++        uint32_t w4[4];
++        #pragma unroll
++        for (int j = 0; j < 4; ++j)
++        {
++            float2 f = __half22float2(h2[j]);
++            w4[j] = pack_h2(f.x * scale_log2, f.y * scale_log2);
++        }
++        *reinterpret_cast<uint4*>(qs + swz(row, ch * 8)) = make_uint4(w4[0], w4[1], w4[2], w4[3]);
++    }
++
++    float acc[32][4];
++    #pragma unroll
++    for (int j = 0; j < 32; ++j)
++        #pragma unroll
++        for (int e = 0; e < 4; ++e) acc[j][e] = 0.f;
++    float m[2] = {-INFINITY, -INFINITY}, l[2] = {0.f, 0.f};
++    const int qrow = warp * PA_BQ;
++    const int q_abs_r0 = q_abs0 + gid, q_abs_r1 = q_abs0 + gid + 8;
++    uint32_t pa[2][4];
++
++    #pragma unroll 1
++    for (int it = 0; it < ntiles_cta; ++it)
++    {
++        asm volatile("cp.async.wait_group 1;\n" ::);   // K(it) landed (V(it) may be in flight)
++        __syncthreads();                              // (A) K(it) visible; qs stored
++        const int n0 = it * PA_BN;
++        const bool act = it < ntiles;                 // warp-uniform
++
++        if (act)
++        {
++            // S = Q K^T (log2 domain)
++            float sc[4][4];
++            #pragma unroll
++            for (int nt = 0; nt < 4; ++nt)
++                #pragma unroll
++                for (int e = 0; e < 4; ++e) sc[nt][e] = 0.f;
++            #pragma unroll
++            for (int g = 0; g < 8; ++g)
++            {
++                uint32_t a[2][4];
++                #pragma unroll
++                for (int s = 0; s < 2; ++s)
++                    ldsm_x4(a[s], qs + swz(qrow + (lane & 15), 32 * g + 16 * s + (lane >> 4) * 8));
++                #pragma unroll
++                for (int nt = 0; nt < 4; ++nt)
++                {
++                    uint32_t bk[4];
++                    ldsm_x4(bk, ks + swz(8 * nt + (lane & 7), 32 * g + (lane >> 3) * 8));
++                    if constexpr (F16)
++                    {
++                        uint32_t d[2] = {0u, 0u};
++                        mma_f16(d, a[0], bk[0], bk[1]);
++                        mma_f16(d, a[1], bk[2], bk[3]);
++                        float2 f0 = __half22float2(*reinterpret_cast<half2*>(&d[0]));
++                        float2 f1 = __half22float2(*reinterpret_cast<half2*>(&d[1]));
++                        sc[nt][0] += f0.x; sc[nt][1] += f0.y; sc[nt][2] += f1.x; sc[nt][3] += f1.y;
++                    }
++                    else
++                    {
++                        mma_f32(sc[nt], a[0], bk[0], bk[1]);
++                        mma_f32(sc[nt], a[1], bk[2], bk[3]);
++                    }
++                }
++            }
++
++            // Causal / length mask (tiles reaching past the warp's first row only)
++            if (n0 + PA_BN - 1 > q_abs0)
++            {
++                #pragma unroll
++                for (int nt = 0; nt < 4; ++nt)
++                    #pragma unroll
++                    for (int e = 0; e < 4; ++e)
++                    {
++                        int key = n0 + 8 * nt + 2 * t + (e & 1);
++                        int qa = (e & 2) ? q_abs_r1 : q_abs_r0;
++                        if (key > qa || key >= total) sc[nt][e] = -INFINITY;
++                    }
++            }
++
++            // Online softmax (per-thread partial row sums; quad-reduced at the end)
++            float alpha[2];
++            #pragma unroll
++            for (int r = 0; r < 2; ++r)
++            {
++                float mx = -INFINITY;
++                #pragma unroll
++                for (int nt = 0; nt < 4; ++nt) mx = fmaxf(mx, fmaxf(sc[nt][2 * r], sc[nt][2 * r + 1]));
++                mx = fmaxf(mx, __shfl_xor_sync(0xffffffffu, mx, 1));
++                mx = fmaxf(mx, __shfl_xor_sync(0xffffffffu, mx, 2));
++                float m_new = fmaxf(m[r], mx);
++                float m_use = m_new == -INFINITY ? 0.f : m_new;
++                alpha[r] = m[r] == -INFINITY ? 0.f : ex2(m[r] - m_use);
++                float sum = 0.f;
++                #pragma unroll
++                for (int nt = 0; nt < 4; ++nt)
++                    #pragma unroll
++                    for (int e = 0; e < 2; ++e)
++                    {
++                        float p = ex2(sc[nt][2 * r + e] - m_use);   // -inf -> 0
++                        sc[nt][2 * r + e] = p;
++                        sum += p;
++                    }
++                l[r] = l[r] * alpha[r] + sum;
++                m[r] = m_new;
++            }
++            if (__any_sync(0xffffffffu, alpha[0] != 1.f || alpha[1] != 1.f))
++            {
++                #pragma unroll
++                for (int j = 0; j < 32; ++j)
++                {
++                    acc[j][0] *= alpha[0]; acc[j][1] *= alpha[0];
++                    acc[j][2] *= alpha[1]; acc[j][3] *= alpha[1];
++                }
++            }
++            #pragma unroll
++            for (int kk = 0; kk < 2; ++kk)
++            {
++                pa[kk][0] = pack_h2(sc[2 * kk][0], sc[2 * kk][1]);
++                pa[kk][1] = pack_h2(sc[2 * kk][2], sc[2 * kk][3]);
++                pa[kk][2] = pack_h2(sc[2 * kk + 1][0], sc[2 * kk + 1][1]);
++                pa[kk][3] = pack_h2(sc[2 * kk + 1][2], sc[2 * kk + 1][3]);
++            }
++        }
++
++        cp_wait0();
++        __syncthreads();                              // (B) V(it) visible; every warp done with K(it)
++        if (it + 1 < ntiles_cta) issue(k16, ks, it + 1);
++        cp_commit();
++
++        if (act)
++        {
++            // O += P V
++            #pragma unroll
++            for (int dn = 0; dn < 16; ++dn)
++            {
++                uint32_t bv[2][4];
++                #pragma unroll
++                for (int kk = 0; kk < 2; ++kk)
++                    ldsm_x4_t(bv[kk], vs + swz(16 * kk + (lane & 7) + ((lane >> 3) & 1) * 8, 16 * dn + (lane >> 4) * 8));
++                #pragma unroll
++                for (int hn = 0; hn < 2; ++hn)
++                {
++                    float* o = acc[2 * dn + hn];
++                    if constexpr (F16)
++                    {
++                        uint32_t d[2] = {0u, 0u};
++                        mma_f16(d, pa[0], bv[0][2 * hn], bv[0][2 * hn + 1]);
++                        mma_f16(d, pa[1], bv[1][2 * hn], bv[1][2 * hn + 1]);
++                        float2 f0 = __half22float2(*reinterpret_cast<half2*>(&d[0]));
++                        float2 f1 = __half22float2(*reinterpret_cast<half2*>(&d[1]));
++                        o[0] += f0.x; o[1] += f0.y; o[2] += f1.x; o[3] += f1.y;
++                    }
++                    else
++                    {
++                        mma_f32(o, pa[0], bv[0][2 * hn], bv[0][2 * hn + 1]);
++                        mma_f32(o, pa[1], bv[1][2 * hn], bv[1][2 * hn + 1]);
++                    }
++                }
++            }
++        }
++
++        asm volatile("cp.async.wait_group 1;\n" ::);   // K(it + 1) may still be in flight
++        __syncthreads();                              // (C) every warp done with V(it)
++        if (it + 1 < ntiles_cta) issue(v16, vs, it + 1);
++        cp_commit();
++    }
++    cp_wait0();
++    if (ntiles == 0) return;                          // all 16 positions past q_len: nothing to store
++
++    // out = acc / l, fp16
++    #pragma unroll
++    for (int r = 0; r < 2; ++r)
++    {
++        l[r] += __shfl_xor_sync(0xffffffffu, l[r], 1);
++        l[r] += __shfl_xor_sync(0xffffffffu, l[r], 2);
++        l[r] = l[r] == 0.f ? 0.f : 1.f / l[r];
++    }
++    #pragma unroll
++    for (int r = 0; r < 2; ++r)
++    {
++        int pos = p0 + gid + 8 * r;
++        if (pos >= q_len) continue;
++        half* orow = out + (((size_t) b * q_len + pos) * n_q_heads + hq) * PA_HD;
++        #pragma unroll
++        for (int j = 0; j < 32; ++j)
++            *reinterpret_cast<uint32_t*>(orow + 8 * j + 2 * t) = pack_h2(acc[j][2 * r] * l[r], acc[j][2 * r + 1] * l[r]);
++    }
++}
++
++} // namespace pattn_detail

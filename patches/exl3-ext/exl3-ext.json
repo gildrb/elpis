@@ -16,7 +16,7 @@
     "path": "/opt/venv/lib/python3.13/site-packages/exllamav3_ext.cpython-313-x86_64-linux-gnu.so",
     "base_sha256": "6d30690fdb76b3c4ad3fb5e69f0479707e410fc9b6194e2a5e32f4d7fe1fd8b3"
   },
-  "series_sha256": "48deeccb8c71c599dd9934b2933df767d48c0dbb6fb1068d32ad42567d5dbaa8",
+  "series_sha256": "af38d73f62d860167c68d7d8594d11e2e4460ec11a201d99a95d0e19edc2249d",
   "patches": [
     {
       "name": "0001-gdn-shared-carveout.patch",
@@ -161,6 +161,10 @@
     {
       "name": "3013-kv-compact-rows.patch",
       "sha256": "6e927e6c3f340ecdd28775d6125bf7f273e90f35837aefb2821a037dbb465f15"
+    },
+    {
+      "name": "3020-prefill-pattn8.patch",
+      "sha256": "3d9247c8c357aee5a7c5856cce587e068fb87298b6c70dbbda1c1956f7de0e0d"
     }
   ],
   "files": {
@@ -298,11 +302,15 @@
     },
     "exllamav3_ext/pattn.cu": {
       "pre": null,
-      "post": "c7078f757e0ae8f790cf1b75b1a8bf70998173e8bd04f01e3ff1a5a5e4c9f91f"
+      "post": "868108dbc22850c67922204dc20a4db61aafcfd79cfecf2a74feddf47045dbb2"
     },
     "exllamav3_ext/pattn.cuh": {
       "pre": null,
       "post": "16eaa273a4ea9ac8a76ccf809350661e593fcacaa080e1ba11bd890a5f247742"
+    },
+    "exllamav3_ext/pattn8_kernel.cuh": {
+      "pre": null,
+      "post": "1e2bd338f7a0bf6748a752f442942a5f1e5613193e67eadf657fd063a59418d3"
     },
     "exllamav3_ext/pattn_kernel.cuh": {
       "pre": null,

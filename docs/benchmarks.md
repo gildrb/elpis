@@ -678,3 +678,15 @@ Declared 350 W, core 0, memory 0 (§3). Image `tree3s` (`sha256:ec9751b0…`), #
 | 3 or 5-6 children per popped node | −0.11 % / −0.02 % |
 | Suffix/copy candidates from the full history (longest earlier match ≤ 32 tokens, merged into the 8 rows) | −0.02 % (−0.10..+0.03); used in 1.4 % of rounds |
 | Oracle 8-row tree (true path always present) | +43.8 %: the headroom is candidate quality (the draft), not the shape |
+
+## 8. Segment 12: cold prefill (`exl3-native-prefill-ttft-v1`, 350 W, 2026-09-29)
+
+§2a suite; TTFT = 1-token request wall time (prefill + first verify round + HTTP), cold (unique leading nonce).
+
+| Run | Image | Stack | Prefill tok/s (geomean) | TTFT 8K / 32K / 128K / 262K s | Texts |
+|---|---|---|---|---|---|
+| #70 | `tree3s` `ec9751b0…` | #68 | 977.9 | 5.89 / 25.80 / 153.78 / 435.05 | baseline |
+| #71 | `p3020` `023c8662…` | + `3020-prefill-pattn8` (8-warp prefill attention, same per-element order) | **1072.8** (+9.7 %) | 5.81 / 24.44 / 135.00 / 365.90 | 9/9 rows = #70 |
+
+- 3020 exactness: kernel 76/76 bitwise vs 3010; served ids identical on the lane mix (forced chain and tree, 57,651 ids).
+- `5110-prefill-m4096` (merge aligned 2048 pieces into 4096): prefill state, ids and rounds identical at 32K/128K (TTFT ×0.974 / ×0.970), but the 262K run ended in a swallowed job error; not kept.
