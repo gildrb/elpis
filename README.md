@@ -35,11 +35,11 @@ What differs:
   trellis-serve 2.25-3.48 (MTP) and 2.45-5.65 (DFlash2) on its panel; eta 3.93 on the lane's
   C1 rows, 5.66 on GSM8K.
 
-Prefill and long context (others quoted; eta *computed* from the C1 whole-request regressions, 95 % CI):
+Prefill and long context (others quoted; eta measured: cold prompt, time of a 1-token request, 350 W, run #72):
 
 | One RTX 3090 | 32K prompt: time to first token | Longest prompt shown |
 |---|---|---|
-| **eta** (350 W) | ≈26.2 s ±2.4 (≈1,250 tok/s) | 262,136 tokens: 537 s prefill (250 W) |
+| **eta** (350 W) | 24.1 s (1,362 tok/s) | 262,000 tokens: 362.5 s to first token |
 | trellis-serve MTP (README headline) | 21.9 s (1,497 tok/s) | 208,858 tokens: 294 s to first token |
 | trellis-serve DFlash2 | 35.9 s (914 tok/s) | 126,782 tokens: 187 s to first token |
 | r0b0tlab | not published (150K prompt: 594 tok/s) | 262,080 tokens (needle test) |
@@ -50,19 +50,19 @@ In short:
 
 - Same test, same 350 W cap: eta 202.9 vs r0b0tlab 162.9 tok/s (+24.6 %).
 - Decode only: trellis-serve DFlash2 225-227 tok/s on its code and thinking-on prose panels (3.00 bpw, 131K window, SM 1.74 GHz, power unpublished); eta 214.8 on GSM8K (*computed*; 4.00 bpw, 262K window).
-- Prefill at 32K: trellis-serve MTP fastest (21.9 s); eta ≈26.2 s (*computed*); trellis-serve DFlash2 35.9 s.
+- Prefill at 32K: trellis-serve MTP fastest (21.9 s); eta 24.1 s; trellis-serve DFlash2 35.9 s.
 - trellis-serve's README headline (MTP): 96-141 tok/s decode.
 
 ## Speed
 
-**Target:** most tok/s at the native 262K context, one RTX 3090, 350 W. **Status** (live `tree3s`, 350 W, memory offset 0, 2026-09-28):
+**Target:** most tok/s at the native 262K context, one RTX 3090, 350 W. **Status** (live `p3020fh`: #72's stack = the `tree3s` decode stack + prefill patches 3020/5111/5112; 350 W, memory offset 0, 2026-09-29; decode rows measured on `tree3s`, whose decode path is unchanged):
 
 | Workload | tok/s | Tokens / round | tok/J |
 |---|---|---|---|
 | **Lane**: 20 calls, AIME 2025 · MMLU-Pro · I3 Logic · LiveCodeBench v6, thinking on, whole request (#68) | **161.79** | — | **0.497** |
 | **GSM8K**: 40 questions, 512 tokens, median of 5 runs | **202.9** | 5.66 | **0.617** |
 | C1 whole request, 1K / 8K / 32K-token prompt, 1,024 tokens out | 185.3 / 73.3 / 29.0 | 5.81 / 3.40 / 3.37 | 0.578 / 0.217 / 0.085 |
-| Prefill, 32K prompt (*computed* from the C1 regression, 95 % CI) | ≈1,250 (1,150-1,380) | — | — |
+| Prefill, cold 8K / 32K / 128K / 262K prompt (1-token request, #72) | 1,449 / 1,362 / 981 / 723 | — | — |
 | Decode only, 1K / 8K context (RoundBench, 12 reps) | 151.1 / 125.2 | 3.89 / 3.31 | 0.456 / 0.380 |
 
 <details><summary>Lane per task (#68, 350 W)</summary>
@@ -119,8 +119,8 @@ In short:
 | | |
 |---|---|
 | Context / cache | 262,144 / 270,336 tokens, 3-bit K and V |
-| Longest prompt run | 262,136 tokens, prefill 537 s (`cs10`, 250 W) |
-| 32K prompt to first token | ≈26.2 s ±2.4 at 350 W; ≈35.3 s ±4.1 at 250 W (*computed*: C1 regression intercept, 95 % CI) |
+| Longest prompt run | 262,000 tokens: 362.5 s to first token at 350 W (#72; 435.0 s before the prefill patches, #70); 262,136 tokens: 537 s at 250 W (`cs10`) |
+| 32K prompt to first token | 24.1 s at 350 W (#72); 25.8 s before the prefill patches (#70) |
 | KV size | 12 KiB / token: only 16 of 64 layers keep KV; 3.1 GiB at 270,336 tokens (*computed*) |
 | GPU memory, live | 21,888 / 24,576 MiB |
 
@@ -174,7 +174,7 @@ Same image (`tree3s`), token-identical outputs. 250 W: memory −1500 MHz, old f
 | 350 W cap, quiet fan curve (≤ 80 % to 84 °C) | lane +32.3 % tok/s at equal tok/J (0.497 vs 0.495); fan 75 vs 71 % median ([250 W vs 350 W](#250-w-vs-350-w)) |
 | Memory clock: stock at 350 W (−1500 MHz was best at 250 W) | 350 W, vs −1500: 0 = +5.4 % tok/s, +6.4 % tok/J; −2000: −1.8 % ([sweep](docs/benchmarks.md#3-power)). 250 W: −1500 saved 1.0-1.4 ms / round (*computed* sum of two sweeps); core offsets: none (+225 MHz: Xid 109) |
 
-<details><summary>41 engine patches</summary>
+<details><summary>44 engine patches</summary>
 
 | Area | Patches | What | Measured when kept |
 |---|---|---|---|
@@ -182,10 +182,10 @@ Same image (`tree3s`), token-identical outputs. 250 W: memory −1500 MHz, old f
 | Token tree | 9008, 3012, 5109, 3013 | GPU tree builder, ancestor-masked verify attention, GDN along each row's ancestors, commit of the accepted path's K/V | lane 111.85 → 122.33 tok/s |
 | Layer tail + MLP | 2001, 7001, 8201, 8202, 8204, 8205b, 2106, 2107, 2113 | M ≤ 16 GEMMs, fused persistent MLP, one kernel per layer tail, weighted split-K, instruction diets, L2 discard of dead split-K partials | 2106/2107: −13.3 µs / layer; 2113: −0.40..−0.50 ms / round |
 | Projections | 2102, 2105, 9003b | grouped m16 qkv(+z) GEMMs, target and draft | |
-| Attention | 3001-3007, 3010 | exact dequant, GQA split, row-invariant strided verify attention, CUDA prefill attention | 3010: 262,136-token prefill 722 → 537 s |
-| Gated DeltaNet | 0001-0004, 5001, 5101, 5106, 5108 | history-free verify, commit replay, fused conv/recurrence/norm, b/a K-split, replay gather | 5108: replay 620 → 402 µs (8 tokens) |
+| Attention | 3001-3007, 3010, 3020 | exact dequant, GQA split, row-invariant strided verify attention, CUDA prefill attention, 8 warps per prefill CTA (same per-element order) | 3010: 262,136-token prefill 722 → 537 s (250 W); 3020: 262K first token 435.0 → 365.9 s (350 W) |
+| Gated DeltaNet | 0001-0004, 5001, 5101, 5106, 5108, 5111 | history-free verify, commit replay, fused conv/recurrence/norm, b/a K-split, replay gather, prefill conv reads the fp32 projection | 5108: replay 620 → 402 µs (8 tokens); 5111 + 5112: 262K first token 365.9 → 362.5 s |
 | Draft | 6001, 9002, 9005c | draft graph, int4 draft head, head pruned to 896 blocks | full head: −2.7 % tok/s (1K) |
-| Prefill GEMM | 3011 | fp16-accumulate wide tiles | −21.6 % per 2,048-row chunk |
+| Prefill GEMM | 3011, 5112 | fp16-accumulate wide tiles; SiLU · up applied in the gate/up GEMM store | −21.6 % per 2,048-row chunk |
 
 </details>
 
@@ -224,7 +224,15 @@ Kept lane runs. Compare within one protocol only.
 | #61, #62 | cs11 | v4 | 250 W | 109.65, 109.81 | 0.444, 0.444 |
 | #63 | cs12 | v4 | 250 W | 111.85 | 0.452 |
 | #67 | tree3s | v4 | 250 W | 122.33 | 0.495 |
-| **#68** | **tree3s (live)** | v5: v4 tasks at 350 W, memory offset 0 | 350 W | **161.79** | **0.497** |
+| **#68** | **tree3s** (decode stack of the live image) | v5: v4 tasks at 350 W, memory offset 0 | 350 W | **161.79** | **0.497** |
+
+Cold prefill (protocol `exl3-native-prefill-ttft-v1`, 350 W): geometric mean of prompt tokens / time to first token over 8K, 32K, 128K and 262K prompts.
+
+| Run | Image | Stack | Prefill tok/s | 32K / 262K first token |
+|---|---|---|---|---|
+| #70 | tree3s | #68 | 977.9 | 25.8 / 435.0 s |
+| #71 | p3020 | + 3020 | 1,072.8 | 24.4 / 365.9 s |
+| **#72** | **p3020f (live as p3020fh)** | + 5111, 5112 | **1,087.8** | **24.1 / 362.5 s** |
 
 Every change and every dropped attempt: [docs/benchmarks.md](docs/benchmarks.md).
 
@@ -272,7 +280,7 @@ python3 -m bench.gsm8k_compare --api-key-file /path/to/api-key --data gsm8k-test
 ## Limitations
 
 ```
-- Unqualified: one 262,136-token prompt ran; sustained 262K capacity, quality and speed are not qualified.
+- Unqualified: 262K prompts run only in the prefill lane (one 262,000-token prompt per run); sustained 262K capacity, quality and speed are not qualified.
 - Greedy only, one sequence at a time.
 - Chat stream=true is buffered SSE: first event is not TTFT.
 - Exact logit ties can depend on max_tokens (cs12: token 39457 at 8192 vs 54185 at 256,
@@ -289,9 +297,9 @@ python3 -m bench.gsm8k_compare --api-key-file /path/to/api-key --data gsm8k-test
 |---|---|---|
 | Draft fine-tune on agent traffic (tool calls, SWE turns) | data done: 2,869 prompts, 1.66M tokens, disjoint from all eval sets; training next | pilot, live engine: agent tokens / round +4.22 % (95 % CI +3.14..+5.65), control −0.01 % (−0.66..+0.60); generic self-distillation +0.23 % (−0.13..+0.62, replay estimate): dropped |
 | Draft precision 4 / 5 / 6 / 8 bpw | queued | — |
-| Core clock offset at 350 W: 0 / +60 / +120 / +150 MHz | running; bit-exact + Xid gate | — |
-| Prefill and decode kernel traces at 350 W | queued | 32K prefill ≈26.2 s (*computed*) |
-| Per-request overhead on short prompts | queued | GSM8K: 87 ms per request + 26.34 ms per round; removing all of it: +6.9 % (*computed*) |
+| Prefill: merge aligned 2,048-row chunks into 4,096 (5110) | 262K run ended in an engine error; diagnosing | 32K / 128K: identical outputs, first token ×0.974 / ×0.970 |
+| Prefix cache kept across server restarts | built; GPU validation queued | — |
+| int8 prefill math (changes outputs slightly) | needs your approval | *estimate*: 32K ≈16 s, 262K ≈240-300 s |
 
 ## References
 

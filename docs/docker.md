@@ -130,22 +130,26 @@ reasoning and final content remain separate channels.
 
 ## Current persistent live deployment
 
-The current authenticated promotion is `qwen-exl3-serving-6`, container
-`e358fe89dd5d985b60594da0131a0d367d297be740e5accc54a31bea5f608c7f`, with image
-`sha256:ec9751b0f57153b346f95d729574a5f148b447432b6194d1b16f9688559b21b6` (tree3s,
-variant `candidate-ext`: the #67 stack of `docs/benchmarks.md` §6, cs12 plus the 8-row
-dynamic token-tree verify, `EXL3_TREE` default on). The canonical tag
-`qwen-inference:exl3` identifies this image and `qwen-inference:exl3-previous` the
-retained previous image
-`sha256:f002839fa038d9065535cb772d964fdc275b7d4a56b71f8521e2f63ece257528` (cs12).
+The current authenticated promotion is `qwen-exl3-serving-7`, container
+`ebb819cf17a5754f6b9f37c8188d31f73b7e1503597c7eec7ee03d6bfa1611ee`, with image
+`sha256:b443d8b74abcd5b9fb1b22a7b05fde06d3500496b4efa2dda88cffc84e92f62b` (p3020fh,
+variant `candidate-ext`: the #72 stack of `docs/benchmarks.md` §8, tree3s plus the
+prefill patches 3020, 5111 and 5112). It was rebuilt from commit 448c6a6 with standard
+file modes; its files under `/opt/qwen` and the installed `exllamav3` package are
+byte-identical to #72's measured image `sha256:5174b18b…`, whose adapter was mode 0700
+and failed the promotion readability check. The canonical tag `qwen-inference:exl3`
+identifies this image and `qwen-inference:exl3-previous` the retained previous image
+`sha256:ec9751b0f57153b346f95d729574a5f148b447432b6194d1b16f9688559b21b6` (tree3s).
 The persistent configuration is
-`/mnt/ssd/storage/ai/qwen3.8-27b/exl3-serving-6/compose.json` (Compose project
-`eta-exl3-serving-6`, network `eta_default`), alongside unchanged copies of
+`/mnt/ssd/storage/ai/qwen3.8-27b/exl3-serving-7/compose.json` (Compose project
+`eta-exl3-serving-7`, network `eta_default`), alongside unchanged copies of
 `launch-gate.py`, `recovery.py` and `operate.py` and its promoted `cutover-window-1/`.
 It sequentially reuses `/mnt/ssd/storage/ai/qwen3.8-27b/exl3-serving-1/cache`; preserve
 the old state. Promotions are made by `/tmp/eta-promote.sh TAG IMAGE` (operator
 tooling outside the repo), which replays the serving-2 guardian procedure below with
-automatic guardian rollback. The previous `qwen-exl3-serving-5` (container
+automatic guardian rollback. The previous `qwen-exl3-serving-6` (container
+`e358fe89dd5d985b60594da0131a0d367d297be740e5accc54a31bea5f608c7f`, image tree3s),
+`qwen-exl3-serving-5` (container
 `ca966e6f5407ff3bd27cc435c9a9ad90da7d4562ec65a3cd8d7ffe30d1c884a2`, image cs12),
 `qwen-exl3-serving-4` (container
 `22154417d27bc0ce2455d3f60ff1e3743dd7c40aca8ef0f502450a2463ffa945`, image cs11),
@@ -175,12 +179,12 @@ replace the gate with a direct launch, or start a competing root Compose/Nix
 service. Future maintenance must use the retained deployment and its approved
 ownership procedure. Restart configuration is not a demonstrated cold-boot test.
 
-Current private evidence is in `exl3-serving-6/evidence/` under the state root:
+Current private evidence is in `exl3-serving-7/evidence/` under the state root:
 `main-verification.json`, `promotion-receipt.json`, `cutover-receipt.json`,
 `endpoint-smoke.json`, `live-tool-smoke.json`, `hermes-real-tool-turns.json`,
 `omp-smoke.jsonl`, `installed-exl3-server.py`, `guardian.log` and `thermal.csv`. The
 guardian exited 0 with state `promoted_authenticated_main_verified`. Real Hermes
-gateway 0.21.3 and interactive 0.21.4 terminal-tool turns and an OMP 18.3.2 read-tool
+gateway 0.21.3 and interactive 0.21.4 terminal-tool turns and an OMP 18.4.1 read-tool
 round trip passed against the new image; no Telegram delivery was repeated.
 
 serving-2's evidence (`exl3-serving-2/evidence/`: `main-verification.json`,
