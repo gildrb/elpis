@@ -16,7 +16,7 @@
     "path": "/opt/venv/lib/python3.13/site-packages/exllamav3_ext.cpython-313-x86_64-linux-gnu.so",
     "base_sha256": "6d30690fdb76b3c4ad3fb5e69f0479707e410fc9b6194e2a5e32f4d7fe1fd8b3"
   },
-  "series_sha256": "efc033e74697c0d998957222d11d27ffc6722b9c8754d8eedd9ecb0b436087a8",
+  "series_sha256": "d3ca544d0c10d5a0fc9b54a36ca788bc6e7c4e4cf27addaeccb9526181658fff",
   "patches": [
     {
       "name": "0001-gdn-shared-carveout.patch",
@@ -173,6 +173,10 @@
     {
       "name": "5112-mlp-act-fuse.patch",
       "sha256": "37807aeb2abe37e15c2640760f1ed2db521d5f17ffcf6132f4ed55d1276337bd"
+    },
+    {
+      "name": "3021c-prefill-pattn8-int8qk.patch",
+      "sha256": "7088b1400c67d55d7a72feb38c38636e90cd07fa60bffa2815ac3ade70c56170"
     }
   ],
   "files": {
@@ -214,7 +218,7 @@
     },
     "exllamav3_ext/bindings.cpp": {
       "pre": "381d867b845335b15106f86aa79e284c9d6b7d316703dd555d8a86a13ed2b465",
-      "post": "226d1f593d56eb4d97afc7b8453d4c338c4bd44a29f16a7ef7df418e8fb8f008"
+      "post": "1808ccfe80cd7597fb37e0303dd613272c0364a00025e82d48866ae0e826ce6d"
     },
     "exllamav3_ext/dflash2.cu": {
       "pre": "dd5023eea10408948da25b68e4d6242628704886c261c1c63bd5213887298250",
@@ -318,15 +322,19 @@
     },
     "exllamav3_ext/pattn.cu": {
       "pre": null,
-      "post": "868108dbc22850c67922204dc20a4db61aafcfd79cfecf2a74feddf47045dbb2"
+      "post": "746dff454ee9b3bb48e3c5fbe61932752ab4c89b67223198291b627ef34cf3b3"
     },
     "exllamav3_ext/pattn.cuh": {
       "pre": null,
-      "post": "16eaa273a4ea9ac8a76ccf809350661e593fcacaa080e1ba11bd890a5f247742"
+      "post": "ba58503f794607e771db114ff26f78ec81500c81a83a246c805bf8c2d35446ed"
     },
     "exllamav3_ext/pattn8_kernel.cuh": {
       "pre": null,
       "post": "1e2bd338f7a0bf6748a752f442942a5f1e5613193e67eadf657fd063a59418d3"
+    },
+    "exllamav3_ext/pattn8i_kernel.cuh": {
+      "pre": null,
+      "post": "bb30644adb8f57967c55c7a69cc44b15c571e684131a7d236e41dfb183067c6c"
     },
     "exllamav3_ext/pattn_kernel.cuh": {
       "pre": null,
@@ -446,7 +454,7 @@
     },
     "modules/attention_fn/triton_paged.py": {
       "pre": "910379b663acb08711c3be207cd3e9ed96658527cc110a6ce39c793f997836d9",
-      "post": "02b35822303e424dfb75d18cb251aa4e865fe54c9a85e7ee7d2cdf6ee389c97f"
+      "post": "792a461592bfdadbd3b0f903b9098951e0ce5964c9e860d354e6d5906b331290"
     },
     "modules/attn.py": {
       "pre": "92075ee1f8890c014fbf9fb62fecb705dba793ac96dbd794c1d399e284034c26",
