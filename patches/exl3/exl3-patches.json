@@ -6,7 +6,7 @@
     "revision": "355c6ee10fbd25b79070316a81ea0708cc18155a",
     "root": "/opt/venv/lib/python3.13/site-packages/exllamav3"
   },
-  "series_sha256": "66a70c406c43c9d46852464caea3fd1e9788e72c738a4a2680b39e56c33d3fd4",
+  "series_sha256": "d7e49073b22e8e9fb6750b397e04a384f2aa6d9236f3c121d1a8059fcb1dcfef",
   "patches": [
     {
       "name": "0001-greedy-batched-verify.patch",
@@ -22,17 +22,17 @@
     },
     {
       "name": "0005-draft-block-mask.patch",
-      "sha256": "ecd00ba7679cae8be48e45d69769fc1e683ae41b8d173d43184725f80adb2c35"
+      "sha256": "f58a20d44b9f0ace73c6f0f2bc920c5d3673fdb99a6306ce4f594cb1bfa18641"
     },
     {
       "name": "0006-tree-verify.patch",
-      "sha256": "dd8393c34e29316018bc62226a59b8759b49a9f1adf3bdab60d651f414cc6979"
+      "sha256": "c6a25e94573a1fc004f205ebcfd76b09982088724c8945f10b5e4807faa66cbe"
     }
   ],
   "files": {
     "generator/generator.py": {
       "pre": "5d9e5741fb297513118fe03830a715713eb334d728c7cdcc8c0839b29dc91de7",
-      "post": "343004c729de7bb1a0ce87fa97ba9bf6018efae23cf5b5aee9d9fa0333dcc00d"
+      "post": "ee378f92cbe59fbe4c18739e1ff75c366d084f8460279f8ed69f3b3aa123a232"
     },
     "generator/greedy_accept.py": {
       "pre": null,
@@ -48,7 +48,7 @@
     },
     "architecture/dflash.py": {
       "pre": "283b8cbeec0c96be45d4665171824a82bf05fa40f7ee80f342dc17c878689a6a",
-      "post": "a5c8ee679f8abc8ba464ad2fef71a74a9c502e3b4320b391b982428967999eaf"
+      "post": "fa07b1b8263b3f725f01f7ba5f27438702ac3ed5993e8839d1dafe44b568b8f4"
     },
     "modules/attn.py": {
       "pre": "13f8f46ca5cf2cc434c404b9f23a92c76e74c99af69027e9b0f28adb228e018a",
@@ -56,7 +56,7 @@
     },
     "generator/tree_round.py": {
       "pre": null,
-      "post": "0586d267f3f847d65a8598a9b4d04704a33ebded29af3a930c491fda6c2424dd"
+      "post": "62ac69b0d97820a8dd958b5d42feedcf513c6c1be22bdb34b2112db50d888a61"
     },
     "generator/tree_accept.py": {
       "pre": null,
@@ -66,14 +66,14 @@
   "acceptor": {
     "root": "/opt/qwen/bend-exl3",
     "files": {
-      "libexl3_accept.so": "9163c9937b9118580514ba7274da3da1c7af7c12a08af4707a61557568276d3d",
+      "libexl3_accept.so": "79a6f61eb3b65126247492b81a5333de1b10e440ab9fab6a1a02b84128768651",
       "exl3_accept_table.txt": "7c84bd88fbd6ad01b0872e2516e24f44029bfc3f48c50978d6ca86ad93085d63",
-      "exl3_bend_accept.py": "896447c3eb794760538d386a17778a6b08a0c9da8e120d4de8bd1cc71677bb88",
-      "identity.json": "5b906a8fcec71e7ddf16ff6ad5ad318d3fee475061c49d8241718ca70520ec38",
-      "libexl3_tree_accept.so": "33f76e6d6176c56cdba4c64d64d6d32a7c2ff3d0412250dfdd0c783e463e2a17",
+      "exl3_bend_accept.py": "c13e11c3a638448e05aff5161f733a8115d811a4366c08e8aa79bcdc90b2fc27",
+      "identity.json": "65b2d4d73b451f5a77e86ff0ae3596bab6989f11ef1b1168a9ec03755b63f0ed",
+      "libexl3_tree_accept.so": "b853b40619aba408687db77e9329fcfc81551efea1dc7acdfa46ca86bdbee4cf",
       "exl3_tree_accept_table.txt": "2bc7c90b66a77c0fcc8f0cf1231f471e0093c7a660185a563ff0290df74e0718",
-      "exl3_bend_tree_accept.py": "34a5cfef25e4876e027ccad05c562f311179262ed3908e504ccac923f9f32227",
-      "tree_identity.json": "fc012feafcb4eff16a933f0ccbc421681ac2627f227ba447ca2f0dc6b52d33c7"
+      "exl3_bend_tree_accept.py": "245157fbb9c4babdf0454e1fb10f82684610c15d5074e77124055d94f4271325",
+      "tree_identity.json": "85ed4e16ebd24fd25d1eb7bef70ef55556d75786cfccfab72a083acc2258ea66"
     }
   }
 }

@@ -20,7 +20,7 @@
          self.draft_ids_ready = None
          self.verify_staging_set = 0
 +
-+        # Dynamic tree verify (eta exl3 0006-tree-verify): EXL3_TREE strict 0|1, the test hook
++        # Dynamic tree verify (elpis exl3 0006-tree-verify): EXL3_TREE strict 0|1, the test hook
 +        # EXL3_TREE_FORCE_CHAIN strict 0|1 (valid only with the tree on) runs every round as the CHAIN
 +        # descriptor through the tree kernels. Unset, the tree is on for every configuration it supports
 +        # (the served one) and off for the others (no draft, batches, other drafters); set to 1 on a
@@ -283,7 +283,7 @@
 +++ b/generator/tree_round.py
 @@ -0,0 +1,202 @@
 +"""
-+Host side of the 8-row dynamic tree verify (eta exl3 patch 0006-tree-verify).
++Host side of the 8-row dynamic tree verify (elpis exl3 patch 0006-tree-verify).
 +
 +The draft-side builder (ext 9008) writes one 192-byte record per round: the eight verify-row tokens (int64,
 +row 0 = the anchor) followed by a 128-byte TreeDesc. The verify kernels (ext 3012 attention, ext 5109 GDN)

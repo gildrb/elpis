@@ -1,5 +1,5 @@
-# Pruned int4 draft head of ext patch 9005c (9005c-eta-draft-q4-head-pruned-n896.patch), transcribed over Nat and
-# lists from the patched sources (tree q4p/c_eta):
+# Pruned int4 draft head of ext patch 9005c (9005c-elpis-draft-q4-head-pruned-n896.patch), transcribed over Nat and
+# lists from the patched sources (tree q4p/c_elpis):
 #   S: modules/arch_specific/dflash2_head_blocks.py   (constants, DRAFT_HEAD_BLOCK_ORDER, kept_blocks, PrunedHeadPolicy)
 #   Q: modules/arch_specific/dflash2_q4_head.py       (Q4DraftHead: kept-block check, keep_cols, id_map, topk slicing)
 #   D: exllamav3_ext/dflash2_head.cu                   (better(), the epilogue's column -> token id, HEAD_TOPK)

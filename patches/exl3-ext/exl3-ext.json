@@ -16,7 +16,7 @@
     "path": "/opt/venv/lib/python3.13/site-packages/exllamav3_ext.cpython-313-x86_64-linux-gnu.so",
     "base_sha256": "6d30690fdb76b3c4ad3fb5e69f0479707e410fc9b6194e2a5e32f4d7fe1fd8b3"
   },
-  "series_sha256": "d3ca544d0c10d5a0fc9b54a36ca788bc6e7c4e4cf27addaeccb9526181658fff",
+  "series_sha256": "afeb4aa59e693bd93589373e3fb26d02ab15520a6b8a78c4b859ecb9444ab3db",
   "patches": [
     {
       "name": "0001-gdn-shared-carveout.patch",
@@ -119,8 +119,8 @@
       "sha256": "f3eba492f20914a3da05e4a2c060db8d9cda7b1909000f330c0c8e9580a3ffdd"
     },
     {
-      "name": "9005c-eta-draft-q4-head-pruned-n896.patch",
-      "sha256": "db62298737850b1fd23fd0ea5a8058149fdb8bbeba233b4912fc8f4700de75b4"
+      "name": "9005c-elpis-draft-q4-head-pruned-n896.patch",
+      "sha256": "e7a2952ff6485c74d8b443fdeb751b9961f2c834b60b0d2940af6e77b7ce4db9"
     },
     {
       "name": "3010-prefill-pattn.patch",
@@ -148,7 +148,7 @@
     },
     {
       "name": "9008-dflash2-tree-build.patch",
-      "sha256": "00a4a5ad9ecbcc1ad4b3bf7fa0fe657941dfef4d2d772844ef44cd059082948c"
+      "sha256": "cd46ef318a5453cc5e075ba6f2a157d336f1a9cf0cd1514507014cd98e51a04f"
     },
     {
       "name": "3012-attn-verify-tree.patch",
@@ -181,12 +181,12 @@
   ],
   "files": {
     "architecture/dflash.py": {
-      "pre": "a5c8ee679f8abc8ba464ad2fef71a74a9c502e3b4320b391b982428967999eaf",
-      "post": "9918ecdf4e577bea2126992891caf879fefe6894b4cd5169b6606da6ed445d09"
+      "pre": "fa07b1b8263b3f725f01f7ba5f27438702ac3ed5993e8839d1dafe44b568b8f4",
+      "post": "1440f55c4cbf7e1367ce4bc41cb633c673d44e137b966ee5cf2ce320bd062d48"
     },
     "architecture/dflash2.py": {
       "pre": "03f93098649173a3f023a584e68d2db6124480508354aebd2cc56e5855bf7ee7",
-      "post": "1abded11cf38f1aefd675a671cfb59c2ccb2e309c93f688f258473561f39739c"
+      "post": "3eb3fda82aa99652eed42998b0d79a6c2add74d094bf453650b29c74e90dbd69"
     },
     "cache/kv_compact.py": {
       "pre": null,
@@ -222,7 +222,7 @@
     },
     "exllamav3_ext/dflash2.cu": {
       "pre": "dd5023eea10408948da25b68e4d6242628704886c261c1c63bd5213887298250",
-      "post": "bd88bf2056b38cdf6384c6a2e8b672b283342ef473e858c22011b29addd7d6f9"
+      "post": "eefdfc3df940dbde5829c1c3f78c047000692b0932970ff6e3a15f1faedfa2e3"
     },
     "exllamav3_ext/dflash2.cuh": {
       "pre": "54de9102a23d7740422867238e5802da44afd591787704ce53cc5102802cc16f",
@@ -438,11 +438,11 @@
     },
     "modules/arch_specific/dflash2.py": {
       "pre": "8aa64c4099864b0c91022bf06fa84838d98a30956fb03a212a92edc95475d70b",
-      "post": "3fefbf00e912b1784001ef0e47e2d128de8e69437762b683412b6cc1cbff1ec6"
+      "post": "969525941132dcbd52ec70303beb45066350e7cf10b54036aee3b1986dbf0b09"
     },
     "modules/arch_specific/dflash2_head_blocks.py": {
       "pre": null,
-      "post": "dfcb53f30bf0c1faf1980c6b0310327e5c493ccfc891a58a54f0c2be542e0e4c"
+      "post": "0fc462eede0f442855edf28e47c260e958159c7006529c6c7e43bf71dd2b92d9"
     },
     "modules/arch_specific/dflash2_q4_head.py": {
       "pre": null,

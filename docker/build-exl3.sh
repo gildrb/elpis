@@ -13,7 +13,7 @@ if (( $# != 2 )) || [[ ! " ${variants[*]} " == *" $1 "* ]]; then
 fi
 variant="$1"
 image="$2"
-base=qwen-eta:exl3-native-comparison
+base=qwen-elpis:exl3-native-comparison
 expected=sha256:b35314f48c7684b4c9cf3d59f4c21395316aa1fc0925db782f460005aa2602ff
 root="$(realpath -- "$(dirname -- "${BASH_SOURCE[0]}")/..")"
 existing_id="$(docker image ls --no-trunc --format '{{.ID}}' --filter "reference=$image")"
@@ -86,9 +86,9 @@ build --target "$variant" --iidfile "$scratch/image-id"
 check_base
 built_id="$(< "$scratch/image-id")"
 if [[ ! "$built_id" =~ ^sha256:[0-9a-f]{64}$ ||
-      "$(label "$built_id" io.eta.exl3.base-image-id)" != "$expected" ||
-      "$(label "$built_id" io.eta.exl3.variant)" != "$variant" ||
-      "$(label "$built_id" io.eta.exl3.patches-sha256)" != "$patches_sha" ]]; then
+      "$(label "$built_id" io.elpis.exl3.base-image-id)" != "$expected" ||
+      "$(label "$built_id" io.elpis.exl3.variant)" != "$variant" ||
+      "$(label "$built_id" io.elpis.exl3.patches-sha256)" != "$patches_sha" ]]; then
   echo "Refusing EXL3 build: missing output identity or baked provenance." >&2
   exit 1
 fi

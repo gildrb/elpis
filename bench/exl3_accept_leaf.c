@@ -1,4 +1,4 @@
-// Leaf-level cost: eta_exl3_accept (glue validation + Bend leaf) vs a C
+// Leaf-level cost: elpis_exl3_accept (glue validation + Bend leaf) vs a C
 // transcription of the serial decision, over served-like k = 7 inputs.
 // cc -O2 exl3_accept_leaf.c -ldl -o leaf && ./leaf LIB
 #include <dlfcn.h>
@@ -37,7 +37,7 @@ static double now(void) {
 
 int main(int argc, char** argv) {
   void* h = dlopen(argv[1], RTLD_NOW | RTLD_LOCAL);
-  int32_t (*leaf)(const int64_t*) = (int32_t (*)(const int64_t*))dlsym(h, "eta_exl3_accept");
+  int32_t (*leaf)(const int64_t*) = (int32_t (*)(const int64_t*))dlsym(h, "elpis_exl3_accept");
   for (int r = 0; r < N; ++r) {
     int64_t* c = cells[r];
     c[0] = 7; c[1] = next() % 20 == 0 ? 1 + next() % 63 : 4096;

@@ -1,56 +1,56 @@
-# eta: Qwen3.8-27B on one RTX 3090 at 350 W, 262K context, lossless speculative decoding
+# elpis: Qwen3.8-27B on one RTX 3090 at 350 W, 262K context, lossless speculative decoding
 
 **Qwen3.8-27B · EXL3 4.00 bpw · DFlash2 + 8-row token tree · 262,144 context · one RTX 3090 at 350 W, quiet fans · output = plain greedy · acceptance proved in Bend.**
 
 ## How it compares with other RTX 3090 results for this model
 
 Other projects' figures below are quoted from their repositories, not re-run here. No
-other result shares eta's prompts, power cap and metric, so read this as what each
+other result shares elpis's prompts, power cap and metric, so read this as what each
 project reports, not as a ranking.
 
 | One RTX 3090 | Weights | Speculation | Context / KV | Power | Reported tok/s |
 |---|---|---|---|---|---|
-| **eta, this repo** (measured) | 4.00 bpw | DFlash2 + 8-row token tree | 262,144 / 3-bit | 350 W cap; SM 1.24-1.62 GHz per call (median 1.51) | **161.8** reasoning + code lane, **202.9** GSM8K (whole request, prefill included); decode only: 151.1 at 1K (RoundBench), 214.8 on GSM8K (*computed*) |
+| **elpis, this repo** (measured) | 4.00 bpw | DFlash2 + 8-row token tree | 262,144 / 3-bit | 350 W cap; SM 1.24-1.62 GHz per call (median 1.51) | **161.8** reasoning + code lane, **202.9** GSM8K (whole request, prefill included); decode only: 151.1 at 1K (RoundBench), 214.8 on GSM8K (*computed*) |
 | [trellis-serve](https://github.com/0xSero/trellis-serve/tree/1ace59c4b43ca16a50fb6b7acf8b3fd7e2351f96) README headline, by 0xSero | 3.00 bpw | MTP, 3 steps / 4 tokens | 212,992 / fp8 | not published | 96.2 prose, 141.1 code (thinking off); 141.3 prose, 129.3 code (thinking on); decode only ([sweep](https://github.com/0xSero/local-ai-registry/blob/c6e6f4c796304229a3c11442af6f09673180d4f6/data/registry/speed-sweep/qwen38-27b-exl3-3bpw-mtp-vision-rtx3090-sglang-tp1-sweep.json)) |
 | trellis-serve's fastest 3090 recipe ([DFlash2](https://github.com/0xSero/local-ai-registry/blob/c6e6f4c796304229a3c11442af6f09673180d4f6/data/registry/recipe/qwen38-27b-exl3-3bpw-dflash2-rtx3090-sglang-tp1.json), registry status "candidate") | 3.00 bpw | DFlash2, 5.0 bpw draft, block 8 | 131,072 / fp8 | not published; SM 1.74 GHz in its soak | 98.2 prose, 225.1 code (thinking off); 227.0 prose, 195.4 code (thinking on); decode only |
 | [r0b0tlab](https://github.com/r0b0tlab/qwen38-exl3-dflash2) | 4.00 bpw | DFlash2 | 8,192 / FP16 in this run | 350 W cap | 162.9 GSM8K (in-process, per request) |
 
 What differs:
 
-- **Prompts.** Only GSM8K is shared: eta 202.9 vs r0b0tlab 162.9 (+24.6 %), both at a 350 W cap, same
+- **Prompts.** Only GSM8K is shared: elpis 202.9 vs r0b0tlab 162.9 (+24.6 %), both at a 350 W cap, same
   40 questions ([details](#gsm8k-the-same-test-as-r0b0tlabs-published-number)).
   trellis-serve's prose and code panel prompts are not published.
 - **Metric.** trellis-serve reports decode only: (completion tokens − 1) / (last − first
-  streamed token). eta's lane and GSM8K rates divide by the whole request wall time; its
+  streamed token). elpis's lane and GSM8K rates divide by the whole request wall time; its
   decode-only figures: RoundBench 3.89 tokens per 25.7 ms round (1K); GSM8K 5.66 tokens per
   26.3 ms round (*computed*, regression over 200 requests).
-- **Power.** eta and r0b0tlab: 350 W cap. trellis-serve publishes no power limit; its DFlash2
-  soak held the SMs at 1.74 GHz, against eta's 1.51 GHz median per call. eta at 250 W:
+- **Power.** elpis and r0b0tlab: 350 W cap. trellis-serve publishes no power limit; its DFlash2
+  soak held the SMs at 1.74 GHz, against elpis's 1.51 GHz median per call. elpis at 250 W:
   −24 % tok/s at the same tok/J ([250 W vs 350 W](#250-w-vs-350-w)).
 - **Bits.** 3.00 bpw reads 25 % fewer weight bits per token than 4.00 bpw (*computed*),
   at a larger quantization error; quality is not compared here.
 - **Cost per verify step** (*computed*: reported tok/s ÷ reported accept length, assuming
   the accept length counts the bonus token): trellis-serve 23.4-24.9 ms at short context,
-  eta 25.7 ms at 1K and 26.5 ms at 8K (RoundBench, 350 W). Tokens per step at temperature 0:
-  trellis-serve 2.25-3.48 (MTP) and 2.45-5.65 (DFlash2) on its panel; eta 3.93 on the lane's
+  elpis 25.7 ms at 1K and 26.5 ms at 8K (RoundBench, 350 W). Tokens per step at temperature 0:
+  trellis-serve 2.25-3.48 (MTP) and 2.45-5.65 (DFlash2) on its panel; elpis 3.93 on the lane's
   C1 rows, 5.66 on GSM8K.
 
-Prefill and long context (others quoted; eta measured: cold prompt, time of a 1-token request, 350 W, run #73):
+Prefill and long context (others quoted; elpis measured: cold prompt, time of a 1-token request, 350 W, run #73):
 
 | One RTX 3090 | 32K prompt: time to first token | Longest prompt shown |
 |---|---|---|
-| **eta** (350 W) | 23.3 s (1,410 tok/s) | 262,000 tokens: 322.0 s to first token |
+| **elpis** (350 W) | 23.3 s (1,410 tok/s) | 262,000 tokens: 322.0 s to first token |
 | trellis-serve MTP (README headline) | 21.9 s (1,497 tok/s) | 208,858 tokens: 294 s to first token |
 | trellis-serve DFlash2 | 35.9 s (914 tok/s) | 126,782 tokens: 187 s to first token |
 | r0b0tlab | not published (150K prompt: 594 tok/s) | 262,080 tokens (needle test) |
 
-eta also reports energy: 0.497 tok/J on the lane, 0.617 on GSM8K (350 W); no other row publishes tok/J.
+elpis also reports energy: 0.497 tok/J on the lane, 0.617 on GSM8K (350 W); no other row publishes tok/J.
 
 In short:
 
-- Same test, same 350 W cap: eta 202.9 vs r0b0tlab 162.9 tok/s (+24.6 %).
-- Decode only: trellis-serve DFlash2 225-227 tok/s on its code and thinking-on prose panels (3.00 bpw, 131K window, SM 1.74 GHz, power unpublished); eta 214.8 on GSM8K (*computed*; 4.00 bpw, 262K window).
-- Prefill at 32K: trellis-serve MTP fastest (21.9 s); eta 23.3 s; trellis-serve DFlash2 35.9 s.
+- Same test, same 350 W cap: elpis 202.9 vs r0b0tlab 162.9 tok/s (+24.6 %).
+- Decode only: trellis-serve DFlash2 225-227 tok/s on its code and thinking-on prose panels (3.00 bpw, 131K window, SM 1.74 GHz, power unpublished); elpis 214.8 on GSM8K (*computed*; 4.00 bpw, 262K window).
+- Prefill at 32K: trellis-serve MTP fastest (21.9 s); elpis 23.3 s; trellis-serve DFlash2 35.9 s.
 - trellis-serve's README headline (MTP): 96-141 tok/s decode.
 
 ## Speed
@@ -128,7 +128,7 @@ In short:
 
 [`bench/gsm8k_compare.py`](bench/gsm8k_compare.py) = r0b0tlab's [`acceptance_check.py`](https://github.com/r0b0tlab/qwen38-exl3-dflash2/blob/main/scripts/acceptance_check.py) workload: first 40 GSM8K test questions (pinned), raw ChatML, greedy, 512 tokens, mean of per-request tok/s.
 
-| | r0b0tlab (published) | eta `cs12`, 250 W (11 runs) | eta `tree3s`, 250 W (5 runs) | eta `tree3s`, 350 W (live, 5 runs) |
+| | r0b0tlab (published) | elpis `cs12`, 250 W (11 runs) | elpis `tree3s`, 250 W (5 runs) | elpis `tree3s`, 350 W (live, 5 runs) |
 |---|---|---|---|---|
 | Power | 350 W cap; 336 W mean (their telemetry, another run) | 250 W cap; 249.4 W median | 250 W cap; 249.4 W median | 350 W cap; 329.5 W median |
 | Engine | ExLlamaV3 `355c6ee`, unpatched | + 36 patches | + 41 patches | + 41 patches |
@@ -139,8 +139,8 @@ In short:
 | Answers at the 512-token cap | 5/40 | 4/40 | 4/40 | 4/40 |
 | tok/J | not published | 0.598 median (0.593-0.623) | 0.616 median (0.610-0.646) | **0.617** median (0.604-0.637) |
 
-- Same test, same 350 W cap: eta +24.6 % over r0b0tlab.
-- Answers: byte-identical across all 21 eta runs (both images, both caps).
+- Same test, same 350 W cap: elpis +24.6 % over r0b0tlab.
+- Answers: byte-identical across all 21 elpis runs (both images, both caps).
 - Tree gain (250 W): +3.0 % here vs +9.4 % on the lane; the chain already commits 5.55 of 8 tokens per round.
 - Spread: fresh window, quiet host fastest (250 W: `cs12` 153.9-154.3, `tree3s` 159.7; 350 W: 203.7); warm card slower.
 

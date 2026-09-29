@@ -41,7 +41,7 @@ TABLE = "bend/GEMM_M16_GROUP_TABLE.bend"
 # The shipped 2102: 2102-proj-m16-grouped-v2-on3003-5101.patch (hunk positions rebased onto 3003 +
 # 5101; its new kernel/host files are byte-identical to 2102 v2 50f75e69...)
 PATCH_SHA = "c12f897d48c07ab26fbdda03f1a44e762324ede735b8bb461b2cc8f8a8a66ff3"
-LOCK = ["flock", "-s", "/tmp/eta-gpu.lock", "nice", "-n", "19"]
+LOCK = ["flock", "-s", "/tmp/elpis-gpu.lock", "nice", "-n", "19"]
 
 MUTATIONS = {
     # host gbase prefix sum off by one (every matrix after the first starts one group late)

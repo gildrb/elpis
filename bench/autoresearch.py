@@ -32,7 +32,7 @@ from bench.exl3 import mapping, number, sequence
 
 ROOT = Path(__file__).resolve().parents[1]
 ENDPOINT = exl3.ENDPOINT
-OPERATOR = Path("/run/user/1000/eta-autoresearch-operator.json")
+OPERATOR = Path("/run/user/1000/elpis-autoresearch-operator.json")
 LIMIT_SECONDS = 2400
 RECOVERY_HEADROOM_SECONDS = 120
 TERMINATION_SECONDS = 20

@@ -7,7 +7,7 @@
 #          for OUTPUT_DIR, touch /tmp/gpu-window.ready, then wait for /tmp/gpu-window.release
 #          (Main runs run_experiment in between), then restore baseline.
 # Heat policy (user, 2026-09-25: the GPU gets very hot, so runs are rare, batched and delayed):
-#   - approval: a window runs only if NAME matches a glob line of /tmp/eta-gpu-allow. Only Main
+#   - approval: a window runs only if NAME matches a glob line of /tmp/elpis-gpu-allow. Only Main
 #     writes that file, for an approved batch, and clears it afterwards. Checked before the window
 #     lock and again once the lock is held;
 #   - cool-down: before the guardian is armed the GPU must be <= GPU_COOL_C (default 50) C and
@@ -21,8 +21,8 @@ S=/mnt/ssd/storage/ai/qwen3.8-27b/exl3-serving-2
 MODE=$1 NAME=$2 IMG=$3 WIN=$4 SECS=$5 ARG=$6
 W=$S/$WIN
 LOG=/tmp/guardian-$WIN.log
-ALLOW=/tmp/eta-gpu-allow
-LAST=/tmp/eta-gpu-last-window-end
+ALLOW=/tmp/elpis-gpu-allow
+LAST=/tmp/elpis-gpu-last-window-end
 TH=/tmp/gpu-thermal-$WIN.csv
 COOL_C=${GPU_COOL_C:-50} GAP=${GPU_COOL_GAP:-600} RUN_TIMEOUT=${RUN_TIMEOUT:-1500}
 case $MODE in run|serve) ;; *) echo "bad mode '$MODE'"; exit 2 ;; esac
@@ -45,7 +45,7 @@ allowed || { echo "GPU HOLD: $NAME is not approved in $ALLOW (runs are batched a
 # Two locks: the window lock serializes GPU windows; the compile lock (agents/builds take it
 # shared) is taken exclusively only by timing windows, so CPU compiles proceed during
 # non-timing windows (parity/repro/memcheck, or GPU_WINDOW_NONTIMING=1).
-exec 8>/tmp/eta-gpu-window.lock
+exec 8>/tmp/elpis-gpu-window.lock
 flock -x 8
 allowed || { echo "GPU HOLD: approval for $NAME withdrawn while it was queued"; exit 3; }
 rm -f /tmp/gpu-window.ready /tmp/gpu-window.release
@@ -64,12 +64,12 @@ case $WIN in parity-window-*|repro-window-*) NONTIMING=1 ;; *) NONTIMING=${GPU_W
 if [[ $NONTIMING == 1 ]]; then
   echo "window lock held (non-timing) $(date +%T)"
 else
-  exec 9>/tmp/eta-gpu.lock
+  exec 9>/tmp/elpis-gpu.lock
   # Priority flag: CPU jobs check it before taking the shared lock, so a waiting timing
   # window is not starved by a stream of overlapping shared holders.
-  touch /tmp/eta-gpu.pending
+  touch /tmp/elpis-gpu.pending
   flock -x 9
-  rm -f /tmp/eta-gpu.pending
+  rm -f /tmp/elpis-gpu.pending
   echo "lock held $(date +%T)"
 fi
 nvidia-smi --query-gpu=timestamp,temperature.gpu,power.draw,clocks.sm,fan.speed --format=csv,noheader,nounits -lms 5000 > "$TH" 2>&1 &
@@ -82,7 +82,7 @@ finish() {
     END { if (n) printf "thermal: max %d C, mean %.0f W over %d samples\n", m, p / n, n; else print "thermal: no samples" }' "$TH"
 }
 trap finish EXIT
-# Baseline = the live deployment, discovered rather than hard-coded (as eta-promote.sh does): exactly
+# Baseline = the live deployment, discovered rather than hard-coded (as elpis-promote.sh does): exactly
 # one running guardian-gated container publishing 18020 whose promoted window verifies itself.
 # Candidate windows keep S=exl3-serving-2: the guardian only needs the candidate's
 # /maintenance-control to be the window's parent; the live container restarts via its own window.
@@ -143,7 +143,7 @@ cid, win, out = sys.argv[1:4]
 d = {"schema_version": 1, "container_id": cid,
      "api_key_file": "/mnt/ssd/storage/ai/qwen3.8-27b/api-key",
      "maintenance_directory": win, "output_directory": out}
-p = '/run/user/1000/eta-autoresearch-operator.json'; t = p + '.tmp'
+p = '/run/user/1000/elpis-autoresearch-operator.json'; t = p + '.tmp'
 if os.path.lexists(p): os.unlink(p)
 fd = os.open(t, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
 os.write(fd, json.dumps(d).encode()); os.close(fd); os.rename(t, p)

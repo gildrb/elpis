@@ -33,9 +33,9 @@ from typing import NoReturn
 
 HERE = Path(__file__).resolve().parent
 BEND = "/nix/store/8inj4v2ng19vgmff7k73mvhddlpy25cc-bend-2.0.29/bin/bend"
-LOCK = ["flock", "-s", "/tmp/eta-gpu.lock", "nice", "-n", "19"]
+LOCK = ["flock", "-s", "/tmp/elpis-gpu.lock", "nice", "-n", "19"]
 PINS = {  # post-images: 0005 scratch manifest (dflash.py), repo exl3-ext.json (the others)
-    "architecture/dflash.py": "a5c8ee679f8abc8ba464ad2fef71a74a9c502e3b4320b391b982428967999eaf",
+    "architecture/dflash.py": "fa07b1b8263b3f725f01f7ba5f27438702ac3ed5993e8839d1dafe44b568b8f4",
     "architecture/dflash2.py": "16a2982724b070b7328a652e4127fda0da3e3836228234bc864f6190b8657fa2",
     "modules/attention_fn/triton_paged.py": "12896d430c94639ec4157a967f1635cc4a0dcc2198294d6349a9a2749ed9623e",
 }

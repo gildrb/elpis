@@ -202,7 +202,7 @@
 +++ b/modules/arch_specific/dflash2_head_blocks.py
 @@ -0,0 +1,171 @@
 +"""
-+Block table and runtime policy of the DFlash2 pruned int4 draft head (eta ext patch 9005).
++Block table and runtime policy of the DFlash2 pruned int4 draft head (elpis ext patch 9005).
 +
 +The pruned head proposes only from the first N entries of DRAFT_HEAD_BLOCK_ORDER, whole 128-id blocks of the
 +target vocabulary (N = 896 by default, 1024 selectable). EXL3 rotates the head's outputs in 128-column Hadamard

@@ -50,19 +50,19 @@ from types import SimpleNamespace
 import numpy as np
 
 HERE = Path(__file__).resolve().parent
-REPO = Path("/home/gilrodrigues/Repos/eta")
-TREE_DEFAULT = Path("/tmp/kernel-work/DraftProj/q4p/c_eta")
-PATCH_NAME = "9005c-eta-draft-q4-head-pruned-n896.patch"
+REPO = Path("/home/gilrodrigues/Repos/elpis")
+TREE_DEFAULT = Path("/tmp/kernel-work/DraftProj/q4p/c_elpis")
+PATCH_NAME = "9005c-elpis-draft-q4-head-pruned-n896.patch"
 PATCH_CANDIDATES = [REPO / "patches/exl3-ext" / PATCH_NAME,
-                    Path("/tmp/kernel-work/DraftProj/q4p/pins_eta/patches/exl3-ext") / PATCH_NAME]
-PATCH_SHA256 = "db62298737850b1fd23fd0ea5a8058149fdb8bbeba233b4912fc8f4700de75b4"
+                    Path("/tmp/kernel-work/DraftProj/q4p/pins_elpis/patches/exl3-ext") / PATCH_NAME]
+PATCH_SHA256 = "e7a2952ff6485c74d8b443fdeb751b9961f2c834b60b0d2940af6e77b7ce4db9"
 ORDER_JSON = Path("/tmp/kernel-work/DraftProj/q4p/block_order_code.json")
 BEND = "/nix/store/8inj4v2ng19vgmff7k73mvhddlpy25cc-bend-2.0.29/bin/bend"
 TABLE = "DRAFT_HEAD_IDMAP_TABLE.bend"
 IMPL = "draft_head_idmap.bend"
 PROOF = "draft_head_idmap_proof.bend"
 LOCK = ["/tmp/cpu-lock.sh"] if Path("/tmp/cpu-lock.sh").exists() else \
-    ["flock", "-s", "/tmp/eta-gpu.lock", "nice", "-n", "19"]
+    ["flock", "-s", "/tmp/elpis-gpu.lock", "nice", "-n", "19"]
 
 PATHS = {"S": "modules/arch_specific/dflash2_head_blocks.py", "Q": "modules/arch_specific/dflash2_q4_head.py",
          "D": "exllamav3_ext/dflash2_head.cu", "A": "architecture/dflash2.py", "J": "generator/job.py"}

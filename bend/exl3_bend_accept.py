@@ -33,7 +33,7 @@ import sys
 from collections.abc import Callable, Sequence
 from pathlib import Path
 
-SCHEMA = "eta-exl3-bend-accept/1"
+SCHEMA = "elpis-exl3-bend-accept/1"
 TABLE_NAME = "exl3_accept_table.txt"
 LIBRARY_NAME = "libexl3_accept.so"
 LOADER_NAME = "exl3_bend_accept.py"
@@ -157,7 +157,7 @@ class Acceptor:
         # PyDLL keeps the GIL across the call: the leaf is a few nanoseconds of
         # pure C, so releasing and reacquiring the GIL would only add latency.
         handle = ctypes.PyDLL(str(library), mode=ctypes.RTLD_LOCAL)
-        function = handle.eta_exl3_accept
+        function = handle.elpis_exl3_accept
         # No argtypes: the only argument is always self._cells, an int64[23]
         # ctypes array, which ctypes passes by address without a converter.
         function.restype = ctypes.c_int32

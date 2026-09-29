@@ -14,9 +14,9 @@
 # The two extension targets are built in two docker/build-exl3.sh phases: the
 # ext-*-manifest stage exports the composed engine manifest, whose SHA-256 then
 # becomes the final image's patch label.
-FROM qwen-eta:exl3-native-comparison AS baseline
-LABEL io.eta.exl3.base-image-id="sha256:b35314f48c7684b4c9cf3d59f4c21395316aa1fc0925db782f460005aa2602ff"
-LABEL io.eta.exl3.variant="baseline"
+FROM qwen-elpis:exl3-native-comparison AS baseline
+LABEL io.elpis.exl3.base-image-id="sha256:b35314f48c7684b4c9cf3d59f4c21395316aa1fc0925db782f460005aa2602ff"
+LABEL io.elpis.exl3.variant="baseline"
 
 USER root
 COPY serve/exl3-requirements.txt /opt/qwen/serve/exl3-requirements.txt
@@ -52,8 +52,8 @@ ENTRYPOINT ["bash", "/opt/qwen/docker/entrypoint.sh"]
 FROM baseline AS candidate
 # Must equal sha256(patches/exl3/exl3-patches.json); build-exl3.sh re-checks the label.
 ARG EXL3_PATCHES_SHA256=
-LABEL io.eta.exl3.variant="candidate"
-LABEL io.eta.exl3.patches-sha256="${EXL3_PATCHES_SHA256}"
+LABEL io.elpis.exl3.variant="candidate"
+LABEL io.elpis.exl3.patches-sha256="${EXL3_PATCHES_SHA256}"
 USER root
 # Proven acceptance artifacts (chain and tree acceptors), built on the host by docker/build-exl3.sh from the
 # repository's Bend sources with the pinned toolchain; read-only in the image.
@@ -93,31 +93,31 @@ COPY --from=candidate /opt/venv /opt/venv
 # translation unit with its upstream flags. The smoke import needs no driver:
 # libcuda is dlopened lazily.
 FROM ext-toolchain AS ext-rebuilt
-RUN --mount=type=bind,from=patches,target=/tmp/eta/patches \
-    python -I -B /tmp/eta/patches/exl3-ext/ext.py prepare rebuilt /src/exllamav3
+RUN --mount=type=bind,from=patches,target=/tmp/elpis/patches \
+    python -I -B /tmp/elpis/patches/exl3-ext/ext.py prepare rebuilt /src/exllamav3
 WORKDIR /src/exllamav3
 RUN python -I -B -c "import torch; assert torch.version.cuda == '13.0', torch.version.cuda" && \
     nvcc --version && g++ --version && \
     python -I -B setup.py build_ext --inplace && \
     python -I -B -c "import sys; sys.path.insert(0, '/src/exllamav3'); import torch, exllamav3_ext" && \
     readelf -p .comment exllamav3_ext.cpython-313-x86_64-linux-gnu.so
-RUN --mount=type=bind,from=patches,target=/tmp/eta/patches \
-    python -I -B /tmp/eta/patches/exl3-ext/ext.py compose rebuilt \
+RUN --mount=type=bind,from=patches,target=/tmp/elpis/patches \
+    python -I -B /tmp/elpis/patches/exl3-ext/ext.py compose rebuilt \
       exllamav3_ext.cpython-313-x86_64-linux-gnu.so > exl3-patches.json
 
 FROM scratch AS ext-rebuilt-manifest
 COPY --from=ext-rebuilt /src/exllamav3/exl3-patches.json /
 
 FROM ext-toolchain AS ext-patched
-RUN --mount=type=bind,from=patches,target=/tmp/eta/patches \
-    python -I -B /tmp/eta/patches/exl3-ext/ext.py prepare patched /src/exllamav3
+RUN --mount=type=bind,from=patches,target=/tmp/elpis/patches \
+    python -I -B /tmp/elpis/patches/exl3-ext/ext.py prepare patched /src/exllamav3
 WORKDIR /src/exllamav3
 RUN python -I -B -c "import torch; assert torch.version.cuda == '13.0', torch.version.cuda" && \
     nvcc --version && g++ --version && \
     python -I -B setup.py build_ext --inplace && \
     python -I -B -c "import sys; sys.path.insert(0, '/src/exllamav3'); import torch, exllamav3_ext"
-RUN --mount=type=bind,from=patches,target=/tmp/eta/patches \
-    python -I -B /tmp/eta/patches/exl3-ext/ext.py compose patched \
+RUN --mount=type=bind,from=patches,target=/tmp/elpis/patches \
+    python -I -B /tmp/elpis/patches/exl3-ext/ext.py compose patched \
       exllamav3_ext.cpython-313-x86_64-linux-gnu.so > exl3-patches.json
 
 FROM scratch AS ext-patched-manifest
@@ -127,13 +127,13 @@ COPY --from=ext-patched /src/exllamav3/exl3-patches.json /
 # the engine manifest in place, and it must equal the one exported in phase one.
 FROM candidate AS candidate-rebuilt
 ARG EXL3_ENGINE_MANIFEST_SHA256=
-LABEL io.eta.exl3.variant="candidate-rebuilt"
-LABEL io.eta.exl3.patches-sha256="${EXL3_ENGINE_MANIFEST_SHA256}"
+LABEL io.elpis.exl3.variant="candidate-rebuilt"
+LABEL io.elpis.exl3.patches-sha256="${EXL3_ENGINE_MANIFEST_SHA256}"
 USER root
 COPY --from=ext-rebuilt /src/exllamav3/exllamav3_ext.cpython-313-x86_64-linux-gnu.so \
   /opt/venv/lib/python3.13/site-packages/
-RUN --mount=type=bind,from=patches,target=/tmp/eta/patches \
-    /opt/venv/bin/python -I -B /tmp/eta/patches/exl3-ext/ext.py record rebuilt \
+RUN --mount=type=bind,from=patches,target=/tmp/elpis/patches \
+    /opt/venv/bin/python -I -B /tmp/elpis/patches/exl3-ext/ext.py record rebuilt \
       /opt/qwen/exl3-patches.json && \
     echo "${EXL3_ENGINE_MANIFEST_SHA256}  /opt/qwen/exl3-patches.json" | sha256sum --check --strict && \
     /opt/venv/bin/python -I -B /opt/qwen/bend-exl3/exl3_bend_accept.py /opt/qwen/bend-exl3 && \
@@ -144,15 +144,15 @@ USER runner
 
 FROM candidate AS candidate-ext
 ARG EXL3_ENGINE_MANIFEST_SHA256=
-LABEL io.eta.exl3.variant="candidate-ext"
-LABEL io.eta.exl3.patches-sha256="${EXL3_ENGINE_MANIFEST_SHA256}"
+LABEL io.elpis.exl3.variant="candidate-ext"
+LABEL io.elpis.exl3.patches-sha256="${EXL3_ENGINE_MANIFEST_SHA256}"
 USER root
 COPY --from=ext-patched /opt/venv/lib/python3.13/site-packages/exllamav3/ \
   /opt/venv/lib/python3.13/site-packages/exllamav3/
 COPY --from=ext-patched /src/exllamav3/exllamav3_ext.cpython-313-x86_64-linux-gnu.so \
   /opt/venv/lib/python3.13/site-packages/
-RUN --mount=type=bind,from=patches,target=/tmp/eta/patches \
-    /opt/venv/bin/python -I -B /tmp/eta/patches/exl3-ext/ext.py record patched \
+RUN --mount=type=bind,from=patches,target=/tmp/elpis/patches \
+    /opt/venv/bin/python -I -B /tmp/elpis/patches/exl3-ext/ext.py record patched \
       /opt/qwen/exl3-patches.json && \
     echo "${EXL3_ENGINE_MANIFEST_SHA256}  /opt/qwen/exl3-patches.json" | sha256sum --check --strict && \
     /opt/venv/bin/python -I -B /opt/qwen/bend-exl3/exl3_bend_accept.py /opt/qwen/bend-exl3 && \

@@ -18,7 +18,7 @@ if [[ -n $WAITP ]]; then
   done
 fi
 limit=$(nvidia-smi --query-gpu=power.limit --format=csv,noheader,nounits | awk '{printf "%.0f", $1}')
-declared=$(python3 -c 'import re, sys; t = open(sys.argv[1]).read(); m = re.findall(r"^POWER_LIMIT_WATTS = ([0-9]+)\.0$", t, re.M); print(m[0]) if len(m) == 1 else sys.exit("cannot read POWER_LIMIT_WATTS from " + sys.argv[1])' /home/gilrodrigues/Repos/eta/bench/exl3.py) || exit 3
+declared=$(python3 -c 'import re, sys; t = open(sys.argv[1]).read(); m = re.findall(r"^POWER_LIMIT_WATTS = ([0-9]+)\.0$", t, re.M); print(m[0]) if len(m) == 1 else sys.exit("cannot read POWER_LIMIT_WATTS from " + sys.argv[1])' /home/gilrodrigues/Repos/elpis/bench/exl3.py) || exit 3
 [[ $limit == "$declared" ]] || { echo "power limit $limit W != declared $declared W (bench/exl3.py)"; exit 3; }
 echo "$T image $I $(date +%T)"
 python3 /tmp/mkcand.py serve "qwen-exl3-ar-$T" "$I" "ar-window-$T" "$@" || { echo "mkcand failed"; exit 1; }

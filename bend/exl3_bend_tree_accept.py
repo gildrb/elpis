@@ -38,7 +38,7 @@ import sys
 from collections.abc import Callable, Sequence
 from pathlib import Path
 
-SCHEMA = "eta-exl3-bend-tree-accept/1"
+SCHEMA = "elpis-exl3-bend-tree-accept/1"
 TABLE_NAME = "exl3_tree_accept_table.txt"
 LIBRARY_NAME = "libexl3_tree_accept.so"
 LOADER_NAME = "exl3_bend_tree_accept.py"
@@ -167,9 +167,9 @@ class TreeAcceptor:
         # PyDLL keeps the GIL across the calls: each leaf is a few hundred
         # nanoseconds of pure C, so releasing the GIL would only add latency.
         handle = ctypes.PyDLL(str(library), mode=ctypes.RTLD_LOCAL)
-        accept = handle.eta_exl3_tree_accept
+        accept = handle.elpis_exl3_tree_accept
         accept.restype = ctypes.c_int32
-        derive = handle.eta_exl3_tree_derive
+        derive = handle.elpis_exl3_tree_derive
         derive.restype = ctypes.c_int32
         # No argtypes: the arguments are always this object's ctypes arrays,
         # which ctypes passes by address without a converter.

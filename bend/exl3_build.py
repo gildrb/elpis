@@ -63,7 +63,7 @@ SOURCES = (
 BEND_SOURCES = tuple(name for name in SOURCES if name.endswith(".bend"))
 
 PROGRAM_FLAGS = ("-std=c11", "-O2")
-# The library exports only eta_exl3_accept: section GC drops the unreachable
+# The library exports only elpis_exl3_accept: section GC drops the unreachable
 # Bend runtime (IO loop, thread pool, the 1 MiB effect table) that the
 # emitted program carries for its own main, and --as-needed its libraries.
 LIBRARY_FLAGS = (
@@ -133,8 +133,8 @@ ARTIFACTS = (
         "library": "libexl3_accept.so",
         "table": "exl3_accept_table.txt",
         "identity": "identity.json",
-        "schema": "eta-exl3-bend-accept/1",
-        "leaves": {"ETA_EXL3_LEAF": (("Term",) * 4 + ("u32",) * 19, 2)},
+        "schema": "elpis-exl3-bend-accept/1",
+        "leaves": {"ELPIS_EXL3_LEAF": (("Term",) * 4 + ("u32",) * 19, 2)},
     },
     {
         "program": "exl3_tree_accept",
@@ -146,10 +146,10 @@ ARTIFACTS = (
         "library": "libexl3_tree_accept.so",
         "table": "exl3_tree_accept_table.txt",
         "identity": "tree_identity.json",
-        "schema": "eta-exl3-bend-tree-accept/1",
+        "schema": "elpis-exl3-bend-tree-accept/1",
         "leaves": {
-            "ETA_EXL3_TREE_LEAF": (("Term",) * 3 + ("u32",) * 19 + ("Term",) * 7, 3),
-            "ETA_EXL3_TREE_DERIVE": (("Term",) * 7, 128),
+            "ELPIS_EXL3_TREE_LEAF": (("Term",) * 3 + ("u32",) * 19 + ("Term",) * 7, 3),
+            "ELPIS_EXL3_TREE_DERIVE": (("Term",) * 7, 128),
         },
     },
 )
@@ -323,7 +323,7 @@ def build(
     unit = f"{program}_unit.c"
     (work / unit).write_text(
         UNIT.format(
-            original=f"eta_{program}_original_main",
+            original=f"elpis_{program}_original_main",
             program=program,
             bindings="".join(
                 f"#define {macro} {leaf['name']}\n" for macro, leaf in leaves.items()
@@ -368,7 +368,7 @@ def build(
         "table_sha256": reference_sha256,
     }
     if program == "exl3_accept":
-        identity["leaf"] = leaves["ETA_EXL3_LEAF"]
+        identity["leaf"] = leaves["ELPIS_EXL3_LEAF"]
     else:
         identity["leaves"] = {macro: leaf for macro, leaf in sorted(leaves.items())}
     identity["identity_sha256"] = digest(

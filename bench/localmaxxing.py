@@ -580,7 +580,7 @@ def timings(pairs: list[Pair], chosen: int) -> dict[str, object]:
 
     """
     value: dict[str, object] = {
-        "source": "eta exl3_server usage objects (verbatim) and client monotonic walls",
+        "source": "elpis exl3_server usage objects (verbatim) and client monotonic walls",
         "reported_pair": chosen,
         "pairs": [
             {
@@ -634,11 +634,11 @@ def payload(
         "engineName": "exllamav3",
         "engineVersion": (
             f"{shared.engine_version} (r0b0tlab community {shared.engine_revision[:7]} "
-            f"+ {shared.patches} eta patches)"
+            f"+ {shared.patches} elpis patches)"
         ),
         "engineRepository": ENGINE_REPOSITORY,
         "engineCommit": shared.engine_revision,
-        "engineBuild": f"eta image {shared.image_id}",
+        "engineBuild": f"elpis image {shared.image_id}",
         "backend": "cuda",
         "quantization": QUANTIZATION,
         "promptTokens": full.prompt_tokens,

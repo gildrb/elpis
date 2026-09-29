@@ -15,7 +15,7 @@ The broad decode suite (exl3-native-broad-c1-request-v5) is unchanged and stays
 selectable only as python -m bench.autoresearch --suite broad; this script always
 runs --suite prefill.
 Required private operator descriptor (no inferred inputs or environment fallback):
-  /run/user/1000/eta-autoresearch-operator.json
+  /run/user/1000/elpis-autoresearch-operator.json
 Exactly these JSON keys (replace placeholders; schema_version is integer 1):
   {"schema_version":1,"container_id":"<full 64-hex candidate ID>",
    "api_key_file":"/private/api-key",

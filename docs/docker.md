@@ -26,7 +26,7 @@ target-only, different-KV or alternate-engine fallback.
    rootful Docker, set the state owner's numeric `UID:GID`; do not weaken state
    permissions to work around an ownership mismatch.
 5. The intended Docker daemon must already contain local tag
-   `qwen-eta:exl3-native-comparison` with exact image ID
+   `qwen-elpis:exl3-native-comparison` with exact image ID
    `sha256:b35314f48c7684b4c9cf3d59f4c21395316aa1fc0925db782f460005aa2602ff`.
    Its recorded RepoDigest is not a downloadable registry manifest. A direct
    digest `FROM` attempted registry resolution and failed; there is no registry
@@ -144,7 +144,7 @@ The persistent configuration is
 `eta-exl3-serving-8`, network `eta_default`), alongside unchanged copies of
 `launch-gate.py`, `recovery.py` and `operate.py` and its promoted `cutover-window-1/`.
 It sequentially reuses `/mnt/ssd/storage/ai/qwen3.8-27b/exl3-serving-1/cache`; preserve
-the old state. Promotions are made by `/tmp/eta-promote.sh TAG IMAGE` (operator
+the old state. Promotions are made by `/tmp/elpis-promote.sh TAG IMAGE` (operator
 tooling outside the repo), which replays the serving-2 guardian procedure below with
 automatic guardian rollback. The previous `qwen-exl3-serving-7` (container
 `ebb819cf17a5754f6b9f37c8188d31f73b7e1503597c7eec7ee03d6bfa1611ee`, image p3020fh),

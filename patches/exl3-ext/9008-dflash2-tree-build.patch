@@ -4,7 +4,7 @@
  }
  
  
-+// ext 9008 (eta): DFlash2 draft tree builder (TreeDesign DESIGN.md §2.2 / §3a; DraftProj tree/POLICY.md v2).
++// ext 9008 (elpis): DFlash2 draft tree builder (TreeDesign DESIGN.md §2.2 / §3a; DraftProj tree/POLICY.md v2).
 +//
 +// Stage 1 (dflash2_tree_lattice_kernel, 97 blocks): the selector scores of every candidate of every draft row given
 +// every possible predecessor: block 0 = row 0 given the anchor, block 1 + 16 (d - 1) + i = row d given candidate i of
@@ -417,7 +417,7 @@
 +        mode: int,
 +        out: torch.Tensor,
 +    ) -> torch.Tensor:
-+        """Draft token tree over the block's rows (eta ext 9008, dflash2_tree_build): the same gate and selector
++        """Draft token tree over the block's rows (elpis ext 9008, dflash2_tree_build): the same gate and selector
 +        scores as walk_cands, then mode 0 = the greedy chain (ids identical to walk_cands) or mode 1 = the dynamic_8
 +        best-first tree. out: device uint8 (1, 192) = tokens int64[8] ([anchor, row tokens]) + the 128-byte tree
 +        descriptor; returns out"""
@@ -446,7 +446,7 @@
          q4 = self.q4_head
 +        tree_out = params.get("dflash2_tree_out")
 +        if tree_out is not None:
-+            # Tree round (eta ext 9008): the generator owns tree_out (device uint8 (1, 192)) and its D2H; the builder
++            # Tree round (elpis ext 9008): the generator owns tree_out (device uint8 (1, 192)) and its D2H; the builder
 +            # writes [anchor, row tokens] + the tree descriptor into it, and the ids returned are a view of it
 +            mode = params.get("dflash2_tree")
 +            if type(mode) is not int or mode not in (0, 1):

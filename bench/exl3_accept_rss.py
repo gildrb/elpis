@@ -25,7 +25,7 @@ for kind in (ctypes.CDLL, ctypes.PyDLL):
     warm(cells)
 before = status()
 handle = ctypes.CDLL(lib, mode=ctypes.RTLD_LOCAL)
-fn = handle.eta_exl3_accept
+fn = handle.elpis_exl3_accept
 fn.argtypes = [ctypes.POINTER(ctypes.c_int64)]
 fn.restype = ctypes.c_int32
 loaded = status()
