@@ -55,7 +55,7 @@ In short:
 
 ## Speed
 
-**Target:** most tok/s at the native 262K context, one RTX 3090, 350 W. **Status** (live `p3021p`: #73's stack = the `tree3s` decode stack + prefill patches 3020/5111/5112/3021c, where 3021c computes prefill Q·Kᵀ in int8; 350 W, memory offset 0, 2026-09-29; decode rows measured on `tree3s`, whose decode path is unchanged):
+**Target:** most tok/s at the native 262K context, one RTX 3090, 350 W. **Status** (live `p3021r`: #73's stack rebuilt after the rename and re-measured byte-identical as #74 = the `tree3s` decode stack + prefill patches 3020/5111/5112/3021c, where 3021c computes prefill Q·Kᵀ in int8; 350 W, memory offset 0, 2026-09-29; decode rows measured on `tree3s`, whose decode path is unchanged):
 
 | Workload | tok/s | Tokens / round | tok/J |
 |---|---|---|---|

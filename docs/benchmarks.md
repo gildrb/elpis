@@ -689,6 +689,7 @@ Declared 350 W, core 0, memory 0 (§3). Image `tree3s` (`sha256:ec9751b0…`), #
 | #71 | `p3020` `023c8662…` | + `3020-prefill-pattn8` (8-warp prefill attention, same per-element order) | **1072.8** (+9.7 %) | 5.81 / 24.44 / 135.00 / 365.90 | 9/9 rows = #70 |
 | #72 | `p3020f` `5174b18b…` | + `5111-gdn-prefill-fuse-nom4096` (GDN conv reads the fp32 qkv, writes contiguous q/k/v) + `5112-mlp-act-fuse` (SiLU·up in the gate/up GEMM store) | **1087.8** (+11.2 %) | 5.69 / 24.09 / 133.65 / 362.47 | 9/9 rows = #70 |
 | #73 | `p3021p` `d48879d1…` | + `3021c-prefill-pattn8-int8qk` (int8 Q·Kᵀ in prefill attention; numerics change, user-approved) | **1157.3** (+18.3 %) | 5.63 / 23.27 / 122.91 / 321.96 | first token 9/9 = #70; 32-token continuations 5/9 = #70, the rest diverge after 22-52 characters (paraphrases) |
+| #74 | `p3021r` `91b01c53…` | #73 rebuilt after the eta → elpis rename (commit 14a15c6; acceptor tables unchanged) | 1156.0 | 5.65 / 23.28 / 122.92 / 321.96 | 9/9 rows = #73 byte for byte |
 
 - 3020 exactness: kernel 76/76 bitwise vs 3010; served ids identical on the lane mix (forced chain and tree, 57,651 ids).
 - 5111 / 5112 exactness: request-scoped prefill end state, served ids and rounds identical with each kill switch (`EXL3_GDN_PREFILL_FUSE`, `EXL3_MLP_ACT_FUSE`) on vs off at 32K (ABBA) and 128K (AB), proved on stacks that also carried 5110; the kept 5111 drops only 5110's b/a-split hunk. #72's 9 rows match #70.

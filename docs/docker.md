@@ -130,23 +130,26 @@ reasoning and final content remain separate channels.
 
 ## Current persistent live deployment
 
-The current authenticated promotion is `qwen-exl3-serving-8`, container
-`bf7087ac57f2dad0113149301e7d7e55b0a05e6a78e0b82cd00cd42269a57ab5`, with image
-`sha256:d48879d13f477d6d039210f8b078a3bc1beda344350755c76bad626029f16de3` (p3021p,
+The current authenticated promotion is `qwen-exl3-serving-9`, container
+`b930391224e8806e925fdd128c34446c52673959ae3451388870b249d48b121a`, with image
+`sha256:91b01c532280424832d2501e72ebe743ac3fb9aea4ee070e73e81a41c6262d19` (p3021r,
 variant `candidate-ext`: the #73 stack of `docs/benchmarks.md` §8, tree3s plus the
-prefill patches 3020, 5111, 5112 and 3021c, which computes prefill Q·Kᵀ in int8). The
-canonical tag `qwen-inference:exl3` identifies this image and `qwen-inference:exl3-previous`
-the retained previous image
-`sha256:b443d8b74abcd5b9fb1b22a7b05fde06d3500496b4efa2dda88cffc84e92f62b` (p3020fh, the #72
-stack rebuilt from commit 448c6a6 with standard file modes).
+prefill patches 3020, 5111, 5112 and 3021c, which computes prefill Q·Kᵀ in int8,
+rebuilt from commit 14a15c6 after the eta → elpis rename; #74 reproduced #73's 9 rows
+byte for byte). The canonical tag `qwen-inference:exl3` identifies this image and
+`qwen-inference:exl3-previous` the retained previous image
+`sha256:d48879d13f477d6d039210f8b078a3bc1beda344350755c76bad626029f16de3` (p3021p, the
+same stack before the rename).
 The persistent configuration is
-`/mnt/ssd/storage/ai/qwen3.8-27b/exl3-serving-8/compose.json` (Compose project
-`eta-exl3-serving-8`, network `eta_default`), alongside unchanged copies of
+`/mnt/ssd/storage/ai/qwen3.8-27b/exl3-serving-9/compose.json` (Compose project
+`elpis-exl3-serving-9`, network `elpis_default`), alongside unchanged copies of
 `launch-gate.py`, `recovery.py` and `operate.py` and its promoted `cutover-window-1/`.
 It sequentially reuses `/mnt/ssd/storage/ai/qwen3.8-27b/exl3-serving-1/cache`; preserve
 the old state. Promotions are made by `/tmp/elpis-promote.sh TAG IMAGE` (operator
 tooling outside the repo), which replays the serving-2 guardian procedure below with
-automatic guardian rollback. The previous `qwen-exl3-serving-7` (container
+automatic guardian rollback. The previous `qwen-exl3-serving-8` (container
+`bf7087ac57f2dad0113149301e7d7e55b0a05e6a78e0b82cd00cd42269a57ab5`, image p3021p,
+Compose project `eta-exl3-serving-8`), `qwen-exl3-serving-7` (container
 `ebb819cf17a5754f6b9f37c8188d31f73b7e1503597c7eec7ee03d6bfa1611ee`, image p3020fh),
 `qwen-exl3-serving-6` (container
 `e358fe89dd5d985b60594da0131a0d367d297be740e5accc54a31bea5f608c7f`, image tree3s),
@@ -180,7 +183,7 @@ replace the gate with a direct launch, or start a competing root Compose/Nix
 service. Future maintenance must use the retained deployment and its approved
 ownership procedure. Restart configuration is not a demonstrated cold-boot test.
 
-Current private evidence is in `exl3-serving-8/evidence/` under the state root:
+Current private evidence is in `exl3-serving-9/evidence/` under the state root:
 `main-verification.json`, `promotion-receipt.json`, `cutover-receipt.json`,
 `endpoint-smoke.json`, `live-tool-smoke.json`, `hermes-real-tool-turns.json`,
 `omp-smoke.jsonl`, `installed-exl3-server.py`, `guardian.log` and `thermal.csv`. The
