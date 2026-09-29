@@ -1,6 +1,6 @@
 # elpis: Qwen3.8-27B on one RTX 3090 at 350 W, 262K context, lossless speculative decoding
 
-**Qwen3.8-27B · EXL3 4.00 bpw · DFlash2 + 8-row token tree · 262,144 context · one RTX 3090 at 350 W, quiet fans · output = plain greedy · acceptance proved in Bend.**
+**Qwen3.8-27B · EXL3 4.00 bpw · DFlash2 + 8-row token tree · 262,144 context · one RTX 3090 at 350 W, quiet fans · the draft never changes the output (acceptance proved in Bend) · prefill Q·Kᵀ runs in int8 (#73), so outputs can differ from fp16 prefill.**
 
 ## How it compares with other RTX 3090 results for this model
 
@@ -97,22 +97,25 @@ In short:
 
 </details>
 
-## Lossless, with proof
+## The draft never changes the output: proof and tests
 
 | Claim | Proof | Result |
 |---|---|---|
-| The draft never changes the text | invariance gate (`cs10`): 15 prompts × normal / capped / all-rejected draft | 45/45 identical token ids |
-| Speedups never change the text | lane 20 + C1 15 answers, `cs10` → `cs11` → `cs12` → `tree3s` | byte-identical |
+| The draft never changes the text | invariance gate (`cs10`): 15 prompts × normal / capped / all-rejected draft; not yet re-run on the int8-prefill stack (#73/#74) | 45/45 identical token ids |
+| Decode speedups never change the text | lane 20 + C1 15 answers, `cs10` → `cs11` → `cs12` → `tree3s` | byte-identical |
+| Exact prefill patches 3020 / 5111 / 5112 never change the text | prefill suite, 9 rows: #71 and #72 vs #70 | byte-identical |
+| **Exception:** int8 prefill Q·Kᵀ (3021c, live since #73) changes the text | prefill suite, 9 rows: #73 vs #70 | first token 9/9 identical; 32-token continuations 4/9 differ after 22-52 characters |
 | Power and clocks never change the text | lane 20 + C1 15 answers, 250 W (#67) vs 350 W (#68); memory offsets 0 … −2000 (RoundBench ids) | byte-identical |
 | | GSM8K 40 answers × 21 runs, `cs12` + `tree3s`, 250 W + 350 W | byte-identical |
 | Forced chain = old engine | `EXL3_TREE_FORCE_CHAIN=1` vs `cs12`, 17 prompts: ids, every round, drafted ids, usage | identical |
 | Accept / commit logic | `bend PROOF.bend`: 41 modules, chain + tree acceptance, speculation invariance over trees | "All terms check." |
 | Kernel changes | GDN state hashes, 1-8 steps (5108); 64 layers × rows 1-8 × 30 graph replays (2113); all 5,040 tree shapes vs the chain kernel (3012) | bit-exact |
 | The tree costs no time (250 W) | tree − chain, ms per round, 4 fresh processes | 1K: −0.06 (95 % CI −0.31..+0.19); 8K: −0.02 (−0.21..+0.18) |
-| Scores | AIME 2025 3/3 · MMLU-Pro 8/10 · I3 Logic 2/4 · LiveCodeBench 1/3 | = `cs12` |
+| Scores, `tree3s` (#68) | AIME 2025 3/3 · MMLU-Pro 8/10 · I3 Logic 2/4 · LiveCodeBench 1/3 | = `cs12` |
+| Scores, int8 prefill `p3021p` (#73) | AIME 2025 3/3 · MMLU-Pro 8/10 · I3 Logic 1/4 · LiveCodeBench 1/3 | I3 task 1: correct at 14,217 tokens on `tree3s`; hit the 16,384-token cap on `p3021p` |
 
 - [`LAWS.bend`](LAWS.bend) = contract; [`PROOF.bend`](PROOF.bend) = proofs. Order for every engine change: law → proof → measurement.
-- Proofs cover the Bend models. CUDA / Python conformance = the bitwise differentials above (evidence, not proof).
+- Proofs cover the Bend models. CUDA / Python conformance = the bitwise differentials above (evidence, not proof). The speculation proof assumes each verify row's token depends only on its prefix (`~rinv`, [`bend/spec_inv_tree_laws.bend`](bend/spec_inv_tree_laws.bend)); the kernel rows above test that assumption, they do not prove it.
 
 ## 262K context
 
