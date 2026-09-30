@@ -1,0 +1,417 @@
+--- a/exllamav3_ext/quant/exl3_gemm_m16.cuh
++++ b/exllamav3_ext/quant/exl3_gemm_m16.cuh
+@@ -15,6 +15,10 @@
+ // ext 2113: discard dead split-K slot lines (0 off, 1 on; set < 0 = query); returns the mode
+ int exl3_m16_discard(int set = -1);
+ 
++// ext 3023: fp16 -> fp32 fold cadence of all m16 kernels (2001, m16g, 8201, 8202): 1 = every 2 k16 tiles
++// (32 k-values), 0 = every 4 (64, 2001's); set < 0 = query; returns the mode. The kernels' FO template argument
++int exl3_m16_fold32(int set = -1);
++
+ bool exl3_gemm_m16_supported(int size_m, int size_k, int size_n, int K, bool mcg, bool mul1);
+ 
+ // The per-device split-K workspace (allocated on first use, never under capture) and its size;
+--- a/exllamav3_ext/quant/exl3_gemm_m16.cu
++++ b/exllamav3_ext/quant/exl3_gemm_m16.cu
+@@ -38,32 +38,35 @@
+     int blocks_per_sm;
+ };
+ 
+-template <int MT, bool c_fp32, int DBG>
+-void* kernel_ptr() { return (void*) exl3_gemm_m16_kernel<MT, c_fp32, 2, DBG>; }
++template <int MT, bool c_fp32, int DBG, int FO>
++void* kernel_ptr() { return (void*) exl3_gemm_m16_kernel<MT, c_fp32, 2, DBG, FO>; }
+ 
+-// Production instances: MT 1/2 x fp16/fp32 C. Benchmark-only DBG 1/2 instances: fp16 C.
+-void* select_kernel(int MT, bool c_fp32, int dbg)
++// Production instances: MT 1/2 x fp16/fp32 C. Benchmark-only DBG 1/2 instances: fp16 C. Each with the
++// fold cadence FO (ext 3023)
++template <int FO>
++void* select_kernel_f(int MT, bool c_fp32, int dbg)
+ {
+     if (dbg == 0)
+     {
+-        if (MT == 1) return c_fp32 ? kernel_ptr<1, true, 0>() : kernel_ptr<1, false, 0>();
+-        return c_fp32 ? kernel_ptr<2, true, 0>() : kernel_ptr<2, false, 0>();
++        if (MT == 1) return c_fp32 ? kernel_ptr<1, true, 0, FO>() : kernel_ptr<1, false, 0, FO>();
++        return c_fp32 ? kernel_ptr<2, true, 0, FO>() : kernel_ptr<2, false, 0, FO>();
+     }
+     TORCH_CHECK(!c_fp32, "exl3_gemm_m16: debug modes are fp16-output only");
+-    if (dbg == 1) return MT == 1 ? kernel_ptr<1, false, 1>() : kernel_ptr<2, false, 1>();
+-    if (dbg == 2) return MT == 1 ? kernel_ptr<1, false, 2>() : kernel_ptr<2, false, 2>();
++    if (dbg == 1) return MT == 1 ? kernel_ptr<1, false, 1, FO>() : kernel_ptr<2, false, 1, FO>();
++    if (dbg == 2) return MT == 1 ? kernel_ptr<1, false, 2, FO>() : kernel_ptr<2, false, 2, FO>();
+     TORCH_CHECK(false, "exl3_gemm_m16: unknown debug mode ", dbg);
+     return nullptr;
+ }
+ 
+ M16Launch get_launch(int MT, bool c_fp32, int dbg, int device)
+ {
+-    static M16Launch cache[MAX_DEVICES][2][2][3] = {};
++    static M16Launch cache[MAX_DEVICES][2][2][3][2] = {};
++    const int f32 = exl3_m16_fold32();   // ext 3023
+     std::lock_guard<std::mutex> lock(g_mtx);
+-    M16Launch& l = cache[device][MT - 1][c_fp32 ? 1 : 0][dbg];
++    M16Launch& l = cache[device][MT - 1][c_fp32 ? 1 : 0][dbg][f32];
+     if (!l.kernel)
+     {
+-        void* k = select_kernel(MT, c_fp32, dbg);
++        void* k = f32 ? select_kernel_f<2>(MT, c_fp32, dbg) : select_kernel_f<4>(MT, c_fp32, dbg);
+         int sm = MT == 1 ? Exl3M16Cfg<1>::SMEM : Exl3M16Cfg<2>::SMEM;
+         cuda_check(cudaFuncSetAttribute(k, cudaFuncAttributeMaxDynamicSharedMemorySize, sm));
+         cuda_check(cudaFuncSetAttribute(k, cudaFuncAttributePreferredSharedMemoryCarveout, (int) cudaSharedmemCarveoutMaxShared));
+@@ -127,6 +130,23 @@
+     return mode;
+ }
+ 
++// ext 3023: fp16 -> fp32 fold cadence of the m16 kernels (2001 singles, m16g, 8201 MLP, 8202 layer tail).
++// EXL3_M16_FOLD32 = 1 (default): fold every 2 k16 tiles = 32 k-values; 0: every 4 = 64 (2001's, the
++// pre-3023 kernels). Changes numerics (shorter fp16 runs), not the partition, split-K order or schedules.
++// torch.ops.exl3_m16.fold32(mode) overrides it (read at launch / graph capture, like the diet mode)
++int exl3_m16_fold32(int set)
++{
++    static int mode = []
++    {
++        const char* env = std::getenv("EXL3_M16_FOLD32");
++        if (!env || !env[0]) return 1;
++        TORCH_CHECK((env[0] == '0' || env[0] == '1') && !env[1], "EXL3_M16_FOLD32 must be 0 or 1, got '", env, "'");
++        return env[0] - '0';
++    }();
++    if (set >= 0) mode = set > 0 ? 1 : 0;
++    return mode;
++}
++
+ bool exl3_gemm_m16_enabled()
+ {
+     static const bool enabled = []
+--- a/exllamav3_ext/quant/exl3_gemm_m16_kernel.cuh
++++ b/exllamav3_ext/quant/exl3_gemm_m16_kernel.cuh
+@@ -7,8 +7,8 @@
+ //   the regular kernels, and {f0[0], f1[0], f0[1], f1[1]} is exactly the row-major A fragment of
+ //   the transposed tile. The activations (input-Hadamard domain) are the k16 x n8 B operand, one n8
+ //   token tile for m <= 8 (MT = 1), two for m <= 16 (MT = 2). No padded MMA rows.
+-// - fp16 MMA accumulation (full-rate tensor path on GA10x), folded into fp32 every FOLD k-tiles
+-//   and at every group boundary.
++// - fp16 MMA accumulation (full-rate tensor path on GA10x), folded into fp32 every FO k-tiles
++//   (template argument, ext 3023: 4 = Cfg::FOLD, 2 with EXL3_M16_FOLD32 = 1) and at every group boundary.
+ // - Work partition: block iterations are (group, k-tile) with group = (matrix, 512 output
+ //   columns), in group-major order; block b owns the contiguous range [b * I / G, (b + 1) * I / G).
+ //   All 8 warps of a block walk the same k-tiles; warp w owns columns w * 64 .. + 63 of the group
+@@ -100,7 +100,7 @@
+     return t;
+ }
+ 
+-template <int MT, bool c_fp32, int cb, int DBG>
++template <int MT, bool c_fp32, int cb, int DBG, int FO = Exl3M16Cfg<1>::FOLD>
+ __global__ __launch_bounds__(EXL3_M16_THREADS, 2)
+ void exl3_gemm_m16_kernel(const half* __restrict__ A, void* C0, void* C1, Exl3M16Args p)
+ {
+@@ -109,6 +109,11 @@
+     constexpr int XR = Cfg::XR;
+     constexpr int W_STAGE = Cfg::W_STAGE;
+     constexpr int X_ITER = Cfg::X_ITER;
++    // ext 3023: fp16 -> fp32 fold cadence FO k-tiles (2 = every 32 k-values with EXL3_M16_FOLD32 = 1, 4 = 2001's
++    // 64); the DIET fold test (x_off & (FO * X_ITER - 1)) == 0 is (j + 1) mod FO == 0 when FO divides 2 XR and
++    // FO * X_ITER is a power of two
++    static_assert(FO == 2 || FO == 4, "fold cadence: 2 or 4 k-tiles");
++    static_assert(PF % FO == 0 && (2 * XR) % FO == 0 && ((FO * X_ITER) & (FO * X_ITER - 1)) == 0, "fold cadence must nest");
+     constexpr int ROWS = MT * 8;
+     constexpr int GW = EXL3_M16_GW;
+ 
+@@ -355,7 +360,7 @@
+             __syncwarp();
+             cur_slot = cur_slot == PF - 1 ? 0 : cur_slot + 1;
+ 
+-            if ((j & (Cfg::FOLD - 1)) == Cfg::FOLD - 1) fold();
++            if ((j & (FO - 1)) == FO - 1) fold();
+         }
+ 
+         unsigned int c0 = prof ? (unsigned int) clock() : 0u;
+--- a/exllamav3_ext/quant/exl3_gemm_m16_op.cpp
++++ b/exllamav3_ext/quant/exl3_gemm_m16_op.cpp
+@@ -56,6 +56,13 @@
+     return prev;
+ }
+ 
++static int64_t exl3_m16_fold32_op(int64_t mode)
++{
++    const int prev = exl3_m16_fold32();
++    exl3_m16_fold32((int) mode);
++    return prev;
++}
++
+ static int64_t exl3_m16_discard_op(int64_t mode)
+ {
+     const int prev = exl3_m16_discard();
+@@ -67,6 +74,7 @@
+ {
+     m.def("discard", &exl3_m16_discard_op);   // ext 2113: set discard mode (0/1; -1 query), returns the previous one
+     m.def("diet", &exl3_m16_diet_op);   // ext 2106: set diet mode (0/1/2; -1 query), returns the previous one
++    m.def("fold32", &exl3_m16_fold32_op);   // ext 3023: set the fold cadence (1 = 32, 0 = 64 k-values; -1 query), returns the previous one
+     m.def("gemm", &exl3_gemm_m16_op);
+     m.def("gemm_dbg", &exl3_gemm_m16_dbg_op);
+ }
+--- a/exllamav3_ext/quant/exl3_gemm_m16g.cu
++++ b/exllamav3_ext/quant/exl3_gemm_m16g.cu
+@@ -46,26 +46,33 @@
+     int blocks_per_sm;
+ };
+ 
+-template <int MT, bool c_fp32, int DIET>
+-void* kernel_ptr() { return (void*) exl3_gemm_m16g_kernel<MT, c_fp32, 2, DIET>; }
++template <int MT, bool c_fp32, int DIET, int FO>
++void* kernel_ptr() { return (void*) exl3_gemm_m16g_kernel<MT, c_fp32, 2, DIET, FO>; }
+ 
+-template <int DIET>
++template <int DIET, int FO>
+ void* kernel_ptr_d(int MT, bool c_fp32)
+ {
+-    return MT == 1 ? (c_fp32 ? kernel_ptr<1, true, DIET>() : kernel_ptr<1, false, DIET>())
+-                   : (c_fp32 ? kernel_ptr<2, true, DIET>() : kernel_ptr<2, false, DIET>());
++    return MT == 1 ? (c_fp32 ? kernel_ptr<1, true, DIET, FO>() : kernel_ptr<1, false, DIET, FO>())
++                   : (c_fp32 ? kernel_ptr<2, true, DIET, FO>() : kernel_ptr<2, false, DIET, FO>());
+ }
+ 
+-// ext 2106: the diet instance when exl3_m16_diet() is on (bit-identical)
++template <int FO>
++void* kernel_ptr_f(int diet, int MT, bool c_fp32)
++{
++    return diet == 2 ? kernel_ptr_d<2, FO>(MT, c_fp32) : diet == 1 ? kernel_ptr_d<1, FO>(MT, c_fp32) : kernel_ptr_d<0, FO>(MT, c_fp32);
++}
++
++// ext 2106: the diet instance when exl3_m16_diet() is on (bit-identical); ext 3023: the fold cadence
+ M16GLaunch get_launch(int MT, bool c_fp32, int device)
+ {
+-    static M16GLaunch cache[MAX_DEVICES][2][2][3] = {};
++    static M16GLaunch cache[MAX_DEVICES][2][2][3][2] = {};
+     const int diet = exl3_m16_diet();
++    const int f32 = exl3_m16_fold32();
+     std::lock_guard<std::mutex> lock(g_mtx);
+-    M16GLaunch& l = cache[device][MT - 1][c_fp32 ? 1 : 0][diet];
++    M16GLaunch& l = cache[device][MT - 1][c_fp32 ? 1 : 0][diet][f32];
+     if (!l.kernel)
+     {
+-        void* k = diet == 2 ? kernel_ptr_d<2>(MT, c_fp32) : diet == 1 ? kernel_ptr_d<1>(MT, c_fp32) : kernel_ptr_d<0>(MT, c_fp32);
++        void* k = f32 ? kernel_ptr_f<2>(diet, MT, c_fp32) : kernel_ptr_f<4>(diet, MT, c_fp32);
+         int sm = MT == 1 ? Exl3M16Cfg<1>::SMEM : Exl3M16Cfg<2>::SMEM;
+         cuda_check(cudaFuncSetAttribute(k, cudaFuncAttributeMaxDynamicSharedMemorySize, sm));
+         cuda_check(cudaFuncSetAttribute(k, cudaFuncAttributePreferredSharedMemoryCarveout, (int) cudaSharedmemCarveoutMaxShared));
+--- a/exllamav3_ext/quant/exl3_gemm_m16g_kernel.cuh
++++ b/exllamav3_ext/quant/exl3_gemm_m16g_kernel.cuh
+@@ -108,7 +108,7 @@
+ // per-issue k-tile wrap test, a segment countdown for the loop exit and the fold test on the
+ // activation offset. Same cp.async issue sequence, commit groups, waits, ldmatrix
+ // addresses, decode, MMA order and fold points, so outputs are bit-identical to DIET = false
+-template <int MT, bool c_fp32, int cb, int DIET = 0>
++template <int MT, bool c_fp32, int cb, int DIET = 0, int FO = Exl3M16Cfg<1>::FOLD>
+ __global__ __launch_bounds__(EXL3_M16_THREADS, 2)
+ void exl3_gemm_m16g_kernel(const half* __restrict__ A, void* C0, Exl3M16GArgs p)
+ {
+@@ -117,6 +117,11 @@
+     constexpr int XR = Cfg::XR;
+     constexpr int W_STAGE = Cfg::W_STAGE;
+     constexpr int X_ITER = Cfg::X_ITER;
++    // ext 3023: fp16 -> fp32 fold cadence FO k-tiles (2 = every 32 k-values with EXL3_M16_FOLD32 = 1, 4 = 2001's
++    // 64); the DIET fold test (x_off & (FO * X_ITER - 1)) == 0 is (j + 1) mod FO == 0 when FO divides 2 XR and
++    // FO * X_ITER is a power of two
++    static_assert(FO == 2 || FO == 4, "fold cadence: 2 or 4 k-tiles");
++    static_assert(PF % FO == 0 && (2 * XR) % FO == 0 && ((FO * X_ITER) & (FO * X_ITER - 1)) == 0, "fold cadence must nest");
+     constexpr int ROWS = MT * 8;
+     constexpr int GW = EXL3_M16_GW;
+ 
+@@ -370,7 +375,7 @@
+                 __syncwarp();
+                 cur_slot = cur_slot == PF - 1 ? 0 : cur_slot + 1;
+ 
+-                if ((j & (Cfg::FOLD - 1)) == Cfg::FOLD - 1) fold();
++                if ((j & (FO - 1)) == FO - 1) fold();
+             }
+ 
+             fold();
+@@ -384,7 +389,7 @@
+         // X_ITER (2 XR X_ITER is a power of two). iss_left = issues left before the issue cursor's
+         // next group wrap (the only place 2102's issue_w re-derives the pointer), 0 when done
+         static_assert(((PF * W_STAGE) & (PF * W_STAGE - 1)) == 0 && ((2 * XR * X_ITER) & (2 * XR * X_ITER - 1)) == 0, "ring sizes");
+-        static_assert((2 * XR) % Cfg::FOLD == 0, "fold cadence divides the activation ring");
++        static_assert((2 * XR) % FO == 0, "fold cadence divides the activation ring");
+         constexpr uint32_t RING_MASK = PF * W_STAGE - 1;
+         constexpr uint32_t XBUF_MASK = 2 * XR * X_ITER - 1;
+         uint32_t cur_off = 0;
+@@ -437,7 +442,7 @@
+ 
+                 // x_off = (j + 1) X_ITER mod 2 XR X_ITER and FOLD divides 2 XR, so this is
+                 // (j & (FOLD - 1)) == FOLD - 1
+-                if ((x_off & (Cfg::FOLD * X_ITER - 1)) == 0) fold();
++                if ((x_off & (FO * X_ITER - 1)) == 0) fold();
+             }
+             while (--left > 0);
+             j = seg_end;
+--- a/exllamav3_ext/quant/exl3_mlp_m16.cu
++++ b/exllamav3_ext/quant/exl3_mlp_m16.cu
+@@ -121,16 +121,22 @@
+     g_weights_init = true;
+ }
+ 
+-template <int MT, bool d_fp32, int DIET>
+-void* kernel_ptr() { return (void*) exl3_mlp_m16_kernel<MT, d_fp32, DIET>; }
++template <int MT, bool d_fp32, int DIET, int FO>
++void* kernel_ptr() { return (void*) exl3_mlp_m16_kernel<MT, d_fp32, DIET, FO>; }
+ 
+-template <int DIET>
++template <int DIET, int FO>
+ void* kernel_ptr_d(int MT, bool d_fp32)
+ {
+-    return MT == 1 ? (d_fp32 ? kernel_ptr<1, true, DIET>() : kernel_ptr<1, false, DIET>())
+-                   : (d_fp32 ? kernel_ptr<2, true, DIET>() : kernel_ptr<2, false, DIET>());
++    return MT == 1 ? (d_fp32 ? kernel_ptr<1, true, DIET, FO>() : kernel_ptr<1, false, DIET, FO>())
++                   : (d_fp32 ? kernel_ptr<2, true, DIET, FO>() : kernel_ptr<2, false, DIET, FO>());
+ }
+ 
++template <int FO>
++void* kernel_ptr_f(int diet, int MT, bool d_fp32)
++{
++    return diet == 2 ? kernel_ptr_d<2, FO>(MT, d_fp32) : diet == 1 ? kernel_ptr_d<1, FO>(MT, d_fp32) : kernel_ptr_d<0, FO>(MT, d_fp32);
++}
++
+ struct Launch
+ {
+     void* kernel;
+@@ -140,13 +146,14 @@
+ 
+ Launch get_launch(int MT, bool d_fp32, int device)
+ {
+-    static Launch cache[MAX_DEVICES][2][2][3] = {};
++    static Launch cache[MAX_DEVICES][2][2][3][2] = {};
+     const int diet = exl3_m16_diet();   // ext 2106 (bit-identical instance)
++    const int f32 = exl3_m16_fold32();  // ext 3023 fold cadence
+     std::lock_guard<std::mutex> lock(g_mtx);
+-    Launch& l = cache[device][MT - 1][d_fp32 ? 1 : 0][diet];
++    Launch& l = cache[device][MT - 1][d_fp32 ? 1 : 0][diet][f32];
+     if (!l.kernel)
+     {
+-        void* k = diet == 2 ? kernel_ptr_d<2>(MT, d_fp32) : diet == 1 ? kernel_ptr_d<1>(MT, d_fp32) : kernel_ptr_d<0>(MT, d_fp32);
++        void* k = f32 ? kernel_ptr_f<2>(diet, MT, d_fp32) : kernel_ptr_f<4>(diet, MT, d_fp32);
+         int sm = MT == 1 ? Exl3M16Cfg<1>::SMEM : Exl3M16Cfg<2>::SMEM;
+         cuda_check(cudaFuncSetAttribute(k, cudaFuncAttributeMaxDynamicSharedMemorySize, sm));
+         cuda_check(cudaFuncSetAttribute(k, cudaFuncAttributePreferredSharedMemoryCarveout, (int) cudaSharedmemCarveoutMaxShared));
+--- a/exllamav3_ext/quant/exl3_mlp_m16_kernel.cuh
++++ b/exllamav3_ext/quant/exl3_mlp_m16_kernel.cuh
+@@ -222,7 +222,7 @@
+ // iss_j < n_tot, a segment countdown for the loop exit, the fold test on the activation offset);
+ // same cp.async sequence, commit groups, waits, addresses, MMA order and folds, so
+ // bit-identical to DIET = false
+-template <int MT, bool d_fp32, int DIET = 0>
++template <int MT, bool d_fp32, int DIET = 0, int FO = Exl3M16Cfg<1>::FOLD>
+ __global__ __launch_bounds__(EXL3_M16_THREADS, 2)
+ void exl3_mlp_m16_kernel(const half* __restrict__ A, half* Cg, half* Cu, void* D, Exl3MlpM16Args p)
+ {
+@@ -231,6 +231,11 @@
+     constexpr int XR = Cfg::XR;
+     constexpr int W_STAGE = Cfg::W_STAGE;
+     constexpr int X_ITER = Cfg::X_ITER;
++    // ext 3023: fp16 -> fp32 fold cadence FO k-tiles (2 = every 32 k-values with EXL3_M16_FOLD32 = 1, 4 = 2001's
++    // 64); the DIET fold test (x_off & (FO * X_ITER - 1)) == 0 is (j + 1) mod FO == 0 when FO divides 2 XR and
++    // FO * X_ITER is a power of two
++    static_assert(FO == 2 || FO == 4, "fold cadence: 2 or 4 k-tiles");
++    static_assert(PF % FO == 0 && (2 * XR) % FO == 0 && ((FO * X_ITER) & (FO * X_ITER - 1)) == 0, "fold cadence must nest");
+     constexpr int ROWS = MT * 8;
+     constexpr int GW = EXL3_M16_GW;
+     static_assert(PF == EXL3_MLP_SCHED_PF, "schedule ring depth");
+@@ -576,7 +581,7 @@
+         // DIET: slot k of the warp ring at byte k * W_STAGE, activation piece of iteration j at
+         // (j mod 2 XR) * X_ITER (both ring sizes are powers of two)
+         static_assert(((PF * W_STAGE) & (PF * W_STAGE - 1)) == 0 && ((2 * XR * X_ITER) & (2 * XR * X_ITER - 1)) == 0, "ring sizes");
+-        static_assert((2 * XR) % Cfg::FOLD == 0, "fold cadence divides the activation ring");
++        static_assert((2 * XR) % FO == 0, "fold cadence divides the activation ring");
+         constexpr uint32_t RING_MASK = PF * W_STAGE - 1;
+         constexpr uint32_t XBUF_MASK = 2 * XR * X_ITER - 1;
+         uint32_t cur_off = cur_slot * W_STAGE;
+@@ -630,7 +635,7 @@
+ 
+                     // x_off = (j + 1) X_ITER mod 2 XR X_ITER and FOLD divides 2 XR, so this is
+                     // (j & (FOLD - 1)) == FOLD - 1
+-                    if ((x_off & (Cfg::FOLD * X_ITER - 1)) == 0) fold();
++                    if ((x_off & (FO * X_ITER - 1)) == 0) fold();
+                 }
+                 while (--left > 0);
+                 j = seg_end;
+@@ -654,7 +659,7 @@
+                     __syncwarp();
+                     cur_slot = cur_slot == PF - 1 ? 0 : cur_slot + 1;
+ 
+-                    if ((j & (Cfg::FOLD - 1)) == Cfg::FOLD - 1) fold();
++                    if ((j & (FO - 1)) == FO - 1) fold();
+                 }
+             }
+ 
+--- a/exllamav3_ext/quant/exl3_tail_m16.cu
++++ b/exllamav3_ext/quant/exl3_tail_m16.cu
+@@ -61,13 +61,15 @@
+ 
+ Launch get_launch(int device)
+ {
+-    static Launch cache[MAX_DEVICES][3] = {};
++    static Launch cache[MAX_DEVICES][3][2] = {};
+     const int diet = exl3_m16_diet();   // ext 2106 (bit-identical instance)
++    const int f32 = exl3_m16_fold32();  // ext 3023 fold cadence
+     std::lock_guard<std::mutex> lock(g_mtx);
+-    Launch& l = cache[device][diet];
++    Launch& l = cache[device][diet][f32];
+     if (!l.kernel)
+     {
+-        void* k = diet == 2 ? (void*) exl3_tail_m16_kernel<0, 2> : diet == 1 ? (void*) exl3_tail_m16_kernel<0, 1> : (void*) exl3_tail_m16_kernel<0, 0>;
++        void* k = f32 ? (diet == 2 ? (void*) exl3_tail_m16_kernel<0, 2, 2> : diet == 1 ? (void*) exl3_tail_m16_kernel<0, 1, 2> : (void*) exl3_tail_m16_kernel<0, 0, 2>)
++                      : (diet == 2 ? (void*) exl3_tail_m16_kernel<0, 2, 4> : diet == 1 ? (void*) exl3_tail_m16_kernel<0, 1, 4> : (void*) exl3_tail_m16_kernel<0, 0, 4>);
+         int sm = Exl3M16Cfg<1>::SMEM;
+         cuda_check(cudaFuncSetAttribute(k, cudaFuncAttributeMaxDynamicSharedMemorySize, sm));
+         cuda_check(cudaFuncSetAttribute(k, cudaFuncAttributePreferredSharedMemoryCarveout, (int) cudaSharedmemCarveoutMaxShared));
+--- a/exllamav3_ext/quant/exl3_tail_m16_kernel.cuh
++++ b/exllamav3_ext/quant/exl3_tail_m16_kernel.cuh
+@@ -69,7 +69,7 @@
+ // iss_j < n_tot, a segment countdown for the loop exit, the fold test on the activation offset);
+ // same cp.async sequence, commit groups, waits, addresses, MMA order and folds, so
+ // bit-identical to DIET = false
+-template <int dummy, int DIET = 0>
++template <int dummy, int DIET = 0, int FO = Exl3M16Cfg<1>::FOLD>
+ __global__ __launch_bounds__(EXL3_M16_THREADS, 2)
+ void exl3_tail_m16_kernel(const half* __restrict__ Ao, float* X, float* D, Exl3TailM16Args p)
+ {
+@@ -79,6 +79,11 @@
+     constexpr int XR = Cfg::XR;
+     constexpr int W_STAGE = Cfg::W_STAGE;
+     constexpr int X_ITER = Cfg::X_ITER;
++    // ext 3023: fp16 -> fp32 fold cadence FO k-tiles (2 = every 32 k-values with EXL3_M16_FOLD32 = 1, 4 = 2001's
++    // 64); the DIET fold test (x_off & (FO * X_ITER - 1)) == 0 is (j + 1) mod FO == 0 when FO divides 2 XR and
++    // FO * X_ITER is a power of two
++    static_assert(FO == 2 || FO == 4, "fold cadence: 2 or 4 k-tiles");
++    static_assert(PF % FO == 0 && (2 * XR) % FO == 0 && ((FO * X_ITER) & (FO * X_ITER - 1)) == 0, "fold cadence must nest");
+     constexpr int ROWS = MT * 8;
+     constexpr int GW = EXL3_M16_GW;
+     static_assert(PF == EXL3_MLP_SCHED_PF && PF == EXL3_TAIL_SCHED_PF, "schedule ring depth");
+@@ -442,7 +447,7 @@
+         // DIET: slot k of the warp ring at byte k * W_STAGE, activation piece of iteration j at
+         // (j mod 2 XR) * X_ITER (both ring sizes are powers of two)
+         static_assert(((PF * W_STAGE) & (PF * W_STAGE - 1)) == 0 && ((2 * XR * X_ITER) & (2 * XR * X_ITER - 1)) == 0, "ring sizes");
+-        static_assert((2 * XR) % Cfg::FOLD == 0, "fold cadence divides the activation ring");
++        static_assert((2 * XR) % FO == 0, "fold cadence divides the activation ring");
+         constexpr uint32_t RING_MASK = PF * W_STAGE - 1;
+         constexpr uint32_t XBUF_MASK = 2 * XR * X_ITER - 1;
+         uint32_t cur_off = cur_slot * W_STAGE;
+@@ -496,7 +501,7 @@
+ 
+                     // x_off = (j + 1) X_ITER mod 2 XR X_ITER and FOLD divides 2 XR, so this is
+                     // (j & (FOLD - 1)) == FOLD - 1
+-                    if ((x_off & (Cfg::FOLD * X_ITER - 1)) == 0) fold();
++                    if ((x_off & (FO * X_ITER - 1)) == 0) fold();
+                 }
+                 while (--left > 0);
+                 j = seg_end;
+@@ -520,7 +525,7 @@
+                     __syncwarp();
+                     cur_slot = cur_slot == PF - 1 ? 0 : cur_slot + 1;
+ 
+-                    if ((j & (Cfg::FOLD - 1)) == Cfg::FOLD - 1) fold();
++                    if ((j & (FO - 1)) == FO - 1) fold();
+                 }
+             }
+ 

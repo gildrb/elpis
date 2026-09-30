@@ -73,7 +73,7 @@
      const at::Tensor& q,
 --- a/exllamav3_ext/pattn_kernel.cuh
 +++ b/exllamav3_ext/pattn_kernel.cuh
-@@ -5,11 +5,12 @@
+@@ -5,11 +5,15 @@
  // CTA = (16 query positions, kv head, batch); 6 warps, warp w = q head kvh * 6 + w over the 16
  // positions (MMA rows); every 32-key K / V tile is loaded once per CTA (cp.async, K and V ping-pong:
  // V(it) lands during QK(it), K(it + 1) during PV(it)) and shared by the 6 warps (GQA packing).
@@ -87,11 +87,14 @@
 +// every MMA accumulates in fp32, the fp32 scores are multiplied by the fp32 scale * log2(e), the online
 +// softmax runs in fp32 RN without ftz (f_* below) with exp2 = ex2.approx.ftz.f32 (Triton's tl.exp2 on
 +// sm_86), P is rounded RN to fp16, O = acc / l uses div.full.f32 (Triton's fp32 division) and is rounded
-+// RN to fp16. The F16 = true branches (fp16-accumulated spans) are dead code: pattn.cu never launches them.
++// RN to fp16. One point is finer than stock (v4): stock's P V MMA takes the running O as its C operand, so
++// the tensor core's alignment truncates each tile's products against O's exponent; here every tile's P V
++// starts from a zero C and joins O with one IEEE RN fma (acc = fma.rn(acc, alpha, tile)).
++// The F16 = true branches (fp16-accumulated spans) are dead code: pattn.cu never launches them.
  #include <cuda_fp16.h>
  #include <cuda_runtime.h>
  #include <stdint.h>
-@@ -81,6 +82,21 @@
+@@ -81,6 +85,24 @@
      return y;
  }
  
@@ -101,6 +104,9 @@
 +__device__ __forceinline__ float f_add(float a, float b) { float y; asm("add.rn.f32 %0, %1, %2;" : "=f"(y) : "f"(a), "f"(b)); return y; }
 +__device__ __forceinline__ float f_sub(float a, float b) { float y; asm("sub.rn.f32 %0, %1, %2;" : "=f"(y) : "f"(a), "f"(b)); return y; }
 +__device__ __forceinline__ float f_fma(float a, float b, float c) { float y; asm("fma.rn.f32 %0, %1, %2, %3;" : "=f"(y) : "f"(a), "f"(b), "f"(c)); return y; }
++// The P V fold: volatile, so ptxas keeps each n-tile's fold in program order behind its two MMAs (volatile asm
++// is not reordered across volatile asm) and the zero-C tile result stays live for 4 registers only
++__device__ __forceinline__ float f_fma_pv(float a, float b, float c) { float y; asm volatile("fma.rn.f32 %0, %1, %2, %3;" : "=f"(y) : "f"(a), "f"(b), "f"(c)); return y; }
 +__device__ __forceinline__ float f_max(float a, float b) { float y; asm("max.f32 %0, %1, %2;" : "=f"(y) : "f"(a), "f"(b)); return y; }
 +__device__ __forceinline__ float f_div_full(float a, float b) { float y; asm("div.full.f32 %0, %1, %2;" : "=f"(y) : "f"(a), "f"(b)); return y; }
 +// Float compares on the bit pattern: under --use_fast_math C++ comparisons become setp.ftz (a denormal would
@@ -113,7 +119,7 @@
  __device__ __forceinline__ uint32_t pack_h2(float lo, float hi)
  {
      half2 h = __floats2half2_rn(lo, hi);
-@@ -111,6 +127,9 @@
+@@ -111,6 +133,9 @@
      const int q_abs0 = total - q_len + p0;        // absolute position of the CTA's first row
      const int n_hi = min(q_abs0 + PA_BQ, total);  // keys [0, n_hi) are visible to some row
      const int ntiles = (n_hi + PA_BN - 1) / PA_BN;
@@ -123,7 +129,7 @@
      const int* bt = block_table + (size_t) b * num_pages_per_seq;
  
      // one 32-key x 256-dim fp16 tile of K or V (512 B per key: 32 chunks of 16 B); keys >= total zero-filled
-@@ -137,7 +156,7 @@
+@@ -137,7 +162,7 @@
      if (ntiles > 0) issue(v16, vs, 0);
      cp_commit();
  
@@ -132,7 +138,7 @@
      for (int c = tid; c < PA_G * PA_BQ * 32; c += PA_THREADS)
      {
          int row = c >> 5, ch = c & 31, hl = row / PA_BQ, pos = row - hl * PA_BQ;
-@@ -145,15 +164,7 @@
+@@ -145,15 +170,7 @@
          uint4 u = make_uint4(0, 0, 0, 0);
          if (valid)
              u = *reinterpret_cast<const uint4*>(q + (((size_t) b * q_len + p0 + pos) * n_q_heads + kvh * PA_G + hl) * PA_HD + ch * 8);
@@ -149,7 +155,7 @@
      }
  
      float acc[32][4];
-@@ -172,7 +183,7 @@
+@@ -172,7 +189,7 @@
          __syncthreads();                              // (A) K(it) visible; qs stored
          const int n0 = it * PA_BN;
  
@@ -158,7 +164,7 @@
          float sc[4][4];
          #pragma unroll
          for (int nt = 0; nt < 4; ++nt)
-@@ -207,53 +218,72 @@
+@@ -207,54 +224,64 @@
              }
          }
  
@@ -238,21 +244,36 @@
 -            l[r] = l[r] * alpha[r] + sum;
 +            l[r] = f_fma(l[r], alpha[r], sum);
              m[r] = m_new;
-         }
+-        }
 -        if (__any_sync(0xffffffffu, alpha[0] != 1.f || alpha[1] != 1.f))
-+        if (__any_sync(0xffffffffu, !is_one(alpha[0]) || !is_one(alpha[1])))
-         {
-             #pragma unroll
-             for (int j = 0; j < 32; ++j)
-             {
+-        {
+-            #pragma unroll
+-            for (int j = 0; j < 32; ++j)
+-            {
 -                acc[j][0] *= alpha[0]; acc[j][1] *= alpha[0];
 -                acc[j][2] *= alpha[1]; acc[j][3] *= alpha[1];
-+                acc[j][0] = f_mul(acc[j][0], alpha[0]); acc[j][1] = f_mul(acc[j][1], alpha[0]);
-+                acc[j][2] = f_mul(acc[j][2], alpha[1]); acc[j][3] = f_mul(acc[j][3], alpha[1]);
-             }
+-            }
          }
          uint32_t pa[2][4];
-@@ -311,9 +341,9 @@
+         #pragma unroll
+@@ -294,8 +321,14 @@
+                 }
+                 else
+                 {
+-                    mma_f32(o, pa[0], bv[0][2 * hn], bv[0][2 * hn + 1]);
+-                    mma_f32(o, pa[1], bv[1][2 * hn], bv[1][2 * hn + 1]);
++                    // Ext 3022 v4: the tile's P V starts from a zero C, so the tensor core aligns its products only
++                    // against this tile's 16 / 32-key partial, never against the running O; the tile then joins O
++                    // with one IEEE RN fma that also applies the online-softmax rescale
++                    float tp[4] = {0.f, 0.f, 0.f, 0.f};
++                    mma_f32(tp, pa[0], bv[0][2 * hn], bv[0][2 * hn + 1]);
++                    mma_f32(tp, pa[1], bv[1][2 * hn], bv[1][2 * hn + 1]);
++                    o[0] = f_fma_pv(o[0], alpha[0], tp[0]); o[1] = f_fma_pv(o[1], alpha[0], tp[1]);
++                    o[2] = f_fma_pv(o[2], alpha[1], tp[2]); o[3] = f_fma_pv(o[3], alpha[1], tp[3]);
+                 }
+             }
+         }
+@@ -311,9 +344,9 @@
      #pragma unroll
      for (int r = 0; r < 2; ++r)
      {
@@ -265,7 +286,7 @@
      }
      const int hq = kvh * PA_G + warp;
      #pragma unroll
-@@ -324,7 +354,7 @@
+@@ -324,7 +357,7 @@
          half* orow = out + (((size_t) b * q_len + pos) * n_q_heads + hq) * PA_HD;
          #pragma unroll
          for (int j = 0; j < 32; ++j)
@@ -323,7 +344,15 @@
      }
  
      float acc[32][4];
-@@ -127,7 +122,7 @@
+@@ -116,6 +111,7 @@
+     const int qrow = warp * PA_BQ;
+     const int q_abs_r0 = q_abs0 + gid, q_abs_r1 = q_abs0 + gid + 8;
+     uint32_t pa[2][4];
++    float alpha[2] = {1.f, 1.f};                  // this tile's rescale, applied in the P V fma
+ 
+     #pragma unroll 1
+     for (int it = 0; it < ntiles_cta; ++it)
+@@ -127,7 +123,7 @@
  
          if (act)
          {
@@ -332,7 +361,7 @@
              float sc[4][4];
              #pragma unroll
              for (int nt = 0; nt < 4; ++nt)
-@@ -162,53 +157,72 @@
+@@ -162,54 +158,63 @@
                  }
              }
  
@@ -373,9 +402,9 @@
              }
  
 -            // Online softmax (per-thread partial row sums; quad-reduced at the end)
+-            float alpha[2];
 +            // Online softmax (per-thread partial row sums; quad-reduced at the end). fp32 RN without ftz; exp2 is
 +            // ex2.approx.ftz.f32, the instruction Triton emits for stock's tl.exp2
-             float alpha[2];
              #pragma unroll
              for (int r = 0; r < 2; ++r)
              {
@@ -412,21 +441,36 @@
 -                l[r] = l[r] * alpha[r] + sum;
 +                l[r] = f_fma(l[r], alpha[r], sum);
                  m[r] = m_new;
-             }
+-            }
 -            if (__any_sync(0xffffffffu, alpha[0] != 1.f || alpha[1] != 1.f))
-+            if (__any_sync(0xffffffffu, !is_one(alpha[0]) || !is_one(alpha[1])))
-             {
-                 #pragma unroll
-                 for (int j = 0; j < 32; ++j)
-                 {
+-            {
+-                #pragma unroll
+-                for (int j = 0; j < 32; ++j)
+-                {
 -                    acc[j][0] *= alpha[0]; acc[j][1] *= alpha[0];
 -                    acc[j][2] *= alpha[1]; acc[j][3] *= alpha[1];
-+                    acc[j][0] = f_mul(acc[j][0], alpha[0]); acc[j][1] = f_mul(acc[j][1], alpha[0]);
-+                    acc[j][2] = f_mul(acc[j][2], alpha[1]); acc[j][3] = f_mul(acc[j][3], alpha[1]);
-                 }
+-                }
              }
              #pragma unroll
-@@ -270,9 +284,9 @@
+             for (int kk = 0; kk < 2; ++kk)
+@@ -251,8 +256,14 @@
+                     }
+                     else
+                     {
+-                        mma_f32(o, pa[0], bv[0][2 * hn], bv[0][2 * hn + 1]);
+-                        mma_f32(o, pa[1], bv[1][2 * hn], bv[1][2 * hn + 1]);
++                        // Ext 3022 v4: the tile's P V starts from a zero C, so the tensor core aligns its products only
++                        // against this tile's 16 / 32-key partial, never against the running O; the tile then joins O
++                        // with one IEEE RN fma that also applies the online-softmax rescale
++                        float tp[4] = {0.f, 0.f, 0.f, 0.f};
++                        mma_f32(tp, pa[0], bv[0][2 * hn], bv[0][2 * hn + 1]);
++                        mma_f32(tp, pa[1], bv[1][2 * hn], bv[1][2 * hn + 1]);
++                        o[0] = f_fma_pv(o[0], alpha[0], tp[0]); o[1] = f_fma_pv(o[1], alpha[0], tp[1]);
++                        o[2] = f_fma_pv(o[2], alpha[1], tp[2]); o[3] = f_fma_pv(o[3], alpha[1], tp[3]);
+                     }
+                 }
+             }
+@@ -270,9 +281,9 @@
      #pragma unroll
      for (int r = 0; r < 2; ++r)
      {
@@ -439,7 +483,7 @@
      }
      #pragma unroll
      for (int r = 0; r < 2; ++r)
-@@ -282,7 +296,7 @@
+@@ -282,7 +293,7 @@
          half* orow = out + (((size_t) b * q_len + pos) * n_q_heads + hq) * PA_HD;
          #pragma unroll
          for (int j = 0; j < 32; ++j)

@@ -230,8 +230,8 @@ def main(argv: list[str]) -> int:
             fail(f"{fname}: expected 3 `if constexpr (DIET >= 2)` guards (hoist, cp.async, tile), found {k.count('if constexpr (DIET >= 2)')}")
         if "cp_async_stream_pol(ring_lane + iss_off, iss_ptr, dpol);" not in k or "else cp_async_stream(ring_lane + iss_off, iss_ptr);" not in k:
             fail(f"{fname}: the weight cp.async pair not found")
-        if not re.search(r"template <[^>]*int DIET = 0>", k):
-            fail(f"{fname}: `int DIET = 0` template parameter not found")
+        if not re.search(r"template <[^\n]*int DIET = 0, int FO = Exl3M16Cfg<1>::FOLD>", k):
+            fail(f"{fname}: `int DIET = 0` template parameter (followed by ext 3023's FO) not found")
         print(f"{fname}: hoist, tile-step calls, mma_tile (ldmatrix, dq8_aligned_4bits<{cb}>(st + t * 128, lane * 8), A order, MMA loop) matched")
     dq_idx = [squash(x) for x in ref_src.split(";")]
     if "i1=t_offset>>3" not in dq_idx or "i0=(i1+31)&31" not in dq_idx:
@@ -282,14 +282,18 @@ def main(argv: list[str]) -> int:
     insts = {}
     for fname in LAUNCHERS:
         text = (quant / fname).read_text()
-        m = re.search(r"void\* k = diet == 2 \? ([^;]*?<[^;]*?(\d)>[^;]*?) : diet == 1 \? ([^;]*?(\d)>[^;]*?) : ([^;]*?(\d)>[^;]*?);", text)
-        if not m:
-            fail(f"{fname}: the 3-way instance selector not found")
-        sel = {2: int(m[2]), 1: int(m[4]), 0: int(m[6])}
-        cache = re.search(r"static \w+ cache\[MAX_DEVICES\](?:\[2\])*\[3\] = \{\};", text)
-        index = re.search(r"cache\[device\](?:\[[^\]]+\])*\[diet\];", text)
-        if not (cache and index and "const int diet = exl3_m16_diet();" in text):
-            fail(f"{fname}: the [3] cache indexed by exl3_m16_diet() not found")
+        # ext 3023: the diet selector sits inside the fold-cadence selector (kernel_ptr_f<FO>(diet, ...) or, in the
+        # tail launcher, one 3-way selector per FO); every FO branch must map mode d to the same DIET instance
+        sels = []
+        for m in re.finditer(r"diet == 2 \? ([^;:]*?<[^;:]*?(\d)(?:, (?:\d|FO))?>[^;:]*?) : diet == 1 \? ([^;:]*?(\d)(?:, (?:\d|FO))?>[^;:]*?) : ([^;:]*?(\d)(?:, (?:\d|FO))?>[^;:]*?)[;)]", text):
+            sels.append({2: int(m[2]), 1: int(m[4]), 0: int(m[6])})
+        if not sels or any(x != sels[0] for x in sels):
+            fail(f"{fname}: the 3-way instance selector not found (or its FO branches disagree): {sels}")
+        sel = sels[0]
+        cache = re.search(r"static \w+ cache\[MAX_DEVICES\](?:\[2\])*\[3\]\[2\] = \{\};", text)
+        index = re.search(r"cache\[device\](?:\[[^\]]+\])*\[diet\]\[f32\];", text)
+        if not (cache and index and "const int diet = exl3_m16_diet();" in text and "const int f32 = exl3_m16_fold32();" in text):
+            fail(f"{fname}: the [3][2] cache indexed by exl3_m16_diet() and exl3_m16_fold32() not found")
         insts[fname] = sel
     first = next(iter(insts.values()))
     if any(v != first for v in insts.values()):
@@ -302,7 +306,7 @@ def main(argv: list[str]) -> int:
         k = (quant / fname).read_text()
         if not (("if constexpr (DIET)" in k) or ("if constexpr (!DIET)" in k)):
             fail(f"{fname}: 2106's DIET guard not found")
-    print(f"launchers {', '.join(LAUNCHERS)}: mode d -> instance DIET {first}, cache[3]; DIET guards (bookkeeping DIET != 0, "
+    print(f"launchers {', '.join(LAUNCHERS)}: mode d -> instance DIET {first}, cache[3][2 (ext 3023 FO)]; DIET guards (bookkeeping DIET != 0, "
           f"tile DIET >= 2): Bend == C IDENTICAL")
 
     # ---- 4. L2 policy ----

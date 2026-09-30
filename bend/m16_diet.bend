@@ -25,13 +25,15 @@ type DIM is Data:
   DT{je: Nat, rem: Nat, run: Nat, k: Nat}
   DG{jd: Nat, ktd: Nat, gd: Nat, left: Nat, run: Nat, k: Nat}
 
-# ---- the served configuration: Exl3M16Cfg<MT> (exl3_gemm_m16_kernel.cuh:57-69), MT = 1, 2 ----
+# ---- the served configuration: Exl3M16Cfg<MT> (exl3_gemm_m16_kernel.cuh:57-69), MT = 1, 2; the fold
+#      cadence is the kernels' FO of the served EXL3_M16_FOLD32 = 1 instance (ext 3023: 2 k16 tiles; the
+#      switch-off instance FO = Exl3M16Cfg::FOLD = 4 is the pre-3023 configuration) ----
 
 def cfg_pf() -> Nat:
   8n
 
 def cfg_fold() -> Nat:
-  4n
+  2n
 
 def cfg_xr() -> Nat:
   16n

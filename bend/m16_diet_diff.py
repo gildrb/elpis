@@ -46,7 +46,8 @@ KERNELS = {
 # transcribes (dring, dxnext, dchunk, dfold, dinner / douter) and the facts its `mod` reading needs.
 COMMON = [
     "static_assert(((PF * W_STAGE) & (PF * W_STAGE - 1)) == 0 && ((2 * XR * X_ITER) & (2 * XR * X_ITER - 1)) == 0, \"ring sizes\");",
-    "static_assert((2 * XR) % Cfg::FOLD == 0, \"fold cadence divides the activation ring\");",
+    "static_assert((2 * XR) % FO == 0, \"fold cadence divides the activation ring\");",
+    "static_assert(PF % FO == 0 && (2 * XR) % FO == 0 && ((FO * X_ITER) & (FO * X_ITER - 1)) == 0, \"fold cadence must nest\");",
     "constexpr uint32_t RING_MASK = PF * W_STAGE - 1;",
     "constexpr uint32_t XBUF_MASK = 2 * XR * X_ITER - 1;",
     "if ((x_off & (XR * X_ITER - 1)) == 0)",
@@ -55,7 +56,7 @@ COMMON = [
     "iss_off = (iss_off + W_STAGE) & RING_MASK;",
     "cur_off = (cur_off + W_STAGE) & RING_MASK;",
     "x_off = (x_off + X_ITER) & XBUF_MASK;",
-    "if ((x_off & (Cfg::FOLD * X_ITER - 1)) == 0) fold();",
+    "if ((x_off & (FO * X_ITER - 1)) == 0) fold();",
     "while (--left > 0);",
     "j = seg_end;",
     "uint32_t x_off = 0;",
@@ -157,12 +158,43 @@ def source_values(quant: Path) -> tuple[dict[int, dict[str, list[int]]], list[in
         sel = re.search(r"void\* kernel_ptr_d\(int MT, bool \w+\)\s*\{(.*?)\n\}", text, re.DOTALL)
         if not sel:
             fail(f"{host}: kernel_ptr_d(MT, ...) not found")
-        found = {int(x) for x in re.findall(r"kernel_ptr<(\d+), \w+, DIET>", sel.group(1))}
+        found = {int(x) for x in re.findall(r"kernel_ptr<(\d+), \w+, DIET, FO>", sel.group(1))}
         if not found:
-            fail(f"{host}: no kernel_ptr<MT, ..., DIET> instances")
+            fail(f"{host}: no kernel_ptr<MT, ..., DIET, FO> instances")
         mts |= found
     tail = (quant / KERNELS["tail"]).read_text()
     mts.add(one(r"constexpr int MT = (\d+);", tail, "tail MT"))
+
+    # ext 3023: the fold cadence is the kernels' FO template argument (default Exl3M16Cfg::FOLD), picked per launch by
+    # exl3_m16_fold32() (EXL3_M16_FOLD32, strict 0 | 1, default 1): the served cadence is the FO the default mode picks.
+    gm = (quant / "exl3_gemm_m16.cu").read_text()
+    sw = re.search(r"int exl3_m16_fold32\(int set\)\s*\{(.*?)\n\}", gm, re.DOTALL)
+    if not sw or 'const char* env = std::getenv("EXL3_M16_FOLD32");' not in sw.group(1):
+        fail("exl3_m16_fold32 / EXL3_M16_FOLD32 not found")
+    default_mode = one(r"if \(!env \|\| !env\[0\]\) return (\d);", sw.group(1), "EXL3_M16_FOLD32 default")
+    picks: dict[str, tuple[int, int]] = {}
+    for host, pat in (("exl3_gemm_m16g.cu", r"void\* k = f32 \? kernel_ptr_f<(\d)>\(diet, MT, c_fp32\) : kernel_ptr_f<(\d)>\(diet, MT, c_fp32\);"),
+                      ("exl3_mlp_m16.cu", r"void\* k = f32 \? kernel_ptr_f<(\d)>\(diet, MT, d_fp32\) : kernel_ptr_f<(\d)>\(diet, MT, d_fp32\);"),
+                      ("exl3_tail_m16.cu", r"void\* k = f32 \? \(diet == 2 \? \(void\*\) exl3_tail_m16_kernel<0, 2, (\d)> : diet == 1 \? "
+                                           r"\(void\*\) exl3_tail_m16_kernel<0, 1, \1> : \(void\*\) exl3_tail_m16_kernel<0, 0, \1>\)\s*"
+                                           r": \(diet == 2 \? \(void\*\) exl3_tail_m16_kernel<0, 2, (\d)> : diet == 1 \? "
+                                           r"\(void\*\) exl3_tail_m16_kernel<0, 1, \2> : \(void\*\) exl3_tail_m16_kernel<0, 0, \2>\);")):
+        m = re.search(pat, (quant / host).read_text())
+        if not m or "const int f32 = exl3_m16_fold32();" not in (quant / host).read_text():
+            fail(f"{host}: the fold-cadence instance selector (f32 = exl3_m16_fold32()) not found")
+        picks[host] = (int(m.group(1)), int(m.group(2)))          # (mode 1, mode 0)
+    if len(set(picks.values())) != 1:
+        fail(f"launchers disagree on the FO instances: {picks}")
+    fo_on, fo_off = next(iter(picks.values()))
+    for fname in KERNELS.values():
+        if not re.search(r"template <[^\n]*int DIET = 0, int FO = Exl3M16Cfg<1>::FOLD>", (quant / fname).read_text()):
+            fail(f"{fname}: `int FO = Exl3M16Cfg<1>::FOLD` template parameter not found")
+    fold_served = fo_on if default_mode == 1 else fo_off
+    fold_insts = sorted({fo_on, fo_off})
+    if fo_off != fold:
+        fail(f"EXL3_M16_FOLD32 = 0 instance FO {fo_off} != Exl3M16Cfg::FOLD {fold} (the pre-3023 kernels)")
+    print(f"fold cadence: EXL3_M16_FOLD32 default {default_mode}; mode 1 -> FO {fo_on}, mode 0 -> FO {fo_off} "
+          f"(= Exl3M16Cfg::FOLD); served FO {fold_served}")
 
     for name, fname in KERNELS.items():
         text = norm((quant / fname).read_text())
@@ -177,6 +209,10 @@ def source_values(quant: Path) -> tuple[dict[int, dict[str, list[int]]], list[in
     vals: dict[int, dict[str, list[int]]] = {}
     for mt in sorted(mts):
         xi = mt * xi_mul
+        for fo in fold_insts:       # every instantiated cadence: the laws' preconditions (pow2 fold mask, FO | 2 XR, FO | PF)
+            if not (pow2(fo * xi) and (2 * xr) % fo == 0 and pf % fo == 0):
+                fail(f"MT {mt}: FO {fo} instance violates the cadence preconditions")
+        fold = fold_served
         ring, xbuf, xch, foldp = pf * ws, 2 * xr * xi, xr * xi, fold * xi
         vals[mt] = {
             "pf": [pf], "fold": [fold], "xr": [xr], "tiles_w": [tiles_w], "w_stage": [ws], "x_iter": [xi],
