@@ -1,0 +1,471 @@
+--- a/exllamav3_ext/pattn.cu
++++ b/exllamav3_ext/pattn.cu
+@@ -40,15 +40,15 @@
+                 v16.sizes() == k16.sizes() && v16.dtype() == at::kHalf && v16.is_contiguous(), "pattn: k16 / v16 must be contiguous fp16 (pages, 256, kv_heads, 256)");
+     TORCH_CHECK(block_table.dtype() == at::kInt && block_table.dim() == 2 && block_table.is_contiguous() && block_table.size(0) == q.size(0), "pattn: bad block_table");
+     TORCH_CHECK(cache_seqlens.dtype() == at::kInt && cache_seqlens.numel() == q.size(0) && cache_seqlens.is_cuda(), "pattn: bad cache_seqlens");
+-    TORCH_CHECK(mode == 0 || mode == 1, "pattn: mode must be 0 or 1");
++    // Ext 3022: mode 0 only, stock's precision class (pattn_kernel.cuh header). The f16-accumulating
++    // instantiations (F16 = true) are not built into the binary
++    TORCH_CHECK(mode == 0, "pattn: mode must be 0 (fp32 accumulation; the f16-accumulating mode was removed by ext 3022)");
+     int bsz = (int) q.size(0), q_len = (int) q.size(1), n_q_heads = (int) q.size(2), n_kv_heads = (int) k16.size(2);
+     TORCH_CHECK(n_q_heads == PA_G * n_kv_heads, "pattn: needs 6 q heads per kv head");
+     static bool init = false;
+     if (!init)
+     {
+-        cuda_check(cudaFuncSetAttribute(pattn_detail::pattn_kernel<true>, cudaFuncAttributeMaxDynamicSharedMemorySize, PA_SMEM));
+         cuda_check(cudaFuncSetAttribute(pattn_detail::pattn_kernel<false>, cudaFuncAttributeMaxDynamicSharedMemorySize, PA_SMEM));
+-        cuda_check(cudaFuncSetAttribute(pattn_detail::pattn8_kernel<true>, cudaFuncAttributeMaxDynamicSharedMemorySize, P8_SMEM));
+         cuda_check(cudaFuncSetAttribute(pattn_detail::pattn8_kernel<false>, cudaFuncAttributeMaxDynamicSharedMemorySize, P8_SMEM));
+         init = true;
+     }
+@@ -57,29 +57,17 @@
+         const int nqc = (q_len + P8_NB * PA_BQ - 1) / (P8_NB * PA_BQ);
+         TORCH_CHECK(nqc <= 65535 && bsz <= 65535, "pattn8: grid");
+         dim3 grid(n_kv_heads * P8_PAIRS, nqc, bsz);
+-        if (mode == 1)
+-            pattn_detail::pattn8_kernel<true><<<grid, P8_THREADS, P8_SMEM, stream>>>(
+-                (const half*) q.data_ptr(), (const half*) k16.data_ptr(), (const half*) v16.data_ptr(),
+-                (const int*) block_table.data_ptr(), (const int*) cache_seqlens.data_ptr(), (half*) out.data_ptr(),
+-                (int) block_table.size(1), q_len, kv_append_len, n_q_heads, n_kv_heads, scale_log2);
+-        else
+-            pattn_detail::pattn8_kernel<false><<<grid, P8_THREADS, P8_SMEM, stream>>>(
+-                (const half*) q.data_ptr(), (const half*) k16.data_ptr(), (const half*) v16.data_ptr(),
+-                (const int*) block_table.data_ptr(), (const int*) cache_seqlens.data_ptr(), (half*) out.data_ptr(),
+-                (int) block_table.size(1), q_len, kv_append_len, n_q_heads, n_kv_heads, scale_log2);
++        pattn_detail::pattn8_kernel<false><<<grid, P8_THREADS, P8_SMEM, stream>>>(
++            (const half*) q.data_ptr(), (const half*) k16.data_ptr(), (const half*) v16.data_ptr(),
++            (const int*) block_table.data_ptr(), (const int*) cache_seqlens.data_ptr(), (half*) out.data_ptr(),
++            (int) block_table.size(1), q_len, kv_append_len, n_q_heads, n_kv_heads, scale_log2);
+         cuda_check(cudaPeekAtLastError());
+         return;
+     }
+     dim3 grid((q_len + PA_BQ - 1) / PA_BQ, n_kv_heads, bsz);
+-    if (mode == 1)
+-        pattn_detail::pattn_kernel<true><<<grid, PA_THREADS, PA_SMEM, stream>>>(
+-            (const half*) q.data_ptr(), (const half*) k16.data_ptr(), (const half*) v16.data_ptr(),
+-            (const int*) block_table.data_ptr(), (const int*) cache_seqlens.data_ptr(), (half*) out.data_ptr(),
+-            (int) block_table.size(1), q_len, kv_append_len, n_q_heads, n_kv_heads, scale_log2);
+-    else
+-        pattn_detail::pattn_kernel<false><<<grid, PA_THREADS, PA_SMEM, stream>>>(
+-            (const half*) q.data_ptr(), (const half*) k16.data_ptr(), (const half*) v16.data_ptr(),
+-            (const int*) block_table.data_ptr(), (const int*) cache_seqlens.data_ptr(), (half*) out.data_ptr(),
+-            (int) block_table.size(1), q_len, kv_append_len, n_q_heads, n_kv_heads, scale_log2);
++    pattn_detail::pattn_kernel<false><<<grid, PA_THREADS, PA_SMEM, stream>>>(
++        (const half*) q.data_ptr(), (const half*) k16.data_ptr(), (const half*) v16.data_ptr(),
++        (const int*) block_table.data_ptr(), (const int*) cache_seqlens.data_ptr(), (half*) out.data_ptr(),
++        (int) block_table.size(1), q_len, kv_append_len, n_q_heads, n_kv_heads, scale_log2);
+     cuda_check(cudaPeekAtLastError());
+ }
+--- a/exllamav3_ext/pattn.cuh
++++ b/exllamav3_ext/pattn.cuh
+@@ -7,8 +7,9 @@
+ #include <ATen/Tensor.h>
+ 
+ // q (bsz, q_len, n_q_heads, 256) fp16; k16 / v16 (pages, 256, n_kv_heads, 256) fp16; block_table (bsz, pages)
+-// int32; cache_seqlens (bsz) int32 (keys before the chunk); out like q. mode 1: f16-accumulated spans,
+-// 0: fp32 accumulation. scale_log2 = softmax scale * log2(e)
++// int32; cache_seqlens (bsz) int32 (keys before the chunk); out like q. mode must be 0 (ext 3022: stock's
++// precision class, see pattn_kernel.cuh; the f16-accumulating mode 1 was removed). scale_log2 = softmax
++// scale * log2(e), applied to the fp32 scores
+ void pattn_prefill
+ (
+     const at::Tensor& q,
+--- a/exllamav3_ext/pattn_kernel.cuh
++++ b/exllamav3_ext/pattn_kernel.cuh
+@@ -5,11 +5,12 @@
+ // CTA = (16 query positions, kv head, batch); 6 warps, warp w = q head kvh * 6 + w over the 16
+ // positions (MMA rows); every 32-key K / V tile is loaded once per CTA (cp.async, K and V ping-pong:
+ // V(it) lands during QK(it), K(it + 1) during PV(it)) and shared by the 6 warps (GQA packing).
+-// q is pre-scaled by scale * log2(e) in fp16 smem.
+-// F16 = true: QK^T accumulates each 32-dim span in fp16 (2 k16 HMMA steps) and flushes into fp32
+-// scores; PV accumulates each 32-key tile in fp16 per 8-dim n-tile and flushes into the fp32 O
+-// accumulator (f16-accumulate HMMA = 2x the fp32-accumulate rate on GA102).
+-// F16 = false: every MMA accumulates in fp32 (the Triton kernel's arithmetic class).
++// Ext 3022: only F16 = false is instantiated, and it follows stock ExLlamaV3's Triton prefill kernel
++// (_paged_attn_prefill_kernel, staged fp16 path) rounding point by rounding point: q stays unscaled fp16,
++// every MMA accumulates in fp32, the fp32 scores are multiplied by the fp32 scale * log2(e), the online
++// softmax runs in fp32 RN without ftz (f_* below) with exp2 = ex2.approx.ftz.f32 (Triton's tl.exp2 on
++// sm_86), P is rounded RN to fp16, O = acc / l uses div.full.f32 (Triton's fp32 division) and is rounded
++// RN to fp16. The F16 = true branches (fp16-accumulated spans) are dead code: pattn.cu never launches them.
+ #include <cuda_fp16.h>
+ #include <cuda_runtime.h>
+ #include <stdint.h>
+@@ -81,6 +82,21 @@
+     return y;
+ }
+ 
++// fp32 arithmetic with Triton's PTX: RN, no ftz, no contraction (the extension builds with --use_fast_math,
++// which would otherwise flush denormals and approximate the division)
++__device__ __forceinline__ float f_mul(float a, float b) { float y; asm("mul.rn.f32 %0, %1, %2;" : "=f"(y) : "f"(a), "f"(b)); return y; }
++__device__ __forceinline__ float f_add(float a, float b) { float y; asm("add.rn.f32 %0, %1, %2;" : "=f"(y) : "f"(a), "f"(b)); return y; }
++__device__ __forceinline__ float f_sub(float a, float b) { float y; asm("sub.rn.f32 %0, %1, %2;" : "=f"(y) : "f"(a), "f"(b)); return y; }
++__device__ __forceinline__ float f_fma(float a, float b, float c) { float y; asm("fma.rn.f32 %0, %1, %2, %3;" : "=f"(y) : "f"(a), "f"(b), "f"(c)); return y; }
++__device__ __forceinline__ float f_max(float a, float b) { float y; asm("max.f32 %0, %1, %2;" : "=f"(y) : "f"(a), "f"(b)); return y; }
++__device__ __forceinline__ float f_div_full(float a, float b) { float y; asm("div.full.f32 %0, %1, %2;" : "=f"(y) : "f"(a), "f"(b)); return y; }
++// Float compares on the bit pattern: under --use_fast_math C++ comparisons become setp.ftz (a denormal would
++// compare equal to 0); stock's compares are exact
++__device__ __forceinline__ bool is_ninf(float a) { return __float_as_uint(a) == 0xff800000u; }
++__device__ __forceinline__ bool is_zero(float a) { return (__float_as_uint(a) & 0x7fffffffu) == 0u; }
++__device__ __forceinline__ bool is_one(float a) { return __float_as_uint(a) == 0x3f800000u; }
++__device__ __forceinline__ float f_neg(float a) { float y; asm("neg.f32 %0, %1;" : "=f"(y) : "f"(a)); return y; }   // C++ unary minus becomes neg.ftz under --use_fast_math
++
+ __device__ __forceinline__ uint32_t pack_h2(float lo, float hi)
+ {
+     half2 h = __floats2half2_rn(lo, hi);
+@@ -111,6 +127,9 @@
+     const int q_abs0 = total - q_len + p0;        // absolute position of the CTA's first row
+     const int n_hi = min(q_abs0 + PA_BQ, total);  // keys [0, n_hi) are visible to some row
+     const int ntiles = (n_hi + PA_BN - 1) / PA_BN;
++    // stock's 64-row prefill block holding this CTA: its maskless loop covers the keys below n_full
++    const int q_abs64 = total - q_len + (p0 & ~63);
++    const int n_full = max(((q_abs64 + 1) / PA_BN) * PA_BN, 0);
+     const int* bt = block_table + (size_t) b * num_pages_per_seq;
+ 
+     // one 32-key x 256-dim fp16 tile of K or V (512 B per key: 32 chunks of 16 B); keys >= total zero-filled
+@@ -137,7 +156,7 @@
+     if (ntiles > 0) issue(v16, vs, 0);
+     cp_commit();
+ 
+-    // q rows, scaled into the log2 domain, fp16
++    // q rows, fp16 as given (unscaled, as stock)
+     for (int c = tid; c < PA_G * PA_BQ * 32; c += PA_THREADS)
+     {
+         int row = c >> 5, ch = c & 31, hl = row / PA_BQ, pos = row - hl * PA_BQ;
+@@ -145,15 +164,7 @@
+         uint4 u = make_uint4(0, 0, 0, 0);
+         if (valid)
+             u = *reinterpret_cast<const uint4*>(q + (((size_t) b * q_len + p0 + pos) * n_q_heads + kvh * PA_G + hl) * PA_HD + ch * 8);
+-        half2* h2 = reinterpret_cast<half2*>(&u);
+-        uint32_t w[4];
+-        #pragma unroll
+-        for (int j = 0; j < 4; ++j)
+-        {
+-            float2 f = __half22float2(h2[j]);
+-            w[j] = pack_h2(f.x * scale_log2, f.y * scale_log2);
+-        }
+-        *reinterpret_cast<uint4*>(qs + swz(row, ch * 8)) = make_uint4(w[0], w[1], w[2], w[3]);
++        *reinterpret_cast<uint4*>(qs + swz(row, ch * 8)) = u;
+     }
+ 
+     float acc[32][4];
+@@ -172,7 +183,7 @@
+         __syncthreads();                              // (A) K(it) visible; qs stored
+         const int n0 = it * PA_BN;
+ 
+-        // S = Q K^T (log2 domain)
++        // S = Q K^T (raw fp32 sums)
+         float sc[4][4];
+         #pragma unroll
+         for (int nt = 0; nt < 4; ++nt)
+@@ -207,53 +218,72 @@
+             }
+         }
+ 
+-        // Causal / length mask (tiles reaching past the CTA's first row only)
+-        if (n0 + PA_BN - 1 > q_abs0)
++        // Scores into the log2 domain in fp32 exactly as stock's _paged_attn_prefill_kernel does (ext 3022): q stays
++        // unscaled fp16 and the fp32 sums are multiplied by the fp32 constant scale_log2 (RN, no ftz). Tiles of stock's
++        // maskless loop (every key below n_full of stock's 64-row block) keep the raw sums: the max uses raw * c and
++        // exp2 takes fma(raw, c, -m), stock's fused fast path; every other tile rounds s = raw * c, is masked, and
++        // exp2 takes s - m, stock's masked path
++        const bool interior = n0 + PA_BN <= n_full;   // uniform over the CTA
++        if (!interior)
+         {
+             #pragma unroll
+             for (int nt = 0; nt < 4; ++nt)
+                 #pragma unroll
+-                for (int e = 0; e < 4; ++e)
+-                {
+-                    int key = n0 + 8 * nt + 2 * t + (e & 1);
+-                    int qa = (e & 2) ? q_abs_r1 : q_abs_r0;
+-                    if (key > qa || key >= total) sc[nt][e] = -INFINITY;
+-                }
++                for (int e = 0; e < 4; ++e) sc[nt][e] = f_mul(sc[nt][e], scale_log2);
++
++            // Causal / length mask (tiles reaching past the CTA's first row only)
++            if (n0 + PA_BN - 1 > q_abs0)
++            {
++                #pragma unroll
++                for (int nt = 0; nt < 4; ++nt)
++                    #pragma unroll
++                    for (int e = 0; e < 4; ++e)
++                    {
++                        int key = n0 + 8 * nt + 2 * t + (e & 1);
++                        int qa = (e & 2) ? q_abs_r1 : q_abs_r0;
++                        if (key > qa || key >= total) sc[nt][e] = -INFINITY;
++                    }
++            }
+         }
+ 
+-        // Online softmax (per-thread partial row sums; quad-reduced at the end)
++        // Online softmax (per-thread partial row sums; quad-reduced at the end). fp32 RN without ftz; exp2 is
++        // ex2.approx.ftz.f32, the instruction Triton emits for stock's tl.exp2
+         float alpha[2];
+         #pragma unroll
+         for (int r = 0; r < 2; ++r)
+         {
+             float mx = -INFINITY;
+             #pragma unroll
+-            for (int nt = 0; nt < 4; ++nt) mx = fmaxf(mx, fmaxf(sc[nt][2 * r], sc[nt][2 * r + 1]));
+-            mx = fmaxf(mx, __shfl_xor_sync(0xffffffffu, mx, 1));
+-            mx = fmaxf(mx, __shfl_xor_sync(0xffffffffu, mx, 2));
+-            float m_new = fmaxf(m[r], mx);
+-            float m_use = m_new == -INFINITY ? 0.f : m_new;
+-            alpha[r] = m[r] == -INFINITY ? 0.f : ex2(m[r] - m_use);
++            for (int nt = 0; nt < 4; ++nt)
++                #pragma unroll
++                for (int e = 0; e < 2; ++e)
++                    mx = f_max(mx, interior ? f_mul(sc[nt][2 * r + e], scale_log2) : sc[nt][2 * r + e]);
++            mx = f_max(mx, __shfl_xor_sync(0xffffffffu, mx, 1));
++            mx = f_max(mx, __shfl_xor_sync(0xffffffffu, mx, 2));
++            float m_new = f_max(m[r], mx);
++            float m_use = is_ninf(m_new) ? 0.f : m_new;
++            alpha[r] = is_ninf(m[r]) ? 0.f : ex2(f_sub(m[r], m_use));
+             float sum = 0.f;
+             #pragma unroll
+             for (int nt = 0; nt < 4; ++nt)
+                 #pragma unroll
+                 for (int e = 0; e < 2; ++e)
+                 {
+-                    float p = ex2(sc[nt][2 * r + e] - m_use);   // -inf -> 0
++                    float x = sc[nt][2 * r + e];
++                    float p = ex2(interior ? f_fma(x, scale_log2, f_neg(m_use)) : f_sub(x, m_use));   // -inf -> 0
+                     sc[nt][2 * r + e] = p;
+-                    sum += p;
++                    sum = f_add(sum, p);
+                 }
+-            l[r] = l[r] * alpha[r] + sum;
++            l[r] = f_fma(l[r], alpha[r], sum);
+             m[r] = m_new;
+         }
+-        if (__any_sync(0xffffffffu, alpha[0] != 1.f || alpha[1] != 1.f))
++        if (__any_sync(0xffffffffu, !is_one(alpha[0]) || !is_one(alpha[1])))
+         {
+             #pragma unroll
+             for (int j = 0; j < 32; ++j)
+             {
+-                acc[j][0] *= alpha[0]; acc[j][1] *= alpha[0];
+-                acc[j][2] *= alpha[1]; acc[j][3] *= alpha[1];
++                acc[j][0] = f_mul(acc[j][0], alpha[0]); acc[j][1] = f_mul(acc[j][1], alpha[0]);
++                acc[j][2] = f_mul(acc[j][2], alpha[1]); acc[j][3] = f_mul(acc[j][3], alpha[1]);
+             }
+         }
+         uint32_t pa[2][4];
+@@ -311,9 +341,9 @@
+     #pragma unroll
+     for (int r = 0; r < 2; ++r)
+     {
+-        l[r] += __shfl_xor_sync(0xffffffffu, l[r], 1);
+-        l[r] += __shfl_xor_sync(0xffffffffu, l[r], 2);
+-        l[r] = l[r] == 0.f ? 0.f : 1.f / l[r];
++        l[r] = f_add(l[r], __shfl_xor_sync(0xffffffffu, l[r], 1));
++        l[r] = f_add(l[r], __shfl_xor_sync(0xffffffffu, l[r], 2));
++        l[r] = is_zero(l[r]) ? 1.f : l[r];   // stock: acc / (l == 0 ? 1 : l)
+     }
+     const int hq = kvh * PA_G + warp;
+     #pragma unroll
+@@ -324,7 +354,7 @@
+         half* orow = out + (((size_t) b * q_len + pos) * n_q_heads + hq) * PA_HD;
+         #pragma unroll
+         for (int j = 0; j < 32; ++j)
+-            *reinterpret_cast<uint32_t*>(orow + 8 * j + 2 * t) = pack_h2(acc[j][2 * r] * l[r], acc[j][2 * r + 1] * l[r]);
++            *reinterpret_cast<uint32_t*>(orow + 8 * j + 2 * t) = pack_h2(f_div_full(acc[j][2 * r], l[r]), f_div_full(acc[j][2 * r + 1], l[r]));
+     }
+ }
+ 
+--- a/exllamav3_ext/pattn8_kernel.cuh
++++ b/exllamav3_ext/pattn8_kernel.cuh
+@@ -7,8 +7,8 @@
+ // block w % 4 of q head 2 * pair + w / 4, so each scheduler (w % 4) carries two warps of the same block.
+ // Every warp runs exactly 3010's per-warp arithmetic over exactly 3010's tiles for its (q head, block):
+ // the same 32-key tiles from key 0 up to its own block's last visible key (ceil(min(q_abs0 + 16, total)
+-// / 32) tiles), the same fp16-scaled q, span / tile flush order, mask, online softmax, P rounding and
+-// epilogue (all code below the warp mapping is 3010's text), so the output is bit-identical to 3010.
++// / 32) tiles), the same q staging, score scaling, mask, online softmax, P rounding and epilogue (all
++// code below the warp mapping is 3010's text), so the output is bit-identical to 3010.
+ // A warp past its own last tile (the CTA's earlier blocks need up to 2 fewer tiles) only joins the
+ // barriers; a warp whose 16 positions all lie past q_len does no work and stores nothing.
+ // K / V tiles are loaded once per CTA and shared by the 8 warps (3010: 6).
+@@ -62,6 +62,9 @@
+     const int q_abs0 = total - q_len + p0;        // absolute position of the warp's first row
+     const int n_hi = min(q_abs0 + PA_BQ, total);  // keys [0, n_hi) are visible to some row
+     const int ntiles = p0 < q_len ? (n_hi + PA_BN - 1) / PA_BN : 0;
++    // stock's 64-row prefill block holding this warp's rows (= the CTA's 64 positions, c0 = p0 & ~63)
++    const int q_abs64 = total - q_len + (p0 & ~63);
++    const int n_full = max(((q_abs64 + 1) / PA_BN) * PA_BN, 0);
+ 
+     // one 32-key x 256-dim fp16 tile of K or V (512 B per key: 32 chunks of 16 B); keys >= total zero-filled
+     auto issue = [&] (const half* src, half* dst, int it)
+@@ -87,7 +90,7 @@
+     if (ntiles_cta > 0) issue(v16, vs, 0);
+     cp_commit();
+ 
+-    // q rows, scaled into the log2 domain, fp16; smem row r = warp * 16 + pos
++    // q rows, fp16 as given (unscaled, as stock); smem row r = warp * 16 + pos
+     for (int c = tid; c < P8_NW * PA_BQ * 32; c += P8_THREADS)
+     {
+         int row = c >> 5, ch = c & 31, w = row / PA_BQ, pos = row - w * PA_BQ;
+@@ -96,15 +99,7 @@
+         uint4 u = make_uint4(0, 0, 0, 0);
+         if (valid)
+             u = *reinterpret_cast<const uint4*>(q + (((size_t) b * q_len + p) * n_q_heads + h) * PA_HD + ch * 8);
+-        half2* h2 = reinterpret_cast<half2*>(&u);
+-        uint32_t w4[4];
+-        #pragma unroll
+-        for (int j = 0; j < 4; ++j)
+-        {
+-            float2 f = __half22float2(h2[j]);
+-            w4[j] = pack_h2(f.x * scale_log2, f.y * scale_log2);
+-        }
+-        *reinterpret_cast<uint4*>(qs + swz(row, ch * 8)) = make_uint4(w4[0], w4[1], w4[2], w4[3]);
++        *reinterpret_cast<uint4*>(qs + swz(row, ch * 8)) = u;
+     }
+ 
+     float acc[32][4];
+@@ -127,7 +122,7 @@
+ 
+         if (act)
+         {
+-            // S = Q K^T (log2 domain)
++            // S = Q K^T (raw fp32 sums)
+             float sc[4][4];
+             #pragma unroll
+             for (int nt = 0; nt < 4; ++nt)
+@@ -162,53 +157,72 @@
+                 }
+             }
+ 
+-            // Causal / length mask (tiles reaching past the warp's first row only)
+-            if (n0 + PA_BN - 1 > q_abs0)
++            // Scores into the log2 domain in fp32 exactly as stock's _paged_attn_prefill_kernel does (ext 3022): q stays
++            // unscaled fp16 and the fp32 sums are multiplied by the fp32 constant scale_log2 (RN, no ftz). Tiles of stock's
++            // maskless loop (every key below n_full of stock's 64-row block) keep the raw sums: the max uses raw * c and
++            // exp2 takes fma(raw, c, -m), stock's fused fast path; every other tile rounds s = raw * c, is masked, and
++            // exp2 takes s - m, stock's masked path
++            const bool interior = n0 + PA_BN <= n_full;   // uniform over the CTA
++            if (!interior)
+             {
+                 #pragma unroll
+                 for (int nt = 0; nt < 4; ++nt)
+                     #pragma unroll
+-                    for (int e = 0; e < 4; ++e)
+-                    {
+-                        int key = n0 + 8 * nt + 2 * t + (e & 1);
+-                        int qa = (e & 2) ? q_abs_r1 : q_abs_r0;
+-                        if (key > qa || key >= total) sc[nt][e] = -INFINITY;
+-                    }
++                    for (int e = 0; e < 4; ++e) sc[nt][e] = f_mul(sc[nt][e], scale_log2);
++
++                // Causal / length mask (tiles reaching past the CTA's first row only)
++                if (n0 + PA_BN - 1 > q_abs0)
++                {
++                    #pragma unroll
++                    for (int nt = 0; nt < 4; ++nt)
++                        #pragma unroll
++                        for (int e = 0; e < 4; ++e)
++                        {
++                            int key = n0 + 8 * nt + 2 * t + (e & 1);
++                            int qa = (e & 2) ? q_abs_r1 : q_abs_r0;
++                            if (key > qa || key >= total) sc[nt][e] = -INFINITY;
++                        }
++                }
+             }
+ 
+-            // Online softmax (per-thread partial row sums; quad-reduced at the end)
++            // Online softmax (per-thread partial row sums; quad-reduced at the end). fp32 RN without ftz; exp2 is
++            // ex2.approx.ftz.f32, the instruction Triton emits for stock's tl.exp2
+             float alpha[2];
+             #pragma unroll
+             for (int r = 0; r < 2; ++r)
+             {
+                 float mx = -INFINITY;
+                 #pragma unroll
+-                for (int nt = 0; nt < 4; ++nt) mx = fmaxf(mx, fmaxf(sc[nt][2 * r], sc[nt][2 * r + 1]));
+-                mx = fmaxf(mx, __shfl_xor_sync(0xffffffffu, mx, 1));
+-                mx = fmaxf(mx, __shfl_xor_sync(0xffffffffu, mx, 2));
+-                float m_new = fmaxf(m[r], mx);
+-                float m_use = m_new == -INFINITY ? 0.f : m_new;
+-                alpha[r] = m[r] == -INFINITY ? 0.f : ex2(m[r] - m_use);
++                for (int nt = 0; nt < 4; ++nt)
++                    #pragma unroll
++                    for (int e = 0; e < 2; ++e)
++                        mx = f_max(mx, interior ? f_mul(sc[nt][2 * r + e], scale_log2) : sc[nt][2 * r + e]);
++                mx = f_max(mx, __shfl_xor_sync(0xffffffffu, mx, 1));
++                mx = f_max(mx, __shfl_xor_sync(0xffffffffu, mx, 2));
++                float m_new = f_max(m[r], mx);
++                float m_use = is_ninf(m_new) ? 0.f : m_new;
++                alpha[r] = is_ninf(m[r]) ? 0.f : ex2(f_sub(m[r], m_use));
+                 float sum = 0.f;
+                 #pragma unroll
+                 for (int nt = 0; nt < 4; ++nt)
+                     #pragma unroll
+                     for (int e = 0; e < 2; ++e)
+                     {
+-                        float p = ex2(sc[nt][2 * r + e] - m_use);   // -inf -> 0
++                        float x = sc[nt][2 * r + e];
++                        float p = ex2(interior ? f_fma(x, scale_log2, f_neg(m_use)) : f_sub(x, m_use));   // -inf -> 0
+                         sc[nt][2 * r + e] = p;
+-                        sum += p;
++                        sum = f_add(sum, p);
+                     }
+-                l[r] = l[r] * alpha[r] + sum;
++                l[r] = f_fma(l[r], alpha[r], sum);
+                 m[r] = m_new;
+             }
+-            if (__any_sync(0xffffffffu, alpha[0] != 1.f || alpha[1] != 1.f))
++            if (__any_sync(0xffffffffu, !is_one(alpha[0]) || !is_one(alpha[1])))
+             {
+                 #pragma unroll
+                 for (int j = 0; j < 32; ++j)
+                 {
+-                    acc[j][0] *= alpha[0]; acc[j][1] *= alpha[0];
+-                    acc[j][2] *= alpha[1]; acc[j][3] *= alpha[1];
++                    acc[j][0] = f_mul(acc[j][0], alpha[0]); acc[j][1] = f_mul(acc[j][1], alpha[0]);
++                    acc[j][2] = f_mul(acc[j][2], alpha[1]); acc[j][3] = f_mul(acc[j][3], alpha[1]);
+                 }
+             }
+             #pragma unroll
+@@ -270,9 +284,9 @@
+     #pragma unroll
+     for (int r = 0; r < 2; ++r)
+     {
+-        l[r] += __shfl_xor_sync(0xffffffffu, l[r], 1);
+-        l[r] += __shfl_xor_sync(0xffffffffu, l[r], 2);
+-        l[r] = l[r] == 0.f ? 0.f : 1.f / l[r];
++        l[r] = f_add(l[r], __shfl_xor_sync(0xffffffffu, l[r], 1));
++        l[r] = f_add(l[r], __shfl_xor_sync(0xffffffffu, l[r], 2));
++        l[r] = is_zero(l[r]) ? 1.f : l[r];   // stock: acc / (l == 0 ? 1 : l)
+     }
+     #pragma unroll
+     for (int r = 0; r < 2; ++r)
+@@ -282,7 +296,7 @@
+         half* orow = out + (((size_t) b * q_len + pos) * n_q_heads + hq) * PA_HD;
+         #pragma unroll
+         for (int j = 0; j < 32; ++j)
+-            *reinterpret_cast<uint32_t*>(orow + 8 * j + 2 * t) = pack_h2(acc[j][2 * r] * l[r], acc[j][2 * r + 1] * l[r]);
++            *reinterpret_cast<uint32_t*>(orow + 8 * j + 2 * t) = pack_h2(f_div_full(acc[j][2 * r], l[r]), f_div_full(acc[j][2 * r + 1], l[r]));
+     }
+ }
+ 
+--- a/modules/attention_fn/triton_paged.py
++++ b/modules/attention_fn/triton_paged.py
+@@ -2264,14 +2264,15 @@
+             k_cache, v_cache = kd, vd
+             block_table = torch.arange(bsz * npps_w, dtype = torch.int32, device = q.device).view(bsz, npps_w)
+             # Ext 3010: CUDA prefill attention over the staged fp16 K/V (exllamav3_ext/pattn_kernel.cuh):
+-            # GQA-packed CTAs, f16-accumulated 32-wide spans flushed into fp32. EXL3_PREFILL_ATTN=triton
+-            # keeps the Triton kernel below
++            # GQA-packed CTAs, mode 0 (ext 3022): unscaled fp16 q, fp32 MMA accumulation, fp32 scale and
++            # softmax, stock's rounding points (pattn_kernel.cuh header). EXL3_PREFILL_ATTN=triton keeps the
++            # Triton kernel below
+             if (prefill_attn == "pattn" and head_dim == 256 and n_q_heads == 6 * n_kvh
+                     and q_len >= _pattn_min_q and window_left < 0 and window_right < 0 and softcap == 0.0
+                     and not has_sinks):
+                 o = out if out.is_contiguous() else torch.empty_like(q)
+                 ext.pattn_prefill(q.contiguous(), kd, vd, block_table, cache_seqlens.to(torch.int32), o,
+-                                  kv_append_len, float(softmax_scale) * 1.4426950408889634, 1)
++                                  kv_append_len, float(softmax_scale) * 1.4426950408889634, 0)
+                 if o is not out:
+                     out.copy_(o)
+                 return out
