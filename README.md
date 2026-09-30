@@ -82,12 +82,12 @@ In short:
 |---|---|---|
 | Cold prefill, geomean over 8K / 32K / 128K / 262K | 997.8 tok/s | 1,164.9 tok/s (+16.7 %) |
 | Time to first token, 8K / 32K / 128K / 262K | 5.67 / 24.54 / 153.39 / 439.53 s | 5.58 / 22.67 / 123.66 / 322.98 s |
-| Decode: median ms per verify round at 1K / 8K / 32K context, 256 tokens (one window per image) | 25.78 / 26.19 / 28.41 | 25.48 / 26.23 / 28.39 (two windows) |
+| Decode: median ms per verify round at 1K / 8K / 32K context, 256 tokens (mean of three 350 W windows per image) | 25.73 / 26.19 / 28.36 | 25.50 / 26.24 / 28.39 |
 | Scores: AIME 2025 · MMLU-Pro · I3 Logic · LiveCodeBench | 3/3 · 8/10 · 1/4 · 1/3 | 3/3 · 8/10 · 1/4 · 1/3 (`p3021p`, #73: same prefill arithmetic, without 5110g / 9501b) |
 | Prefill attention error vs fp64, relative to stock Triton | ≤ stock in 16/16 cells (mean of cell means 1.84e-4 vs 2.88e-4) | median 25× stock (3.6-33×) |
 
 - The decode rows compare the same 8-row verify per round. Tokens per round follow each build's own text, so tok/s is not comparable across builds.
-- A second elpis decode window (X2) was discarded: host CPU load, 1K rounds at 79.7 ms. A clean rerun is queued.
+- One more elpis window was discarded for host CPU load (1K rounds at 79.7 ms) and replaced by two clean windows (runs xfab, xfab2).
 
 <details><summary>Lane per task (#68, 350 W)</summary>
 
