@@ -45,11 +45,11 @@ What differs:
   trellis-serve 2.25-3.48 (MTP) and 2.45-5.65 (DFlash2) on its panel; elpis 3.93 on the lane's
   C1 rows, 5.66 on GSM8K.
 
-Prefill and long context (others quoted; elpis and elpis-fast measured: cold prompt, time of a 1-token request, 350 W, runs #76 and `pfast1`):
+Prefill and long context (others quoted; elpis and elpis-fast measured: cold prompt, time of a 1-token request, 350 W, runs #77 and `pfast1`):
 
 | One RTX 3090 | 32K prompt: time to first token | Longest prompt shown |
 |---|---|---|
-| **elpis** (350 W, fp32 attention sums) | 24.5 s (1,337 tok/s) | 262,052 tokens: 439.5 s to first token |
+| **elpis** (350 W, fp32 attention sums) | 23.9 s (1,371 tok/s) | 262,052 tokens: 427.3 s to first token |
 | **elpis-fast** (350 W, int8 Q·Kᵀ) | 22.7 s (1,448 tok/s) | 262,052 tokens: 323.0 s to first token |
 | trellis-serve MTP (README headline) | 21.9 s (1,497 tok/s) | 208,858 tokens: 294 s to first token |
 | trellis-serve DFlash2 | 35.9 s (914 tok/s) | 126,782 tokens: 187 s to first token |
@@ -61,28 +61,28 @@ In short:
 
 - Same test, same 350 W cap: elpis 202.9 vs r0b0tlab 162.9 tok/s (+24.6 %).
 - Decode only: trellis-serve DFlash2 225-227 tok/s on its code and thinking-on prose panels (3.00 bpw, 131K window, SM 1.74 GHz, power unpublished); elpis 214.8 on GSM8K (*computed*; 4.00 bpw, 262K window).
-- Prefill at 32K: trellis-serve MTP fastest (21.9 s); elpis-fast 22.7 s; elpis 24.5 s; trellis-serve DFlash2 35.9 s.
+- Prefill at 32K: trellis-serve MTP fastest (21.9 s); elpis-fast 22.7 s; elpis 23.9 s; trellis-serve DFlash2 35.9 s.
 - trellis-serve's README headline (MTP): 96-141 tok/s decode.
 
 ## Speed
 
-**Target:** most tok/s at the native 262K context, one RTX 3090, 350 W, never less precise than stock ExLlamaV3. **Status:** elpis = image `p9501x4` (#76; 350 W, memory offset 0, 2026-09-30). The GSM8K, C1 and decode-only rows were measured on `tree3s` (#68); since then elpis's decode changed only by fold-32 (3023), which leaves the round time within 1 % (table below). Live serving still runs `p3021r`, the elpis-fast prefill lineage, until an elpis image is promoted.
+**Target:** most tok/s at the native 262K context, one RTX 3090, 350 W, never less precise than stock ExLlamaV3. **Status:** elpis = image `p9502` (#77; 350 W, memory offset 0, 2026-09-30) = `p9501x4` (#76) + two bit-exact prefill scheduling patches (9502, 5110h). The GSM8K, C1 and decode-only rows were measured on `tree3s` (#68); since then elpis's decode changed only by fold-32 (3023), which leaves the round time within 1 % (table below). Live serving still runs `p3021r`, the elpis-fast prefill lineage, until an elpis image is promoted.
 
 | Workload | tok/s | Tokens / round | tok/J |
 |---|---|---|---|
 | **Lane**: 20 calls, AIME 2025 · MMLU-Pro · I3 Logic · LiveCodeBench v6, thinking on, whole request | **153.97** (#76) · 161.79 (#68) | — | 0.497 (#68) |
 | **GSM8K**: 40 questions, 512 tokens, median of 5 runs | **202.9** | 5.66 | **0.617** |
 | C1 whole request, 1K / 8K / 32K-token prompt, 1,024 tokens out | 185.3 / 73.3 / 29.0 | 5.81 / 3.40 / 3.37 | 0.578 / 0.217 / 0.085 |
-| Prefill, cold 8K / 32K / 128K / 262K prompt (1-token request, #76) | 1,454 / 1,337 / 855 / 596 | — | — |
+| Prefill, cold 8K / 32K / 128K / 262K prompt (1-token request, #77) | 1,499 / 1,371 / 897 / 613 | — | — |
 | Decode only, 1K / 8K context (RoundBench, 12 reps) | 151.1 / 125.2 | 3.89 / 3.31 | 0.456 / 0.380 |
 
 **elpis vs elpis-fast** (same prompts, same protocol, 350 W):
 
-| | elpis `p9501x4` (#76) | elpis-fast `pfast1` |
+| | elpis `p9502` (#77) | elpis-fast `pfast1` |
 |---|---|---|
-| Cold prefill, geomean over 8K / 32K / 128K / 262K | 997.8 tok/s | 1,164.9 tok/s (+16.7 %) |
-| Time to first token, 8K / 32K / 128K / 262K | 5.67 / 24.54 / 153.39 / 439.53 s | 5.58 / 22.67 / 123.66 / 322.98 s |
-| Decode: median ms per verify round at 1K / 8K / 32K context, 256 tokens (mean of three 350 W windows per image) | 25.73 / 26.19 / 28.36 | 25.50 / 26.24 / 28.39 |
+| Cold prefill, geomean over 8K / 32K / 128K / 262K | 1,031.2 tok/s | 1,164.9 tok/s (+13.0 %) |
+| Time to first token, 8K / 32K / 128K / 262K | 5.50 / 23.94 / 146.25 / 427.29 s | 5.58 / 22.67 / 123.66 / 322.98 s |
+| Decode: median ms per verify round at 1K / 8K / 32K context, 256 tokens (mean of three 350 W windows per image; elpis measured on `p9501x4`, #76) | 25.73 / 26.19 / 28.36 | 25.50 / 26.24 / 28.39 |
 | Scores: AIME 2025 · MMLU-Pro · I3 Logic · LiveCodeBench | 3/3 · 8/10 · 1/4 · 1/3 | 3/3 · 8/10 · 1/4 · 1/3 (`p3021p`, #73: same prefill arithmetic, without 5110g / 9501b) |
 | Prefill attention error vs fp64, relative to stock Triton | ≤ stock in 16/16 cells (mean of cell means 1.84e-4 vs 2.88e-4) | median 25× stock (3.6-33×) |
 
@@ -129,7 +129,7 @@ In short:
 | Decode speedups since `cs10` never changed the text | lane 20 + C1 15 answers, `cs10` → `cs11` → `cs12` → `tree3s` | byte-identical |
 | Kept speedups that change the arithmetic are measured at least as accurate as stock | decode 3003, 2102, 8202, 3006, 2105, 5106, 8205b (split-K order), 3023 (fold-32); prefill 3022 v4 (fp32 sums; replaces 3010's fp16 spans) | against fp64: decode error per op ≤ stock (0.05-0.84×; lm_head and GDN b/a bit-identical to stock); prefill attention ≤ stock Triton in mean, p99 and max in 16/16 cells. Open: at prefix 0, stock's served route splits the keys; that variant is not yet measured ([benchmarks §9](docs/benchmarks.md#9-segment-14-the-precision-bar-exl3-native-prefill-ttft-v1-350-w-2026-09-30)) |
 | Exact prefill patches 3020 / 5111 / 5112 never change the text | prefill suite, 9 rows: #71 and #72 vs #70 | byte-identical |
-| Prefill texts vs the pre-3020 baseline #70 (#76) | prefill suite, 9 rows | first token 9/9 identical; 32-token continuations 6/9 identical (fp32 attention sums differ from 3010's fp16 spans) |
+| Prefill texts vs the pre-3020 baseline #70 (#76, #77) | prefill suite, 9 rows | first token 9/9 identical; 32-token continuations 6/9 identical (fp32 attention sums differ from 3010's fp16 spans); #77 = #76 in 9/9 rows |
 | Power and clocks never change the text | lane 20 + C1 15 answers, 250 W (#67) vs 350 W (#68); memory offsets 0 … −2000 (RoundBench ids) | byte-identical |
 | | GSM8K 40 answers × 21 runs, `cs12` + `tree3s`, 250 W + 350 W | byte-identical |
 | Forced chain = old engine | `EXL3_TREE_FORCE_CHAIN=1` vs `cs12`, 17 prompts: ids, every round, drafted ids, usage | identical |
@@ -147,8 +147,8 @@ In short:
 | | |
 |---|---|
 | Context / cache | 262,144 / 270,336 tokens, 3-bit K and V |
-| Longest prompt run | 262,052 tokens: 439.5 s to first token at 350 W (#76; elpis-fast 323.0 s; 435.0 s before the prefill patches, #70); 262,136 tokens: 537 s at 250 W (`cs10`) |
-| 32K prompt to first token | 24.5 s at 350 W (#76; elpis-fast 22.7 s); 25.8 s before the prefill patches (#70) |
+| Longest prompt run | 262,052 tokens: 427.3 s to first token at 350 W (#77; elpis-fast 323.0 s; 435.0 s before the prefill patches, #70); 262,136 tokens: 537 s at 250 W (`cs10`) |
+| 32K prompt to first token | 23.9 s at 350 W (#77; elpis-fast 22.7 s); 25.8 s before the prefill patches (#70) |
 | KV size | 12 KiB / token: only 16 of 64 layers keep KV; 3.1 GiB at 270,336 tokens (*computed*) |
 | GPU memory, live | 21,888 / 24,576 MiB |
 
