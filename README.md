@@ -2,14 +2,14 @@
 
 **EXL3 4.00 bpw · DFlash2 + 8-row token tree · 262,144 context · one RTX 3090 at 350 W, quiet fans · the draft never changes the output (acceptance proved in Bend).**
 
-elpis is the accurate build. Its speed-first sibling is [elpis-fast](https://github.com/gildrb/elpis-fast): same model, same benchmarks, reduced-precision prefill.
+elpis targets accurate serving; #76/#77 are not precision-qualified ([gate](docs/benchmarks.md#9-segment-14-the-precision-bar-exl3-native-prefill-ttft-v1-350-w-2026-09-30)). Its speed-first sibling is [elpis-fast](https://github.com/gildrb/elpis-fast): same model, same benchmarks, reduced-precision prefill.
 
 | | elpis (this repo) | elpis-fast |
 |---|---|---|
-| Rule | every speedup is Bend-proven to keep the output bit for bit, or measured at least as accurate as the stock kernel it replaces; nothing computes less precisely than stock ExLlamaV3 | fastest serving whose quality is measured |
+| Rule (target) | every speedup must be Bend-proven to keep the output bit for bit, or measured at least as accurate as the stock kernel it replaces; never less precise than stock ExLlamaV3; #76/#77 currently violate this bar | fastest serving whose quality is measured |
 | Speculative decoding | the draft never changes the output: Bend proof + bitwise tests | same |
 | Prefill arithmetic | fp32 sums in prefill attention (3022 v4); prefill GEMMs use stock's own scheme (fp16 partials per 32-wide K slice, fp32 adds), bit-exact with stock; no int8 | int8 Q·Kᵀ and fp16 P·V sums; outputs can differ from full-precision prefill |
-| Evidence | vs fp64: prefill attention error ≤ stock Triton in 16/16 cells, decode error ≤ stock on every op; draft on/off byte-identity 90/90 | teacher-forced KL within exact-numerics floors; broad-suite rewards; attention error vs fp64 3.6-33× stock's (median 25×) |
+| Evidence | #76/#77 prefill fails the served-exact gate in 5/16 cells ([details](docs/benchmarks.md#9-segment-14-the-precision-bar-exl3-native-prefill-ttft-v1-350-w-2026-09-30)); decode error ≤ stock on every measured op; draft on/off byte-identity 90/90 | teacher-forced KL within exact-numerics floors; broad-suite rewards; attention error vs fp64 3.6-33× stock's (median 25×) |
 | Model | EXL3 4.00 bpw weights, 3-bit KV cache (not identical to BF16) | same |
 
 ## How it compares with other RTX 3090 results for this model
@@ -66,7 +66,7 @@ In short:
 
 ## Speed
 
-**Target:** most tok/s at the native 262K context, one RTX 3090, 350 W, never less precise than stock ExLlamaV3. **Status:** elpis = image `p9502` (#77; 350 W, memory offset 0, 2026-09-30) = `p9501x4` (#76) + two bit-exact prefill scheduling patches (9502, 5110h). The GSM8K, C1 and decode-only rows were measured on `tree3s` (#68); since then elpis's decode changed only by fold-32 (3023), which leaves the round time within 1 % (table below). Live serving still runs `p3021r`, the elpis-fast prefill lineage, until an elpis image is promoted.
+**Target:** most tok/s at the native 262K context, one RTX 3090, 350 W, never less precise than stock ExLlamaV3. **Status:** historical measured image `p9502` (#77; 350 W, memory offset 0, 2026-09-30) = `p9501x4` (#76) + two bit-exact prefill scheduling patches (9502, 5110h); #76/#77 are **not precision-qualified**: 3022 v4 fails the served-exact gate in 5/16 cells. The GSM8K, C1 and decode-only rows were measured on `tree3s` (#68); since then elpis's decode changed only by fold-32 (3023), which leaves the round time within 1 % (table below). Live serving still runs `p3021r`, the elpis-fast prefill lineage, until an elpis image is promoted.
 
 | Workload | tok/s | Tokens / round | tok/J |
 |---|---|---|---|
@@ -78,13 +78,13 @@ In short:
 
 **elpis vs elpis-fast** (same prompts, same protocol, 350 W):
 
-| | elpis `p9502` (#77) | elpis-fast `pfast1` |
+| | elpis `p9502` (#77; historical, not precision-qualified) | elpis-fast `pfast1` |
 |---|---|---|
 | Cold prefill, geomean over 8K / 32K / 128K / 262K | 1,031.2 tok/s | 1,164.9 tok/s (+13.0 %) |
 | Time to first token, 8K / 32K / 128K / 262K | 5.50 / 23.94 / 146.25 / 427.29 s | 5.58 / 22.67 / 123.66 / 322.98 s |
 | Decode: median ms per verify round at 1K / 8K / 32K context, 256 tokens (mean of three 350 W windows per image; elpis measured on `p9501x4`, #76) | 25.73 / 26.19 / 28.36 | 25.50 / 26.24 / 28.39 |
 | Scores: AIME 2025 · MMLU-Pro · I3 Logic · LiveCodeBench | 3/3 · 8/10 · 1/4 · 1/3 | 3/3 · 8/10 · 1/4 · 1/3 (`p3021p`, #73: same prefill arithmetic, without 5110g / 9501b) |
-| Prefill attention error vs fp64, relative to stock Triton | ≤ stock in 16/16 cells (mean of cell means 1.84e-4 vs 2.88e-4) | median 25× stock (3.6-33×) |
+| Prefill attention error vs fp64, relative to stock Triton | old staged-fp16 K/V reference, unsplit stock at prefix 0: ≤ stock 16/16 (cell means 1.84e-4 vs 2.88e-4); exact CQ3 K/V + served stock: fails 5/16 ([gate](docs/benchmarks.md#9-segment-14-the-precision-bar-exl3-native-prefill-ttft-v1-350-w-2026-09-30)) | median 25× stock (3.6-33×) |
 
 - The decode rows compare the same 8-row verify per round. Tokens per round follow each build's own text, so tok/s is not comparable across builds.
 - One more elpis window was discarded for host CPU load (1K rounds at 79.7 ms) and replaced by two clean windows (runs xfab, xfab2).
@@ -127,7 +127,7 @@ In short:
 |---|---|---|
 | The draft never changes the text | invariance gate: 15 prompts × normal / capped / all-rejected draft; `cs10`, then again on `p9501x4` (#76) for the tree and the forced chain | 45/45 (`cs10`); 90/90 (#76) identical token ids |
 | Decode speedups since `cs10` never changed the text | lane 20 + C1 15 answers, `cs10` → `cs11` → `cs12` → `tree3s` | byte-identical |
-| Kept speedups that change the arithmetic are measured at least as accurate as stock | decode 3003, 2102, 8202, 3006, 2105, 5106, 8205b (split-K order), 3023 (fold-32); prefill 3022 v4 (fp32 sums; replaces 3010's fp16 spans) | against fp64: decode error per op ≤ stock (0.05-0.84×; lm_head and GDN b/a bit-identical to stock); prefill attention ≤ stock Triton in mean, p99 and max in 16/16 cells. Open: at prefix 0, stock's served route splits the keys; that variant is not yet measured ([benchmarks §9](docs/benchmarks.md#9-segment-14-the-precision-bar-exl3-native-prefill-ttft-v1-350-w-2026-09-30)) |
+| Arithmetic-changing speedups: measured precision status | decode 3003, 2102, 8202, 3006, 2105, 5106, 8205b (split-K order), 3023 (fold-32); prefill 3022 v4 (fp32 sums; replaces 3010's fp16 spans) | against fp64: decode error per measured op ≤ stock (0.05-0.84×; lm_head and GDN b/a bit-identical to stock); prefill's old staged-fp16 K/V / unsplit-stock gate passed 16/16, but exact CQ3 K/V / served-stock gate fails 5/16; #76/#77 not precision-qualified ([benchmarks §9](docs/benchmarks.md#9-segment-14-the-precision-bar-exl3-native-prefill-ttft-v1-350-w-2026-09-30)) |
 | Exact prefill patches 3020 / 5111 / 5112 never change the text | prefill suite, 9 rows: #71 and #72 vs #70 | byte-identical |
 | Prefill texts vs the pre-3020 baseline #70 (#76, #77) | prefill suite, 9 rows | first token 9/9 identical; 32-token continuations 6/9 identical (fp32 attention sums differ from 3010's fp16 spans); #77 = #76 in 9/9 rows |
 | Power and clocks never change the text | lane 20 + C1 15 answers, 250 W (#67) vs 350 W (#68); memory offsets 0 … −2000 (RoundBench ids) | byte-identical |
@@ -198,7 +198,7 @@ Same image (`tree3s`), token-identical outputs. 250 W: memory −1500 MHz, old f
 | 8-row token tree: 7 nodes best-first; commit the longest matching root path + 1 | 3.39 → 3.89 tokens / round (1K); lane 111.85 → 122.33 tok/s (250 W); round time unchanged |
 | 1-8 verify rows share one weight pass (16-row tensor-core tiles) | 16 rows: +21 % per verify forward |
 | 4-bit EXL3 weights | 15.4 GiB target + 1.2 GiB draft |
-| 41 engine patches, each bit-exact or numerics-gated | per area below |
+| 41 historical engine patches, bit-exact or numerics-gated when kept | per area below; #76/#77 prefill subsequently failed served-exact precision qualification |
 | 350 W cap, quiet fan curve (≤ 80 % to 84 °C) | lane +32.3 % tok/s at equal tok/J (0.497 vs 0.495); fan 75 vs 71 % median ([250 W vs 350 W](#250-w-vs-350-w)) |
 | Memory clock: stock at 350 W (−1500 MHz was best at 250 W) | 350 W, vs −1500: 0 = +5.4 % tok/s, +6.4 % tok/J; −2000: −1.8 % ([sweep](docs/benchmarks.md#3-power)). 250 W: −1500 saved 1.0-1.4 ms / round (*computed* sum of two sweeps); core offsets: none (+225 MHz: Xid 109) |
 
@@ -310,8 +310,8 @@ python3 -m bench.gsm8k_compare --api-key-file /path/to/api-key --data gsm8k-test
 
 ```
 - Unqualified: 262K prompts run only in the prefill lane (one 262,000-token prompt per run); sustained 262K capacity, quality and speed are not qualified.
-- Prefill attention computes Q·Kᵀ in int8 (3021c): outputs differ slightly from the fp16 route (KL inside
-  the exact-numerics noise floor; broad suite equal except one I3 task that hit the token cap).
+- #76/#77 prefill (3022 v4) fails served-exact precision qualification in 5/16 cells.
+- Live p3021r still uses int8 Q·Kᵀ (3021c): outputs differ slightly from the fp16 route (KL inside the exact-numerics noise floor; broad suite equal except one I3 task that hit the token cap).
 - Greedy only, one sequence at a time.
 - Chat stream=true is buffered SSE: first event is not TTFT.
 - Exact logit ties can depend on max_tokens (cs12: token 39457 at 8192 vs 54185 at 256,
@@ -326,6 +326,9 @@ python3 -m bench.gsm8k_compare --api-key-file /path/to/api-key --data gsm8k-test
 
 | Work | Status | Measured so far |
 |---|---|---|
+| Prefill 3024: approximate Q + exact K | **unqualified, not kept**; native capacity, quality and TTFT pending | 28 distinct sampled + 4 all-row cells and per-head mean/p99/max pass; active K/V crosscheck within derived bound; row-mod-4=0 L0/prefix-0 max error is 2.86 % worse at q_len 2048/4096 ([scope and diagnosis](docs/benchmarks.md#9-segment-14-the-precision-bar-exl3-native-prefill-ttft-v1-350-w-2026-09-30)) |
+| Prefill 3025 | dropped current candidate | no useful production speed gain; not a precision fix |
+| Prefill 3026: V-only staging on 3024 | exact; native memory passes; not precision-qualified (inherits 3024's failure) | unsplit kernels' SASS identical to 3024; CUDA differential 4/4 cells (0081zz2); 262,136 + 8 tokens at native context: 583 MiB minimum allocator headroom (0081zz4; #77: 37 MiB). 0081zz3 failed its own sampler-gap check, not admitted |
 | Draft fine-tune on agent traffic (tool calls, SWE turns) | data done: 2,869 prompts, 1.66M tokens, disjoint from all eval sets; training next | pilot, live engine: agent tokens / round +4.22 % (95 % CI +3.14..+5.65), control −0.01 % (−0.66..+0.60); generic self-distillation +0.23 % (−0.13..+0.62, replay estimate): dropped |
 | Draft precision 4 / 5 / 6 / 8 bpw | queued | — |
 | Prefill: merge aligned 2,048-row chunks into 4,096 (5110) | 262K error was out-of-memory in the first verify round; fix under test | 32K / 128K: identical outputs, first token ×0.974 / ×0.970 |
