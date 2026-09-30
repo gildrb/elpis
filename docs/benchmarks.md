@@ -695,3 +695,27 @@ Declared 350 W, core 0, memory 0 (§3). Image `tree3s` (`sha256:ec9751b0…`), #
 - 5111 / 5112 exactness: request-scoped prefill end state, served ids and rounds identical with each kill switch (`EXL3_GDN_PREFILL_FUSE`, `EXL3_MLP_ACT_FUSE`) on vs off at 32K (ABBA) and 128K (AB), proved on stacks that also carried 5110; the kept 5111 drops only 5110's b/a-split hunk. #72's 9 rows match #70.
 - `5110-prefill-m4096` (merge aligned 2048 pieces into 4096): prefill state, ids and rounds identical at 32K/128K (TTFT ×0.974 / ×0.970), but the 262K run ended in a swallowed job error; not kept.
 - 3021c (int8 Q·Kᵀ): the 3-bit K cache in the H32 basis is exactly int8 codes × one scale per 32-group, so only Q is quantized (per row); int32 partials, exact conversion. Kernel ×0.78-0.79 of 3020. V and P·V stay fp16; decode and verify attention are unchanged. Quality gate (`Int8Gate`, harness validated: capture = plain forward bit for bit, head = served m=1 head): teacher-forced KL vs the served route on held-out 8K / 32K / 128K documents 0.087 / 0.357 / 0.125 against exact-numerics floors (prefill chunk 1024 vs 2048; pre-3010 attention) of 0.093-0.096 / 0.355-0.389 / 0.115-0.135; top-1 0.949 / 0.902 / 0.951 vs floors 0.951 / 0.899-0.903 / 0.936-0.954. It misses the pre-registered strict rule on one of 9 checks (top-1 at 8K, by 0.11 pt) and passes the calibrated rule R2, which was set after seeing this result. Continuation KL (base's 256 greedy tokens) ×0.96 / ×1.09 of the worse floor; draft acceptance 3.33 vs 3.38 (within band). Broad suite on `p3021p`: AIME25 1.0, MMLU-Pro 0.8, LiveCodeBench 0.333 = #68 (per task identical); I3 Logic 0.25 vs 0.5: task 1 answered correctly at 14,217 of 16,384 tokens in #68 and hit the 16,384 cap here; total I3 tokens 39,751 vs 39,876. Lane primary 161.68 vs 161.79 tok/s.
+
+## 9. Segment 14: the precision bar (`exl3-native-prefill-ttft-v1`, 350 W, 2026-09-30)
+
+Bar: no elpis kernel computes less precisely than the stock ExLlamaV3 355c6ee kernel it replaces. Each speedup must be bit-exact with stock or measured at least as accurate against an fp64 reference. Suite and TTFT definition: §8.
+
+| Run | Image | Stack | Prefill tok/s (geomean) | TTFT 8K / 32K / 128K / 262K s | Texts |
+|---|---|---|---|---|---|
+| #75 (flagged) | `p9501x3` `3d682d1d…` | #74 − 3021c (no int8) + `3022` v3 (prefill Q·Kᵀ and P·V with fp32 MMA accumulation) + `5110g` + `9501b` | 1010.9 | 5.64 / 24.25 / 151.16 / 430.69 | first token 9/9 = #70; continuations 4/9 = #70 |
+| #76 | `p9501x4` `7ed00e2a…` | #75 with `3022` v4 (P·V: zero-C MMA per 32-key tile, then one `fma.rn` into the fp32 acc) + `3023` fold-32 (decode m16 kernels fold fp16 partials into fp32 every 32 values) | **997.8** (−13.7 % vs #74) | 5.67 / 24.54 / 153.39 / 439.53 | first token 9/9 = #70; continuations 6/9 = #70, 7/9 = #74 |
+
+- #75 fails the bar: its P·V accumulates into a large running MMA accumulator, and tensor-core alignment truncation (calibrated MMA emulation) raises its mean error 2-73 % above stock Triton at long prefixes (run 0080u4). Flagged; not a baseline.
+- Prefill attention, #76 (run 0080w1, `Int8Attn` harness): 4 attention layers × prefixes 0 / 30,720 / 129,024 / 204,800, q_len 2048, against an fp64 reference over the same fp16 q and staged fp16 K/V. pattn ≤ stock Triton in mean, p99 and max in 16/16 cells, strict max included; mean of the cell means 1.84e-4 vs 2.88e-4; at long prefixes the error is 2-2.4× lower.
+- Open: at prefix 0 (the first 2048-token chunk of a long prompt), stock's served Triton route splits the key range in two, while the harness's Triton ran unsplit. A calibrated MMA emulation puts that served-split variant 0.1-0.9 % below pattn in mean error at prefix 0; at every longer prefix pattn is 0.37-0.99× served-split stock. This is not yet measured; the next accuracy harness (v3) measures stock exactly as served.
+- Decode, #76 (run 0080w3, per-op fp64 harness):
+  - the target verify path never runs int8, QTIP GEMV or 8201 kernels;
+  - per op, error ≤ stock: 0.82-0.84× on down / o / out at m 3-8, about 0.2× on q/k/v, gate/up and GDN, 0.05-0.1× at m 1-2;
+  - m = 1 q/k/v uses the stock kernel; lm_head and GDN b/a are bit-identical to stock.
+- Fold-32 costs no measured round time: ≤ 0.25 % (run 0080u9).
+- Prefill GEMMs: stock's fp16-partial scheme (per 32-wide K slice, two fp16-accumulator MMAs, then an fp32 add). 3011 and 5112 are bit-exact with stock's `hgemm_f16acc`.
+- Draft invariance, #76 (run 0080w2): 15 prompts × tree / forced chain × normal / capped / all-rejected draft, 90/90 identical token ids.
+- Broad suite, #76 (run `pf15-p9501x4-broad`, §2 protocol):
+  - scores AIME 2025 3/3 · MMLU-Pro 8/10 · I3 Logic 1/4 · LiveCodeBench 1/3; at budget 0 / 1 / 2 / 2, the same as #73;
+  - lane 153.97 tok/s vs #73's 161.68, with different texts. Controlled decode A/B (run xfab, `decode_ab.py`, same prompts, 256 tokens, one 350 W window per arm): median ms per verify round at 1K / 8K / 32K = 25.78 / 26.19 / 28.41 on #76 vs 25.51 / 26.25 / 28.34 and 25.45 / 26.21 / 28.44 on `pfast1` (two windows). Round cost is equal within 1.3 %, so the lane gap is not a per-round cost difference. The second #76 window was void (host CPU load: 1K rounds at 79.7 ms); a rerun is queued.
+- `bend PROOF.bend` (Bend 2.0.34): ALL PROOFS CHECK.
