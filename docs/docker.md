@@ -26,14 +26,50 @@ target-only, different-KV or alternate-engine fallback.
 4. For rootless Docker, `QWEN_CONTAINER_USER=0:0` maps to the operator. For
    rootful Docker, set the state owner's numeric `UID:GID`; do not weaken state
    permissions to work around an ownership mismatch.
-5. The intended Docker daemon must already contain local tag
-   `qwen-elpis:exl3-native-comparison` with exact image ID
-   `sha256:b35314f48c7684b4c9cf3d59f4c21395316aa1fc0925db782f460005aa2602ff`.
-   Its recorded RepoDigest is not a downloadable registry manifest. A direct
-   digest `FROM` attempted registry resolution and failed; there is no registry
-   pull or substitute-image fallback.
+5. Build the base image from source. Network access is used only in step 5a.
+   a. `bash docker/fetch-base.sh` pulls the three pinned images by digest
+      (CUDA 13.0.0 devel and runtime, uv 0.9.15) and downloads every file that
+      `docker/base/sources.lock` names into `build/base-inputs/`: the exllamav3
+      commit tarball (355c6ee), the CPython 3.13.10 build that uv installs, the
+      Ubuntu `.deb` files from a fixed snapshot.ubuntu.com time, the base wheels
+      (torch and CUDA wheels from download.pytorch.org/whl/cu130, all other wheels
+      from PyPI) and the serve wheels. Each file must match its sha256, else the
+      script stops.
+   b. `bash docker/build-base.sh` builds `docker/base/Dockerfile` with no network
+      in any RUN, `SOURCE_DATE_EPOCH` from the checked-out commit,
+      `rewrite-timestamp=true` and no attestations. It tags `qwen-elpis:exl3-base`
+      only if the image's content manifest equals the pin in
+      `docker/base/engine-manifest.json`.
+
+   The content manifest (`docker/base/manifest.py`) is the sha256 of a sorted
+   listing: the installed Debian packages with versions, and the sha256, mode
+   and path of every file and symlink under `/opt/uv-python` and `/opt/venv`
+   (without `__pycache__`). nvcc does not give byte-identical output from build
+   to build: nvcc puts its process ID into local symbol names, and cicc orders
+   registers by memory layout (ASLR), which changes the PTX of some
+   `gdn_conv_rule_norm_kernel` instances. ptxas also writes source mtimes into
+   the `-lineinfo` tables; `patches/exl3-ext/ext.py` sets fixed mtimes. A fixed
+   layout needs ASLR off, and Docker's default seccomp profile blocks that in
+   RUN steps. So the compiled `exllamav3_ext` shared object and the exllamav3
+   `RECORD` (which holds its hash) are not part of the pin. The base build
+   records their sha256 in `/opt/elpis-base-manifest.json`, and
+   `patches/exl3-ext/ext.py` requires the installed shared object to match that
+   record. To check a base by hand, run `manifest.py check` in it:
 
 ```sh
+docker run --rm --network none --user 0:0 \
+  --mount type=bind,source="$PWD/docker/base/manifest.py",target=/tmp/manifest.py,readonly \
+  --entrypoint /opt/venv/bin/python qwen-elpis:exl3-base \
+  -I -B /tmp/manifest.py check /opt/elpis-base-manifest.json
+```
+
+   `docker/base/lock.py` wrote `requirements.lock` and `sources.lock` from
+   `requirements.in`, `apt.in` and `serve/exl3-requirements.txt`. It needs network
+   access and is not part of a build. Run it only to change an input.
+
+```sh
+bash docker/fetch-base.sh       # the only step with network access
+bash docker/build-base.sh       # tags qwen-elpis:exl3-base
 # CPU image build, not a GPU launch:
 bash docker/build-exl3.sh candidate-ext qwen-inference:exl3   # or: baseline, candidate, candidate-rebuilt
 export QWEN_STATE_ROOT=/absolute/private/qwen-state
@@ -41,13 +77,16 @@ export QWEN_IMAGE=qwen-inference:exl3
 docker compose --project-name qwen-inference config --quiet
 ```
 
-Use the build script, not `docker compose build` or a direct Dockerfile build.
-It authenticates the local base's actual image ID before and after a
-`--pull=false` build using the daemon-backed default builder, verifies the baked
-base-ID label and only then assigns the output tag. It refuses an output tag
-already pointing to the native base. The operator must exclusively control image
-tags during the build: these checks detect ordinary retagging, not a hostile
-Docker operator. Compose has no build stanza and uses `pull_policy: never`.
+Use the build scripts, not `docker compose build` or a direct Dockerfile build.
+`build-exl3.sh` first builds the `base-manifest` target: `manifest.py check` runs
+in the base and its content sha256 must equal the pin. The value becomes the
+`io.elpis.exl3.base-manifest-sha256` label of the image. The script also requires
+the base tag to name the same image before and after the `--pull=false` build with
+the daemon-backed default builder, checks the baked labels and only then assigns
+the output tag. It refuses an output tag that names the base. The operator must
+exclusively control image tags during the build: the before/after check detects
+ordinary retagging, not a hostile Docker operator. Compose has no build stanza and
+uses `pull_policy: never`.
 
 The `baseline` target retains the base's installed native EXL3/DFlash2 engine
 unchanged. The `candidate` target additionally applies the SHA-pinned
@@ -60,9 +99,11 @@ control. Both extension targets build in two phases: the first exports the
 composed engine manifest, whose SHA-256 becomes the final image's
 `io.elpis.exl3.patches-sha256` label. All targets bake the standalone
 `serve/exl3_server.py`, startup guard, healthcheck and model inventory, rather
-than mounting server code from `/tmp`. Build-time network access installs the
-hash-pinned JSON Schema wheels from `serve/exl3-requirements.txt`; serving uses
-offline Hugging Face/Transformers settings and disables telemetry. Torch and
+than mounting server code from `/tmp`. No RUN step has network access: the
+hash-pinned JSON Schema wheels of `serve/exl3-requirements.txt` come from
+`build/base-inputs/serve-wheels/`. The extension stages use the devel image of the
+base build stage with its own g++, not an apt install. Serving uses offline
+Hugging Face/Transformers settings and disables telemetry. Torch and
 transformers are never rebuilt or replaced; only the extension targets replace
 the installed `exllamav3_ext` shared object.
 

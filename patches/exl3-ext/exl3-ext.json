@@ -14,7 +14,7 @@
   },
   "extension": {
     "path": "/opt/venv/lib/python3.13/site-packages/exllamav3_ext.cpython-313-x86_64-linux-gnu.so",
-    "base_sha256": "6d30690fdb76b3c4ad3fb5e69f0479707e410fc9b6194e2a5e32f4d7fe1fd8b3"
+    "base_record": "/opt/elpis-base-manifest.json"
   },
   "series_sha256": "80989cd5ef035f73c8fae39567807f9948239c0f4186ae208c2fcb7d0e8d2bbf",
   "patches": [

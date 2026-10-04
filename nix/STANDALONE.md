@@ -29,11 +29,13 @@ See [development](../docs/development.md) and [Docker setup](../docs/docker.md).
 
 Provision the existing private state, EXL3 target/draft, key, persistent lock
 and operator-owned mode-0700 `prefix-cache/` as in the Docker guide; every bind
-source must already exist. Build and review the image first in the intended daemon
-using `bash docker/build-exl3.sh candidate-ext qwen-inference:exl3` (or `baseline`,
-`candidate`). That script authenticates
-the required local native base image ID; Compose has no build stanza. Nix never
-implicitly builds or pulls the image.
+source must already exist. Build and review the image first in the intended daemon:
+`bash docker/fetch-base.sh` (the only step with network access), then
+`bash docker/build-base.sh`, then
+`bash docker/build-exl3.sh candidate-ext qwen-inference:exl3` (or `baseline`,
+`candidate`). The scripts build the base from source and authenticate it by its
+pinned content manifest (`docker/base/engine-manifest.json`); Compose has no
+build stanza. Nix never implicitly builds or pulls the image.
 
 ```sh
 export QWEN_IMAGE=qwen-inference:exl3
