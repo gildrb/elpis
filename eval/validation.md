@@ -67,6 +67,26 @@ or matched recipe comparison.
   and resolved config are byte-identical to the historical v1 lane's. No model
   endpoint was used; no task or scorer was changed.
 
+## 2026-10-04: audit of the current pins
+
+- `setup --check`, `data --check all` (all seven Hub snapshots and both MRCR
+  files) and `run PROFILE --dry-run` for all eight profiles (21 entries) pass.
+  Every resolved config names `qwen3.8-27b` at `http://127.0.0.1:18020/v1` with
+  `QWEN_API_KEY`, greedy sampling and the profile's budget. `direct/setup --check`
+  and `direct/run smoke|quick|full --dry-run` pass.
+- The serving-container default `qwen-inference-inference-1` was stale (a
+  never-started old container). `run` now records the container named by
+  `QWEN_SERVING_CONTAINER` only if it publishes the `configs/local.toml`
+  endpoint, and otherwise the one running container that does.
+- `sandbox --check` failed ("Sandbox build inputs changed"), so every non-dry
+  `run` stopped before its first native command. The recorded image
+  `sha256:facda9cb…` was built from the pre-MMLU-Pro `pyproject.toml`/`uv.lock`;
+  only those two recipe inputs changed, and neither enters the build context.
+  `eval/scripts/sandbox` (in `nix develop`) rebuilt and recorded
+  `sha256:5962c155…`. Against `facda9cb…`, all 10,400 non-`.pyc` files have equal
+  content except 35 uv HTTP-cache `.http` entries (fetch metadata).
+  `sandbox --check` passes. Later lane runs record the new image ID.
+
 ## Failures found and fixed during integration
 
 A raw HF snapshot is not enough for a fresh offline repository-name lookup.
