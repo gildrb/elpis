@@ -70,7 +70,6 @@
           docker-compose
           curl
           jq
-          openssl
           shellcheck
           util-linux
         ];
