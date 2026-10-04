@@ -27,7 +27,7 @@ import tempfile
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
-BEND = "/nix/store/kqhwjzdm96d14fvzblb4jz9m73cr3i0j-bend-2.0.34/bin/bend"
+BEND = "/nix/store/55nz1ar98qk8l616m93qcamgd4vs36vc-bend-2.0.35/bin/bend"
 TABLE = "bend/PATTN_SCHED_TABLE.bend"
 # (L, q_len) chunks: must match main() of PATTN_SCHED_TABLE.bend
 CASES = [(1, 1), (17, 5), (31, 16), (32, 17), (33, 33), (47, 20), (64, 64), (65, 16), (100, 37), (130, 3), (62, 32), (81, 19)]

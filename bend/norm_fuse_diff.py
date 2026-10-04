@@ -36,7 +36,7 @@ import tempfile
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
-BEND = "/nix/store/kqhwjzdm96d14fvzblb4jz9m73cr3i0j-bend-2.0.34/bin/bend"
+BEND = "/nix/store/55nz1ar98qk8l616m93qcamgd4vs36vc-bend-2.0.35/bin/bend"
 TABLE = "bend/NORM_FUSE_TABLE.bend"
 DEFAULT_PRISTINE = "/tmp/elpis-exl3-baseline-1/exllamav3/exllamav3"
 LOCK = ["flock", "-s", "/tmp/elpis-gpu.lock", "nice", "-n", "19"]

@@ -1,5 +1,5 @@
 { pkgs }:
-# Official Lean 4.34.0 release: Bend 2.0.34's `--verdict` builds its BendTT kernel with exactly this
+# Official Lean 4.34.0 release: Bend 2.0.35's `--verdict` builds its BendTT kernel with exactly this
 # version (nixpkgs' lean4 lags it). Bump together with nix/bend.nix.
 pkgs.stdenv.mkDerivation (finalAttrs: {
   pname = "lean4-bin";

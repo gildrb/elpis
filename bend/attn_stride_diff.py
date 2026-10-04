@@ -54,7 +54,7 @@ import tempfile
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
-BEND = "/nix/store/kqhwjzdm96d14fvzblb4jz9m73cr3i0j-bend-2.0.34/bin/bend"
+BEND = "/nix/store/55nz1ar98qk8l616m93qcamgd4vs36vc-bend-2.0.35/bin/bend"
 TABLE = "bend/ATTN_STRIDE_TABLE.bend"
 
 # Sections A (slot stores) / T (CTA tiles) / B (row merge lists): (L, S) cases. Must match

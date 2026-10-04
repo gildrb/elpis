@@ -35,7 +35,7 @@ rechecks every proof with Bend's Lean-proven kernel). Three groups:
   for the 8-row tree verify, the matching-path acceptance and the TreeDesc
   derivation (`bend/exl3_accept.bend`, `bend/exl3_tree_accept.bend`). Both are
   emitted to C unchanged and built into one acceptor root by `bend/exl3_build.py`
-  with the pinned Bend 2.0.34.
+  with the pinned Bend 2.0.35.
 - Speculation invariance: the served engine's output is the greedy decode of its
   own row function for every drafter (`bend/rinv_laws.bend` over `spec_inv*`);
   the row hypothesis is derived from the per-kernel laws, not assumed.

@@ -32,7 +32,7 @@ from pathlib import Path
 from typing import NoReturn
 
 HERE = Path(__file__).resolve().parent
-BEND = "/nix/store/kqhwjzdm96d14fvzblb4jz9m73cr3i0j-bend-2.0.34/bin/bend"
+BEND = "/nix/store/55nz1ar98qk8l616m93qcamgd4vs36vc-bend-2.0.35/bin/bend"
 LOCK = ["flock", "-s", "/tmp/elpis-gpu.lock", "nice", "-n", "19"]
 PINS = {  # post-images of the full patched tree (patches/exl3/series + patches/exl3-ext/series through 3031)
     "architecture/dflash.py": "1440f55c4cbf7e1367ce4bc41cb633c673d44e137b966ee5cf2ce320bd062d48",

@@ -34,7 +34,7 @@ HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 import err_attn_diff as D  # noqa: E402  stock transcription, tree builder, dom, compiled-code helpers
 
-BEND = "/nix/store/kqhwjzdm96d14fvzblb4jz9m73cr3i0j-bend-2.0.34/bin/bend"
+BEND = "/nix/store/55nz1ar98qk8l616m93qcamgd4vs36vc-bend-2.0.35/bin/bend"
 check, fail, cdiv = D.check, D.fail, D.cdiv
 S_E = 20
 
