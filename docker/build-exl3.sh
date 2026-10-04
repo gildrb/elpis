@@ -7,8 +7,13 @@
 set -euo pipefail
 umask 077
 variants=(baseline candidate candidate-rebuilt candidate-ext)
-if (( $# != 2 )) || [[ ! " ${variants[*]} " == *" $1 "* ]]; then
-  echo "Usage: bash docker/build-exl3.sh <${variants[*]// /|}> <output-image-tag>" >&2
+valid=0
+for candidate_variant in "${variants[@]}"; do
+  [[ "${1:-}" == "$candidate_variant" ]] && valid=1
+done
+if (( $# != 2 || ! valid )); then
+  choices="${variants[*]}"
+  echo "Usage: bash docker/build-exl3.sh <${choices// /|}> <output-image-tag>" >&2
   exit 1
 fi
 variant="$1"

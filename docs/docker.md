@@ -16,9 +16,10 @@ target-only, different-KV or alternate-engine fallback.
    storage, fans and power remain operator-owned.
 2. Supply an existing canonical absolute private `QWEN_STATE_ROOT` containing
    `models/qwen38-27b-exl3/`, `models/dflash2-exl3/`, private writable `cache/`,
-   and an operator-owned mode-0600 regular `api-key`. The key is 1..4096 bytes,
-   printable ASCII without whitespace, with at most one trailing newline.
-   Startup neither downloads nor converts models.
+   an operator-owned mode-0700 `prefix-cache/` directory and an operator-owned
+   mode-0600 regular `api-key`. The key is 1..4096 bytes, printable ASCII without
+   whitespace, with at most one trailing newline. Compose creates none of these
+   paths. Startup neither downloads nor converts models.
 3. Create `qwen-inference-launch.lock` only if absent, with exclusive creation
    and mode 0600. Never replace or unlink its inode while any deployment can
    exist. Reuse the existing shared lock when migrating an occupied service.
@@ -34,7 +35,7 @@ target-only, different-KV or alternate-engine fallback.
 
 ```sh
 # CPU image build, not a GPU launch:
-bash docker/build-exl3.sh baseline qwen-inference:exl3   # or: candidate
+bash docker/build-exl3.sh candidate-ext qwen-inference:exl3   # or: baseline, candidate, candidate-rebuilt
 export QWEN_STATE_ROOT=/absolute/private/qwen-state
 export QWEN_IMAGE=qwen-inference:exl3
 docker compose --project-name qwen-inference config --quiet
@@ -51,13 +52,19 @@ Docker operator. Compose has no build stanza and uses `pull_policy: never`.
 The `baseline` target retains the base's installed native EXL3/DFlash2 engine
 unchanged. The `candidate` target additionally applies the SHA-pinned
 `patches/exl3` series to the installed ExLlamaV3 and embeds the Bend acceptance
-artifact (recorded by `/opt/qwen/exl3-patches.json` and image labels). Both
-bake the standalone `serve/exl3_server.py`, startup guard, healthcheck and
-model inventory, rather than mounting server code from `/tmp`. Build-time network
-access installs the hash-pinned JSON Schema wheels from
-`serve/exl3-requirements.txt`; serving uses offline Hugging Face/Transformers
-settings and disables telemetry. EXL3, torch and transformers are not rebuilt or
-replaced by that dependency install.
+artifacts (recorded by `/opt/qwen/exl3-patches.json` and image labels). The
+`candidate-ext` target is `candidate` plus `exllamav3_ext` recompiled for sm_86
+from the pinned `355c6ee` sources with the SHA-pinned `patches/exl3-ext` series;
+`candidate-rebuilt` recompiles the same sources unpatched, as the toolchain
+control. Both extension targets build in two phases: the first exports the
+composed engine manifest, whose SHA-256 becomes the final image's
+`io.elpis.exl3.patches-sha256` label. All targets bake the standalone
+`serve/exl3_server.py`, startup guard, healthcheck and model inventory, rather
+than mounting server code from `/tmp`. Build-time network access installs the
+hash-pinned JSON Schema wheels from `serve/exl3-requirements.txt`; serving uses
+offline Hugging Face/Transformers settings and disables telemetry. Torch and
+transformers are never rebuilt or replaced; only the extension targets replace
+the installed `exllamav3_ext` shared object.
 
 `prepare/exl3-manifest.json` records engine/model revisions and SHA256 identities.
 Every start authenticates all 13 target and three draft runtime files, including
@@ -68,8 +75,8 @@ the inventory. Model-byte identity is not a numerical or quality qualification.
 
 ## Ordinary Compose ownership and lifecycle
 
-Do not execute a new launch beside the existing live service. After explicit
-exclusive-GPU approval and an authorized cutover:
+Do not launch beside another inference service on the same GPU or port. After
+explicit exclusive-GPU approval:
 
 ```sh
 export QWEN_ALLOW_UNQUALIFIED=1
@@ -93,6 +100,15 @@ credential and root filesystem, private writable cache, restricted tmpfs,
 and library caches into `/cache` and uses CDI's `/usr/local/nvidia/lib64` driver
 path. The served model is `qwen3.8-27b` at `http://127.0.0.1:18020/v1`.
 
+Compose always binds `prefix-cache/` at `/prefix-cache`, so the launcher always
+passes `--prefix-cache`. The persistent prefix cache is bound to the image ID:
+`QWEN_IMAGE_ID` must be the full ID `sha256:<64 hex>` of `QWEN_IMAGE`
+(`docker image inspect -f '{{.Id}}' "$QWEN_IMAGE"`); without it, or with a bare hex
+value, persistence stays off. Its engine module (`exllamav3.generator.persist`,
+patch 9501b) exists only in the `candidate-ext` image: `baseline`, `candidate` and
+`candidate-rebuilt` fail at startup with `ModuleNotFoundError` unless
+`QWEN_PREFIX_PERSIST=0`.
+
 The healthcheck authenticates `/health` and the expected `/v1/models` entry. It
 runs every 30 seconds, with a 310-second probe budget, 315-second Docker timeout,
 20-minute startup grace and three failures to unhealthy. Docker does not restart
@@ -115,7 +131,12 @@ execute their functions. Supported selection is `auto`, `none`, `required` or a
 named function, with `parallel_tool_calls` enforced on the result. JSON Schema
 validation is offline. `strict: true` is a fail-closed schema postcondition, not
 constrained generation: invalid model arguments or violated tool selection fail
-rather than being repaired or reported as successful calls.
+rather than being repaired or reported as successful calls. Tool `parameters` must be
+a direct `type: object` with parameter schemas in its root `properties`,
+`patternProperties` or `additionalProperties`. Root `allOf`, `anyOf`, `oneOf`, `not`,
+`if`/`then`/`else` and `dependentSchemas` are accepted only when they constrain the
+object (for example `required`) and declare no parameter schemas; a root `$ref` is
+rejected.
 
 Chat `stream=true` is **buffered SSE**, marked
 `X-EXL3-Transport: buffered-sse`: generation finishes before content/reasoning/tool
@@ -127,103 +148,3 @@ in `chat_template_kwargs`; OpenAI top-level `reasoning_effort` is also accepted:
 and `low`, `medium` and `xhigh` are unchanged. Invalid values or conflicting
 nested controls return HTTP 400. Existing nested OMP controls are unchanged;
 reasoning and final content remain separate channels.
-
-## Current persistent live deployment
-
-The current authenticated promotion is `qwen-exl3-serving-9`, container
-`b930391224e8806e925fdd128c34446c52673959ae3451388870b249d48b121a`, with image
-`sha256:91b01c532280424832d2501e72ebe743ac3fb9aea4ee070e73e81a41c6262d19` (p3021r,
-variant `candidate-ext`: the #73 stack of `docs/benchmarks.md` §8, tree3s plus the
-prefill patches 3020, 5111, 5112 and 3021c, which computes prefill Q·Kᵀ in int8,
-rebuilt from commit 14a15c6 after the eta → elpis rename; #74 reproduced #73's 9 rows
-byte for byte). The canonical tag `qwen-inference:exl3` identifies this image and
-`qwen-inference:exl3-previous` the retained previous image
-`sha256:d48879d13f477d6d039210f8b078a3bc1beda344350755c76bad626029f16de3` (p3021p, the
-same stack before the rename).
-The persistent configuration is
-`/mnt/ssd/storage/ai/qwen3.8-27b/exl3-serving-9/compose.json` (Compose project
-`elpis-exl3-serving-9`, network `elpis_default`), alongside unchanged copies of
-`launch-gate.py`, `recovery.py` and `operate.py` and its promoted `cutover-window-1/`.
-It sequentially reuses `/mnt/ssd/storage/ai/qwen3.8-27b/exl3-serving-1/cache`; preserve
-the old state. Promotions are made by `/tmp/elpis-promote.sh TAG IMAGE` (operator
-tooling outside the repo), which replays the serving-2 guardian procedure below with
-automatic guardian rollback. The previous `qwen-exl3-serving-8` (container
-`bf7087ac57f2dad0113149301e7d7e55b0a05e6a78e0b82cd00cd42269a57ab5`, image p3021p,
-Compose project `eta-exl3-serving-8`), `qwen-exl3-serving-7` (container
-`ebb819cf17a5754f6b9f37c8188d31f73b7e1503597c7eec7ee03d6bfa1611ee`, image p3020fh),
-`qwen-exl3-serving-6` (container
-`e358fe89dd5d985b60594da0131a0d367d297be740e5accc54a31bea5f608c7f`, image tree3s),
-`qwen-exl3-serving-5` (container
-`ca966e6f5407ff3bd27cc435c9a9ad90da7d4562ec65a3cd8d7ffe30d1c884a2`, image cs12),
-`qwen-exl3-serving-4` (container
-`22154417d27bc0ce2455d3f60ff1e3743dd7c40aca8ef0f502450a2463ffa945`, image cs11),
-`qwen-exl3-serving-3` (container
-`288862e7573f5dec9abb9ecc06bb2d144c9926c1f8fb972efafcadf1fa0a235a`, image cs10), all on
-network `eta_default`, and `qwen-exl3-serving-2` (container
-`b5e51bc1f6ac85b1b2af8db3612ff300190145397bb48b31e4cb7bf0f2d30f28`, network
-`litos_default`) are stopped and retained; their promoted windows still admit them for
-rollback, so keep `litos_default` while any retained container uses it.
-
-The original cutover promoted `qwen-exl3-serving-1`, container
-`e22faabe5bc9244d88581e4abcab1459d545b82b154b731ea4ccb2de642efb7c`, with image
-`sha256:f4bdcfb444f3215e57d23c67edd6929c4afa87eb95f5594d1df7bf438a19ae80`.
-Its controls and evidence remain under
-`/mnt/ssd/storage/ai/qwen3.8-27b/exl3-serving-1/`. That container is stopped and
-retained, not deleted.
-
-This live deployment deliberately differs from an ordinary root Compose launch:
-the persistent guardian gate validates candidate identity and its promoted window,
-acquires the **same existing shared lock inode**, then execs
-`bash /opt/qwen/serve/entrypoint.sh` with the lock inherited. It must not call the
-Docker ownership wrapper again and try to acquire a second lock. The server code
-is still baked in the image; only host-owned guardian controls are mounted at
-`/maintenance-control`, read-only. Preserve the control files, promoted receipt,
-operation mutex and launch-lock inode. Do not hand-author authorization states,
-replace the gate with a direct launch, or start a competing root Compose/Nix
-service. Future maintenance must use the retained deployment and its approved
-ownership procedure. Restart configuration is not a demonstrated cold-boot test.
-
-Current private evidence is in `exl3-serving-9/evidence/` under the state root:
-`main-verification.json`, `promotion-receipt.json`, `cutover-receipt.json`,
-`endpoint-smoke.json`, `live-tool-smoke.json`, `hermes-real-tool-turns.json`,
-`omp-smoke.jsonl`, `installed-exl3-server.py`, `guardian.log` and `thermal.csv`. The
-guardian exited 0 with state `promoted_authenticated_main_verified`. Real Hermes
-gateway 0.21.3 and interactive 0.21.4 terminal-tool turns and an OMP 18.4.2 read-tool
-round trip passed against the new image; no Telegram delivery was repeated.
-
-serving-2's evidence (`exl3-serving-2/evidence/`: `main-verification.json`,
-`promotion-receipt.json`, `telegram-delivery.json`) records the top-level reasoning
-compatibility change, Hermes 0.21.3/0.21.4 and OMP 18.2.11 turns, Telegram API checks
-and one approved outbound delivery; **no fresh inbound user-to-bot exchange has been
-exercised**. See [client routing](#host-client-routing) and
-[verification boundaries](development.md#exl3-cutover-verification-status).
-
-Original `exl3-serving-1/evidence/` retains `promotion-receipt.json`,
-`main-promotion-verification.json`, `live-tool-smoke.json` and
-`post-promotion-health.stderr`. That smoke exercised a named addition call
-(`19 + 23`), client execution and continuation returning `42`, buffered tool SSE,
-authentication, model identity and schema-error handling; authenticated health
-and runtime CPU protocol proof passed. Neither promotion establishes full-context
-capacity, quality or performance qualification. Ruff ALL style findings and host
-ty dependency blockers remain; the upstream torch `inference_mode` issue is a
-historical known runtime typing limitation, not a current runtime ty rerun.
-
-## Host client routing
-
-OMP's host runtime `~/.omp/agent/models.yml` defines `qwen-local/qwen3.8-27b`
-using chat completions, the private key via `!cat`, temperature 0, the existing
-nested Qwen thinking dialect and a ten-minute buffered first-event floor.
-Explicit `thinking.requiresEffort: false` allows thinking off. The existing
-cloud default is preserved: select `omp --model qwen-local/qwen3.8-27b` or choose
-that model with `/model`.
-
-Hermes's host runtime `config.yaml` uses local `api_mode: chat_completions` and
-temperature 0. Its durable host-owned overlay in
-`~/nix/modules/nixos/local-ai-backend.nix` was updated without OS activation;
-the pinned installed old profile may still regenerate the old configuration.
-Generic dotfiles were not changed. The live gateway 0.21.3 was not restarted;
-its persisted session explicitly selects `custom:local/qwen3.8-27b` at
-`http://127.0.0.1:18020/v1`. Its original request failed HTTP 400 on the old server
-but now works with top-level reasoning compatibility. Interactive 0.21.4 had
-previously recovered automatically from the rejected effort; gateway 0.21.3 did
-not. These are verified host settings, not defaults installed by root Compose.
