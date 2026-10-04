@@ -25,7 +25,7 @@
 # exl3_gemm_inner.cuh, exl3_gemm_kernel.cuh or exl3_gemv_int8*.cu* (patches/exl3-ext/series: no hunk
 # on these files), so the shared helpers are the same code on both sides.
 #
-# Line references: stock files under /tmp/kernel-work/PrecisionLaw/stock/exllamav3/exllamav3_ext/
+# Line references: stock files under OUT/stock/exllamav3_ext/ of bend/engine_trees.py
 # (GI: quant/exl3_gemm_inner.cuh, GK: quant/exl3_gemm_kernel.cuh, I8K: quant/exl3_gemv_int8_kernel.cuh,
 # GDN: gdn.cu); elpis files of the series applied to that tree (patches/exl3-ext/series, 2102 .. 3023;
 # G16: quant/exl3_gemm_m16g_kernel.cuh, T16: quant/exl3_tail_m16_kernel.cuh, M16: quant/exl3_mlp_m16_kernel.cuh).

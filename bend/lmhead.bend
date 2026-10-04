@@ -84,7 +84,7 @@ def lookup(tab: List<&2, Entry>, +k: Nat) -> Rec:
 
 # The persisted records of the lm_head matrix (size_k 5120, size_n 248320, K 6, fp16 C, device 0,
 # CC_AMPERE, 82 SMs, cb 2) in coop_autotune_v1.bin (sha256 bf27ff75f0d3fe09...c0e3, 78 unique
-# records; decoded by Int8Linear/decacc/work/tunecache.py): record #66 (m key 2), #67 (key 4),
+# records; decoded by the untracked tunecache.py of the decode-accuracy work): record #66 (m key 2), #67 (key 4),
 # #11 (key 8), #73 (key 16), each tag 4, block_dim 256, num_sms 82, concurrency 1.
 def served_tab() -> List<&2, Entry>:
   [Entry{2n, Hit{4n, 82n}}, Entry{4n, Hit{4n, 82n}}, Entry{8n, Hit{4n, 82n}}, Entry{16n, Hit{4n, 82n}}]

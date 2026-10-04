@@ -33,7 +33,7 @@
 #      41 splits (splits_cap, S:modules/attention_fn/bc_attn.py:287-288): about twice the t32 steps
 #      on the q / k / v routes at long L (856 vs 438 at L = 262144).
 #
-# Sources (file:line). Stock: /tmp/kernel-work/PrecisionLaw/stock/exllamav3 (clean 355c6ee),
+# Sources (file:line). Stock: OUT/stock of bend/engine_trees.py (clean 355c6ee),
 # "S:<file>:<line>". Elpis: that tree with patches/exl3/series then patches/exl3-ext/series applied,
 # stopped before 3030, "E:<file>:<line>". bend/err_attn_diff.py checks every quoted fragment against both trees, the
 # compiled-code facts (H_ptx, H_sass) and the geometry constants below.
@@ -72,7 +72,7 @@
 #   H_ptx     The stock Triton kernels are those compiled by Triton 3.6.0 (enable_fp_fusion) into the
 #             image's cache: _paged_attn_decode_split_kernel XFUF7JHJ... (head_dim 256, BLOCK_N 32)
 #             and _paged_attn_decode_combine_kernel IPYAKBVP... under
-#             /tmp/elpis-recovery-ops-id8q0yvb/exl3-native-cache-1/triton (sha256 in the diff
+#             the Triton cache of a GPU run, bend/err_attn_diff.py --triton (sha256 in the diff
 #             script): tl.dot = an HMMA chain in k order (q rotation 2, Q.K^T 16, P.V 2 per tile
 #             accumulating into acc * alpha, output rotation 2); scores * 0.0625 an exact FMUL;
 #             tl.exp(x) = FADD (the subtraction) + FMUL by fp32(log2 e) + MUFU.EX2; tl.sum over a

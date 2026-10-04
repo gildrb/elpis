@@ -61,3 +61,110 @@ Upstream evaluation environments use their separate setup and locked
 dependencies under `eval/`. Keep full check logs private and group authored
 findings by file when assigning cleanup. Do not claim passing quality gates
 while diagnostics remain.
+
+## Source links (`bend/*_diff.py`)
+
+A source link compares a Bend model with the engine source text. It is
+evidence for `H_conform`, not a proof. Run every link from the repository root
+inside the dev shell. The shell supplies `bend` 2.0.35, `c++` (clang 19),
+`patch` and Python 3.13. Each link resolves `bend` from `PATH` and stops if
+`bend version` is not exactly `bend 2.0.35` (`bend/source_link.py`). If the
+host file `/tmp/cpu-lock.sh` exists, is yours and only you can write it, the
+links run their compilers and `bend` through it. If it does not exist, they run
+them directly.
+
+### 1. Make the engine trees
+
+```console
+nix develop --offline --no-write-lock-file -c python3 -I -B bend/engine_trees.py OUT
+nix develop --offline --no-write-lock-file -c python3 -I -B bend/engine_trees.py OUT3005 --through 3005-attn-row-invariant-split.patch
+```
+
+- Input: the ExLlamaV3 `355c6ee` commit tarball. `docker/base/sources.lock`
+  (`archives.exllamav3`) pins its URL and SHA-256. The script downloads it over
+  HTTPS. With `--archive FILE` it reads a local copy instead, for example the
+  file that `docker/fetch-base.sh` stores under `build/base-inputs/`. The
+  SHA-256 must agree before the script reads the archive.
+- `OUT/stock`: the stock `exllamav3` package directory. The script checks the
+  extension tree against `patches/exl3-ext/exl3-ext.json`.
+- `OUT/patched`: `OUT/stock` plus `patches/exl3/series`, then
+  `patches/exl3-ext/series`, with every patch hash, pre-image and post-image
+  checked (the same checks as the image build).
+- `--through PATCH`: stop after that `patches/exl3-ext` patch. Some links
+  document an earlier kernel. For a partial series the script checks the patch
+  hashes and the pre-images only; the manifests have no partial post-images.
+- On any error the script stops and keeps no output.
+
+### 2. Run the links
+
+Prefix each command with
+`nix develop --offline --no-write-lock-file -c python3 -I -B`. `OUTn` is a tree
+made with `--through` the patch whose number is `n`.
+
+| Link | Arguments | Notes |
+|---|---|---|
+| `act_fuse_diff.py`, `gdn_conv_qkv_diff.py`, `kv_compact_diff.py`, `pattn8_sched_diff.py`, `m16_discard_diff.py` | `OUT/patched` | |
+| `attn_pre_diff.py`, `attn_stride_diff.py`, `pattn_sched_diff.py`, `gdn_ba_ksplit_diff.py`, `mlp_m16_defer_diff.py`, `gemm_m16_wpart_diff.py` | `OUT/patched` | |
+| `draft_mask_diff.py` | `--engine OUT/patched` | |
+| `m16_diet_diff.py`, `m16_diet2_diff.py` | `--tree OUT/patched` | The 2106 / 2107 patch defaults to the tracked file. |
+| `m16_wsched_diff.py` | `--tree OUT/patched` | Reference: `bend/gen/m16_wsched_ref.py`. |
+| `hgemm_wide_diff.py` | `OUT/patched/exllamav3_ext` | |
+| `gdn_replay_diff.py` | `OUT/patched OUT/patched/cache/recurrent_util.py` | |
+| `attn_chunk_diff.py` | `OUT3003/patched` | 3003 kernel; 3006 replaces it. |
+| `attn_rowinv_diff.py` | `OUT3005/patched/modules/attention_fn/triton_paged.py` | The file must have the pinned 3005 hash. |
+| `gdn_replay_gather_diff.py` | `OUT5108/patched` | 5108 kernel; 5109 changes one quoted line. |
+| `prefill_merge_diff.py` | `OUT9502/patched` | 5110h removes `M4096_MAX_PROMPT`. |
+| `norm_fuse_diff.py` | `OUT/stock` | The link applies 7001 itself. |
+| `err_gemm_diff.py` | `--stock OUT/stock` | Builds the patched tree itself. |
+| `err_gdn_diff.py`, `err_pfix_diff.py` | `OUT/stock` | Build the patched tree themselves. |
+| `err_attn_diff.py` | `--stock OUT/stock --no-compiled` | See [Inputs outside the repository](#inputs-outside-the-repository). |
+| `err_attn_dec_diff.py` | `--stock OUT/stock --cuda-include DIR` | Needs `nvcc` and `nvdisasm`; `--no-compiled` skips them. |
+| `err_elem_diff.py` | `OUT/stock` | `--m1map DIR` adds the served-route check. |
+| `err_prefill_diff.py` | `OUT/stock PTX` | `PTX` comes from `bend/gen/stock_prefill_ptx.py`. |
+| `precision_diff.py`, `mlp_m16_sched_diff.py`, `tail_m16_sched_diff.py`, `rinv_grid_diff.py` | none | Inputs are tracked files. |
+| `draft_head_idmap_diff.py` | `OUT/patched` | Needs numpy, see below. |
+
+`draft_head_idmap_diff.py` runs the engine's Python with a numpy stand-in for
+torch. The dev shell has no numpy. Use the numpy of the pinned nixpkgs
+(`flake.lock`). If it is not in the local store, Nix fetches it once from the
+signed binary cache:
+
+```console
+nix develop --offline --no-write-lock-file -c nix shell --impure --expr 'let p = (builtins.getFlake "git+file://${toString ./.}").inputs.nixpkgs.legacyPackages.x86_64-linux; in p.python313.withPackages (ps: [ ps.numpy ])' -c python3 -I -B bend/draft_head_idmap_diff.py OUT/patched
+```
+
+### Inputs outside the repository
+
+- CUDA: the compiled checks of `err_attn_diff.py` and `err_attn_dec_diff.py`
+  need `nvcc` and `nvdisasm` 12.9 on `PATH` and the CUDA include directories
+  (`--cuda-include`). `err_elem_diff.py --sass` needs `cuobjdump`. The dev
+  shell does not supply CUDA.
+- `err_attn_diff.py --triton DIR`: the Triton cache of a GPU run of the stock
+  decode kernels. The repository cannot make it.
+- `err_elem_diff.py --m1map DIR`: the kernel map of a GPU run. The repository
+  cannot make it.
+- `draft_head_idmap_diff.py --order-json FILE`: the full block order from a
+  corpus run. The repository cannot make it.
+- `err_prefill_diff.py` `PTX`: run `bend/gen/stock_prefill_ptx.py` in the
+  engine image (Triton 3.6.0, no GPU, no network). Its docstring gives the
+  command. The output is byte-identical to the files the link was checked with.
+
+### Links that do not pass today
+
+- `attn_split_diff.py` quotes an `av_split_len` revision of 3003 that no
+  tracked patch contains. No tree passes. Its model `bend/attn_split.bend`
+  documents that earlier, round-relative split. `bend/attn_chunk.bend` models
+  the tracked 3003 and `bend/attn_stride.bend` the 3006 kernel.
+
+`gemm_m16_group_diff.py` takes the tracked 2102 patch:
+`python3 -I -B bend/gemm_m16_group_diff.py patches/exl3-ext/2102-proj-m16-grouped-v2-on3003-5101.patch`.
+
+### Generators (`bend/gen/`)
+
+| Generator | Output | Check |
+|---|---|---|
+| `gen_table.py --out-dir D` | `exl3_tree_table.bend`, `EXL3_TREE_ACCEPT.bend`, `EXL3_TREE_ACCEPT_SPEC.bend` | `cmp D/<file> bend/<file>` |
+| `roofline_impl.py` (input `roofline_inventory.json`, made by `roofline_inventory.py` from the model files) | `roofline.bend` on stdout | `cmp` with `bend/roofline.bend` |
+| `precision_parta.py` (input `precision_parta.txt`) | `precision_parta.bend` on stdout | `cmp` with `bend/precision_parta.bend` |
+| `mlp_m16_sched_ref.py`, `m16_wsched_ref.py` (`wpart.py`) | independent references | used by the links above |
+| `stock_prefill_ptx.py` | stock prefill PTX | used by `err_prefill_diff.py` |

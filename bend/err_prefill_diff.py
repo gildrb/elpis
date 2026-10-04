@@ -16,7 +16,12 @@ Checks, failing closed:
      gated_delta_rule.py hunk adds no arithmetic (q / k / v plumbing only).
 Text evidence, not a proof. `--mutate NAME` corrupts one expectation, which must be rejected.
 
-Usage: python3 bend/err_prefill_diff.py [--mutate NAME] [STOCK_DIR [PTX_DIR]]
+Usage: python3 bend/err_prefill_diff.py [--mutate NAME] STOCK_DIR PTX_DIR
+  STOCK_DIR: the stock exllamav3 package directory at 355c6ee (OUT/stock of bend/engine_trees.py).
+  PTX_DIR: stock_prefill_sm86.ptx, stock_prefill_sm86.ttgir and stock_combine_sm86.ptx: the stock
+    _paged_attn_prefill_kernel (served constexprs, IS_SPLIT = False) and the split combine kernel of STOCK_DIR's
+    modules/attention_fn/triton_paged.py, compiled for sm_86 by Triton 3.6.0. Make it with
+    bend/gen/stock_prefill_ptx.py in the engine image (no GPU, no network; see its docstring).
 """
 
 from __future__ import annotations
@@ -27,8 +32,6 @@ from pathlib import Path
 
 WT = Path(__file__).resolve().parent.parent
 EXT = WT / "patches/exl3-ext"
-STOCK_DEFAULT = Path("/tmp/kernel-work/PrecisionLaw/stock/exllamav3")
-PTX_DEFAULT = Path("/tmp/kernel-work/PrefixPersist/p3022/ptx")
 
 # (file key, line, expected substring)
 CITES = [
@@ -245,8 +248,10 @@ def main(argv: list[str]) -> None:
     mutate = None
     if len(args) >= 2 and args[0] == "--mutate":
         mutate, args = args[1], args[2:]
-    stock = Path(args[0]) if len(args) > 0 else STOCK_DEFAULT
-    ptx = Path(args[1]) if len(args) > 1 else PTX_DEFAULT
+    if len(args) != 2:
+        fail("usage: err_prefill_diff.py [--mutate NAME] STOCK_DIR PTX_DIR")
+    stock = Path(args[0])
+    ptx = Path(args[1])
     files = {
         "TP": stock / "modules/attention_fn/triton_paged.py",
         "CONV": stock / "modules/gated_delta_net_fn/conv1d.py",

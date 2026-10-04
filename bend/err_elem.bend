@@ -4,12 +4,12 @@
 # post-attention norm, final norm), the residual adds and stream precision, SiLU(gate) * up, and the
 # dtypes of the tensors handed between kernels. Laws: bend/err_elem_laws.bend.
 #
-# Sources (file:line). Stock: /tmp/kernel-work/PrecisionLaw/stock/exllamav3 (clean 355c6ee), written
+# Sources (file:line). Stock: OUT/stock of bend/engine_trees.py (clean 355c6ee), written
 # "S:<file>:<line>". Elpis: the stock package with patches/exl3/series then patches/exl3-ext/series
 # applied by the repository's applier (bend/err_elem_diff.py builds it), written "E:<file>:<line>
 # (<patch>)". bend/err_elem_diff.py checks every transcribed fragment against both trees.
 #
-# Served routes (m1map, /tmp/kernel-work/Lossless/m1map/out/m1map-map.json kernel_map, side
+# Served routes (m1map: m1map-map.json of bend/err_elem_diff.py --m1map DIR, kernel_map, side
 # 'verify', and m1map-stock.json side 'm1_stock'):
 #   elpis verify: input norm = rms_norm_kernel (every GDN / attention layer and the final norm);
 #     o_proj + residual add + post-attention norm + MLP = exl3_tail_m16_kernel (ext 8202, all 64
@@ -29,7 +29,7 @@
 #              0x394ccccd = RN(1/5120) (r32 + r32). Observed in the SASS (sm_86, nvcc 12.9,
 #              -O3 --use_fast_math) of rms_norm_kernel<2, float, half, bf16, float> and
 #              exl3_tail_m16_kernel<0, 2> in the elpis extension
-#              /tmp/kernel-work/Int8Linear/x3img/so (MUFU.RCP + FFMA.FTZ + MUFU.RSQ;
+#              .so given to bend/err_elem_diff.py --sass (MUFU.RCP + FFMA.FTZ + MUFU.RSQ;
 #              MOV R30, 0x394ccccd + FFMA.FTZ + MUFU.RSQ) and in a probe compile of both
 #              expressions. h2exp compiles to an exact f16 -> f32 conversion, FFMA by log2(e)
 #              (r32), MUFU.EX2 (ex2) and F2FP (r16, the HSET2 / HFMA2 fix-ups only replace the

@@ -26,7 +26,8 @@ checked against its series SHA-256) in a temporary directory, then checks, faili
 Text evidence and a finite replay, not a proof. `--mutate NAME` applies a deliberate mutation (patched source or
 model text) that the check must reject.
 
-Usage: python3 bend/err_pfix_diff.py [--mutate NAME] [STOCK_PACKAGE_DIR]
+Usage: python3 bend/err_pfix_diff.py [--mutate NAME] STOCK_PACKAGE_DIR
+  STOCK_PACKAGE_DIR: the stock exllamav3 package directory at 355c6ee (OUT/stock of bend/engine_trees.py).
 """
 
 from __future__ import annotations
@@ -42,7 +43,6 @@ from pathlib import Path
 WT = Path(__file__).resolve().parent.parent
 MODEL_FILE = WT / "bend/err_pfix.bend"
 SERIES = [WT / "patches/exl3", WT / "patches/exl3-ext"]
-STOCK_DEFAULT = Path("/tmp/kernel-work/PrecisionLaw/stock/exllamav3")
 FILES = {
     "K": "exllamav3_ext/pattn_kernel.cuh",
     "K8": "exllamav3_ext/pattn8_kernel.cuh",
@@ -393,9 +393,9 @@ def main(argv: list[str]) -> None:
         mutate, args = args[1], args[2:]
         if mutate not in MUTATIONS:
             fail(f"unknown mutation {mutate!r}; known: {', '.join(MUTATIONS)}")
-    if len(args) > 1:
-        fail("usage: err_pfix_diff.py [--mutate NAME] [STOCK_PACKAGE_DIR]")
-    stock = Path(args[0]).resolve() if args else STOCK_DEFAULT
+    if len(args) != 1:
+        fail("usage: err_pfix_diff.py [--mutate NAME] STOCK_PACKAGE_DIR")
+    stock = Path(args[0]).resolve()
     model = MODEL_FILE.read_text()
     with tempfile.TemporaryDirectory(prefix="err_pfix_diff.") as tmp:
         tree = Path(tmp) / "exllamav3"

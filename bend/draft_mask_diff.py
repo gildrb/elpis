@@ -17,6 +17,7 @@ under the served split geometry (bsz 1, 8 kv heads, 2 h-blocks, grid_y 10, 82 SM
 others. `--mutate NAME` perturbs one engine line and must FAIL.
 
 Usage: python3 -I -B draft_mask_diff.py --engine <tree> [--table <table.txt>] [--mutate NAME]
+  --engine <tree>: OUT/patched of bend/engine_trees.py (the full series).
 """
 from __future__ import annotations
 
@@ -32,8 +33,9 @@ from pathlib import Path
 from typing import NoReturn
 
 HERE = Path(__file__).resolve().parent
-BEND = "/nix/store/55nz1ar98qk8l616m93qcamgd4vs36vc-bend-2.0.35/bin/bend"
-LOCK = ["flock", "-s", "/tmp/elpis-gpu.lock", "nice", "-n", "19"]
+sys.path.insert(0, str(HERE))
+import source_link  # noqa: E402
+
 PINS = {  # post-images of the full patched tree (patches/exl3/series + patches/exl3-ext/series through 3031)
     "architecture/dflash.py": "1440f55c4cbf7e1367ce4bc41cb633c673d44e137b966ee5cf2ce320bd062d48",
     "architecture/dflash2.py": "3eb3fda82aa99652eed42998b0d79a6c2add74d094bf453650b29c74e90dbd69",
@@ -177,7 +179,7 @@ def bend_table(path: str | None) -> str:
         return Path(path).read_text()
     with tempfile.TemporaryDirectory() as d:
         exe = Path(d) / "table"
-        r = subprocess.run(LOCK + [BEND, str(HERE / "DRAFT_MASK_TABLE.bend"), "-o", str(exe)],
+        r = subprocess.run(source_link.locked([source_link.bend(), str(HERE / "DRAFT_MASK_TABLE.bend"), "-o", str(exe)]),
                            capture_output=True, text=True, cwd=HERE)
         if r.returncode:
             fail("Bend table compile failed:\n" + r.stdout[-2000:] + r.stderr[-2000:])

@@ -26,10 +26,10 @@
 #
 # Sources (read-only):
 #   TP   = stock modules/attention_fn/triton_paged.py (355c6ee)
-#   PTX  = /tmp/kernel-work/PrefixPersist/p3022/ptx/stock_prefill_sm86.ptx   (stock _paged_attn_prefill_kernel,
-#          served constexprs, sm_86, compiled by ../stock_ptx.py with the image's Triton; IS_SPLIT = False)
-#   CPTX = /tmp/kernel-work/PrefixPersist/p3022/ptx/stock_combine_sm86.ptx    (stock split combine kernel)
-#   TTG  = /tmp/kernel-work/PrefixPersist/p3022/ptx/stock_prefill_sm86.ttgir  (layouts of the same compile)
+#   PTX  = PTX_DIR/stock_prefill_sm86.ptx   (stock _paged_attn_prefill_kernel,
+#          served constexprs, sm_86, compiled by bend/gen/stock_prefill_ptx.py with the image's Triton; IS_SPLIT = False)
+#   CPTX = PTX_DIR/stock_combine_sm86.ptx    (stock split combine kernel)
+#   TTG  = PTX_DIR/stock_prefill_sm86.ttgir  (layouts of the same compile)
 #   P3010, P3022, P5111 = patches/exl3-ext/3010-prefill-pattn.patch, 3022-prefill-pattn-fp32acc.patch,
 #          5111-gdn-prefill-fuse-nom4096.patch (series order; 3020 changes only the warp mapping, see
 #          pattn8_sched_laws.bend, and 3022 patches pattn_kernel.cuh and pattn8_kernel.cuh identically)

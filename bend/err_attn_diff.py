@@ -15,7 +15,15 @@ Source link of bend/err_attn.bend (decode-attention rounding-error paths) to the
      elpis_worst2_path / stock_worst2_path; and it scans L, reporting where the elpis routes are
      dominated (they are not at any L scanned) and where the routes with stock's output stage are not.
 
-Usage: python3 -I -B err_attn_diff.py [--stock DIR] [--elpis DIR] [--no-compiled] [--mutate NAME]
+Usage: python3 -I -B err_attn_diff.py --stock DIR [--elpis DIR] [--no-compiled | --triton DIR [--cuda-include DIR]...]
+                                       [--mutate NAME]
+  --stock: the stock exllamav3 package directory at 355c6ee (OUT/stock of bend/engine_trees.py).
+  --triton: the Triton 3.6.0 cache directory that holds the stock decode kernels SPLIT_DIR and COMB_DIR (sha256
+  pinned in PINS). A run of the stock engine on a GPU in the image writes it; the repository alone cannot make it.
+  It is required unless --no-compiled is given.
+  --cuda-include: an nvcc include directory (repeat it as necessary), for a CUDA 12.9 toolkit whose nvcc does not
+  find cuda_runtime.h and the CCCL headers itself (for example nixpkgs cuda_cudart and cuda_cccl include dirs).
+  The compiled checks use nvcc and nvdisasm from PATH.
   --elpis defaults to a fresh tree: the stock tree + patches/exl3/series + patches/exl3-ext/series up to
   but EXCLUDING 3030-attn-verify-dominate.patch (patch -p1 -F0, any reject fails): this script and
   bend/err_attn.bend / err_attn_finding_laws.bend document the decode-attention kernel BEFORE ext 3030
@@ -27,7 +35,6 @@ Exit 0 = every check passed.
 from __future__ import annotations
 
 import argparse
-import glob
 import hashlib
 import re
 import shutil
@@ -38,8 +45,9 @@ from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 REPO = HERE.parent
-STOCK = Path("/tmp/kernel-work/PrecisionLaw/stock/exllamav3")
-TRITON = Path("/tmp/elpis-recovery-ops-id8q0yvb/exl3-native-cache-1/triton")
+sys.path.insert(0, str(HERE))
+import source_link  # noqa: E402
+
 SPLIT_DIR = "XFUF7JHJC7RHFKH3IJV3P3JGHFWLXAP2UKCMV6XIPVRNJQNK44LQ"
 COMB_DIR = "IPYAKBVPWH2TMNDZAVKWMKD5DXYMLEGCS2H64XAZZQAUFZEPTUCQ"
 PINS = {
@@ -455,9 +463,13 @@ STOP_BEFORE = "3030-attn-verify-dominate.patch"
 
 def build_elpis(stock: Path, dst: Path, stop_before: str | None = STOP_BEFORE) -> Path:
     tree = dst / "exllamav3"
-    files = subprocess.run(
-        ["git", "ls-files"], cwd=stock, capture_output=True, text=True, check=True
-    ).stdout.split()
+    files = sorted(
+        p.relative_to(stock).as_posix()
+        for p in stock.rglob("*")
+        if p.is_file()
+        and not p.is_symlink()
+        and "__pycache__" not in p.relative_to(stock).parts
+    )
     for f in files:
         (tree / f).parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(stock / f, tree / f)
@@ -609,21 +621,21 @@ def ops_at(rows: list, line: int, op: str) -> list:
     ]
 
 
-def check_stock_compiled():
+def check_stock_compiled(stock: Path, triton: Path):
     for rel, digest in PINS.items():
-        check(sha(TRITON / rel) == digest, f"triton cache {rel}: sha256 differs")
+        check(sha(triton / rel) == digest, f"triton cache {rel}: sha256 differs")
     check(
-        sha(STOCK / "modules/attention_fn/triton_paged.py") == STOCK_TRITON_PAGED,
+        sha(stock / "modules/attention_fn/triton_paged.py") == STOCK_TRITON_PAGED,
         "stock triton_paged.py sha256 differs",
     )
-    src = (TRITON / SPLIT_DIR / "_paged_attn_decode_split_kernel.source").read_text()
+    src = (triton / SPLIT_DIR / "_paged_attn_decode_split_kernel.source").read_text()
     check(
         'triton_paged.py":852:0' in src
         and 'triton_paged.py":715:0' in src
         and 'triton_paged.py":763:0' in src,
         "cached split kernel: not compiled from the stock line layout (852 / 715 / 763)",
     )
-    ttgir = (TRITON / SPLIT_DIR / "_paged_attn_decode_split_kernel.ttgir").read_text()
+    ttgir = (triton / SPLIT_DIR / "_paged_attn_decode_split_kernel.ttgir").read_text()
     check(
         re.search(r"%scores = tt\.dot .*tensor<16x256xf16.*tensor<256x32xf16", ttgir)
         is not None,
@@ -632,7 +644,7 @@ def check_stock_compiled():
     pv = re.search(r"%acc_\d+ = tt\.dot %acc_\d+, %v_tile_\d+, %acc_\d+", ttgir)
     check(pv is not None, "P.V dot does not accumulate into acc * alpha")
     ptx = by_loc_ptx(
-        (TRITON / SPLIT_DIR / "_paged_attn_decode_split_kernel.ptx").read_text()
+        (triton / SPLIT_DIR / "_paged_attn_decode_split_kernel.ptx").read_text()
     )
     ex = [i for ln, i in ptx if ln in (959, 961, 1054)]
     lg = [i for i in ex if re.match(r"mul\.f32 .*0f3FB8AA3B", i)]
@@ -654,7 +666,7 @@ def check_stock_compiled():
                 "nvdisasm",
                 "-g",
                 "-c",
-                str(TRITON / SPLIT_DIR / "_paged_attn_decode_split_kernel.cubin"),
+                str(triton / SPLIT_DIR / "_paged_attn_decode_split_kernel.cubin"),
             ],
             capture_output=True,
             text=True,
@@ -676,7 +688,7 @@ def check_stock_compiled():
         "P.V: 2 k16 HMMA per 8-col tile, acc * alpha FMUL",
     )
     cptx = by_loc_ptx(
-        (TRITON / COMB_DIR / "_paged_attn_decode_combine_kernel.ptx").read_text()
+        (triton / COMB_DIR / "_paged_attn_decode_combine_kernel.ptx").read_text()
     )
     check(
         all(
@@ -697,7 +709,7 @@ def check_stock_compiled():
                 "nvdisasm",
                 "-g",
                 "-c",
-                str(TRITON / COMB_DIR / "_paged_attn_decode_combine_kernel.cubin"),
+                str(triton / COMB_DIR / "_paged_attn_decode_combine_kernel.cubin"),
             ],
             capture_output=True,
             text=True,
@@ -715,38 +727,33 @@ def check_stock_compiled():
     )
 
 
-def cuda_includes() -> list:
+def nvcc(includes: list) -> list:
+    """Return the nvcc on PATH and one -I flag for each include directory. Fail if one is absent."""
+    exe = shutil.which("nvcc")
+    check(exe is not None, "nvcc is not on PATH (the compiled checks need it)")
     inc = []
-    for pat in (
-        "/nix/store/*-cuda12.9-cuda_cudart-12.9.*/include",
-        "/nix/store/*-cuda12.9-cuda_cccl-12.9.*/include",
-    ):
-        hits = sorted(
-            p
-            for p in glob.glob(pat)
-            if Path(p, "cuda_runtime.h").exists() or Path(p, "nv").exists()
-        )
-        check(bool(hits), f"no CUDA include dir matches {pat}")
-        inc += ["-I", hits[0]]
-    return inc
+    for d in includes:
+        check(Path(d).is_dir(), f"--cuda-include {d} is not a directory")
+        inc += ["-I", str(d)]
+    return [exe, *inc]
 
 
-def check_elpis_compiled(elpis: Path, td: Path):
+def check_elpis_compiled(elpis: Path, td: Path, includes: list):
     cub = td / "av.cubin"
     r = subprocess.run(
-        [
-            "/tmp/cpu-lock.sh",
-            "nvcc",
-            *cuda_includes(),
-            "-arch=sm_86",
-            "-O3",
-            "--use_fast_math",
-            "-lineinfo",
-            "-cubin",
-            "-o",
-            str(cub),
-            str(elpis / "exllamav3_ext/attn_verify.cu"),
-        ],
+        source_link.locked(
+            [
+                *nvcc(includes),
+                "-arch=sm_86",
+                "-O3",
+                "--use_fast_math",
+                "-lineinfo",
+                "-cubin",
+                "-o",
+                str(cub),
+                str(elpis / "exllamav3_ext/attn_verify.cu"),
+            ]
+        ),
         capture_output=True,
         text=True,
     )
@@ -809,18 +816,18 @@ def check_elpis_compiled(elpis: Path, td: Path):
     )
     pc = td / "probe.cubin"
     r = subprocess.run(
-        [
-            "/tmp/cpu-lock.sh",
-            "nvcc",
-            *cuda_includes(),
-            "-arch=sm_86",
-            "-O3",
-            "--use_fast_math",
-            "-cubin",
-            "-o",
-            str(pc),
-            str(probe),
-        ],
+        source_link.locked(
+            [
+                *nvcc(includes),
+                "-arch=sm_86",
+                "-O3",
+                "--use_fast_math",
+                "-cubin",
+                "-o",
+                str(pc),
+                str(probe),
+            ]
+        ),
         capture_output=True,
         text=True,
     )
@@ -1133,11 +1140,15 @@ def scan():
 
 def main(argv: list) -> int:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--stock", type=Path, default=STOCK)
+    ap.add_argument("--stock", type=Path, required=True)
     ap.add_argument("--elpis", type=Path)
     ap.add_argument("--no-compiled", action="store_true")
+    ap.add_argument("--triton", type=Path)
+    ap.add_argument("--cuda-include", type=Path, action="append", default=[])
     ap.add_argument("--mutate", choices=sorted(MUTATIONS))
     a = ap.parse_args(argv[1:])
+    if not a.no_compiled and a.triton is None:
+        ap.error("--triton is required unless --no-compiled is given")
     with tempfile.TemporaryDirectory() as td:
         tdp = Path(td)
         elpis = a.elpis or build_elpis(a.stock, tdp)
@@ -1159,8 +1170,8 @@ def main(argv: list) -> int:
         check_frags(trees)
         check_pre(trees)
         if not a.no_compiled:
-            check_stock_compiled()
-            check_elpis_compiled(elpis, tdp)
+            check_stock_compiled(a.stock, a.triton)
+            check_elpis_compiled(elpis, tdp, a.cuda_include)
         check_geometry()
         scan()
     print("err_attn_diff: PASS")

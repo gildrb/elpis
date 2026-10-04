@@ -26,6 +26,11 @@ Checks, failing closed:
 Text evidence, not a proof. `--mutate NAME` applies a deliberate source mutation that must be rejected.
 
 Usage: python3 bend/err_elem_diff.py [--mutate NAME] [--sass SO [--cuobjdump BIN]] [--m1map DIR] STOCK_PACKAGE_DIR
+  STOCK_PACKAGE_DIR: the stock exllamav3 package directory at 355c6ee (OUT/stock of bend/engine_trees.py).
+  DIR: the m1map output directory (m1map-map.json, m1map-stock.json): kernel maps that a GPU run of the
+    served engine records. The repository alone cannot make it. Without --m1map, check 5 does not run and
+    the script says so.
+  BIN: the cuobjdump executable; without --cuobjdump, the cuobjdump on PATH.
 """
 
 from __future__ import annotations
@@ -33,6 +38,7 @@ from __future__ import annotations
 import importlib.util
 import json
 import re
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -40,8 +46,6 @@ from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
 MODEL = REPO / "bend/err_elem.bend"
-DEFAULT_M1MAP = "/tmp/kernel-work/Lossless/m1map/out"
-DEFAULT_CUOBJDUMP = "/nix/store/0xcriggpj0p0pn59fy5d8r2ay7xq5d0n-cuda12.9-cuda_cuobjdump-12.9.82/bin/cuobjdump"
 
 NORM = "exllamav3_ext/norm.cu"
 TAIL = "exllamav3_ext/quant/exl3_tail_m16_kernel.cuh"
@@ -767,8 +771,8 @@ def check_sass(so: Path, cuobjdump: str) -> None:
 def main(argv: list[str]) -> None:
     args = argv[1:]
     mutate = so = None
-    cuobjdump = DEFAULT_CUOBJDUMP
-    m1map = Path(DEFAULT_M1MAP)
+    cuobjdump = None
+    m1map = None
     while args and args[0].startswith("--"):
         flag = args.pop(0)
         if flag == "--mutate":
@@ -785,6 +789,10 @@ def main(argv: list[str]) -> None:
         fail(
             "usage: err_elem_diff.py [--mutate NAME] [--sass SO [--cuobjdump BIN]] [--m1map DIR] STOCK_PACKAGE_DIR"
         )
+    if so is not None and cuobjdump is None:
+        cuobjdump = shutil.which("cuobjdump")
+        if cuobjdump is None:
+            fail("--sass needs cuobjdump: it is not on PATH and --cuobjdump is not given")
     stock = Path(args[0])
     model = MODEL.read_text()
     with tempfile.TemporaryDirectory(prefix="err-elem-diff-") as tmp:
@@ -812,7 +820,12 @@ def main(argv: list[str]) -> None:
         check_helpers(s, e)
         check_act(s, e, model)
         check_shape(e, s, model)
-        check_routes(m1map)
+        if m1map is None:
+            print(
+                "err_elem_diff: m1map route check NOT RUN (no --m1map; the m1map dir is GPU-made and not in the repository)"
+            )
+        else:
+            check_routes(m1map)
         if so is not None:
             check_sass(so, cuobjdump)
     print("err_elem_diff: OK")

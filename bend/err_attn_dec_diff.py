@@ -16,7 +16,11 @@ the kernels it models, and scans of its laws.
      x = 128 by a stock route (bend/err_attn_diff.py's transcription of the stock kernels), for L = 1..4400
      and sampled L up to 2^20; e_OE <= own0 + laterk0 and e_rt <= s_rt (law dec_totals) for L = 1..2^20.
 
-Usage: python3 -I -B err_attn_dec_diff.py [--stock DIR] [--elpis DIR] [--no-compiled] [--no-bend] [--mutate NAME]
+Usage: python3 -I -B err_attn_dec_diff.py --stock DIR [--elpis DIR] [--no-compiled | --cuda-include DIR...] [--no-bend]
+                                           [--mutate NAME]
+  --stock: the stock exllamav3 package directory at 355c6ee (OUT/stock of bend/engine_trees.py).
+  --cuda-include: an nvcc include directory (repeat it as necessary), as in bend/err_attn_diff.py. The compiled
+  checks use nvcc and nvdisasm from PATH; the Bend evaluation uses the `bend` on PATH (bend/source_link.py).
 Exit 0 = every check passed. --mutate perturbs one quoted 3030 line; the run must FAIL.
 """
 
@@ -33,8 +37,8 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 import err_attn_diff as D  # noqa: E402  stock transcription, tree builder, dom, compiled-code helpers
+import source_link  # noqa: E402
 
-BEND = "/nix/store/55nz1ar98qk8l616m93qcamgd4vs36vc-bend-2.0.35/bin/bend"
 check, fail, cdiv = D.check, D.fail, D.cdiv
 S_E = 20
 
@@ -309,22 +313,22 @@ def check_frags(trees: dict):
 # 2. Compiled code
 
 
-def check_compiled(elpis: Path, td: Path):
+def check_compiled(elpis: Path, td: Path, includes: list):
     cub = td / "av3030.cubin"
     r = subprocess.run(
-        [
-            "/tmp/cpu-lock.sh",
-            "nvcc",
-            *D.cuda_includes(),
-            "-arch=sm_86",
-            "-O3",
-            "--use_fast_math",
-            "-lineinfo",
-            "-cubin",
-            "-o",
-            str(cub),
-            str(elpis / "exllamav3_ext/attn_verify.cu"),
-        ],
+        source_link.locked(
+            [
+                *D.nvcc(includes),
+                "-arch=sm_86",
+                "-O3",
+                "--use_fast_math",
+                "-lineinfo",
+                "-cubin",
+                "-o",
+                str(cub),
+                str(elpis / "exllamav3_ext/attn_verify.cu"),
+            ]
+        ),
         capture_output=True,
         text=True,
     )
@@ -714,7 +718,12 @@ def check_bend(td: Path):
     )
     f = td / "dec_eval.bend"
     f.write_text(src)
-    out = subprocess.run([BEND, str(f)], capture_output=True, text=True, timeout=1800)
+    out = subprocess.run(
+        source_link.locked([source_link.bend(), str(f)]),
+        capture_output=True,
+        text=True,
+        timeout=1800,
+    )
     check(
         out.returncode == 0,
         f"bend evaluation failed: {out.stdout[-1500:]}{out.stderr[-1500:]}",
@@ -826,10 +835,11 @@ def scan():
 
 def main(argv: list) -> int:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--stock", type=Path, default=D.STOCK)
+    ap.add_argument("--stock", type=Path, required=True)
     ap.add_argument("--elpis", type=Path)
     ap.add_argument("--no-compiled", action="store_true")
     ap.add_argument("--no-bend", action="store_true")
+    ap.add_argument("--cuda-include", type=Path, action="append", default=[])
     ap.add_argument("--mutate", choices=sorted(MUTATIONS))
     a = ap.parse_args(argv[1:])
     with tempfile.TemporaryDirectory() as td:
@@ -852,7 +862,7 @@ def main(argv: list) -> int:
             (elpis / rel).write_text("\n".join(lines))
         check_frags({"S": a.stock, "E": elpis})
         if not a.no_compiled:
-            check_compiled(elpis, tdp)
+            check_compiled(elpis, tdp, a.cuda_include)
         check_replay()
         if not a.no_bend:
             check_bend(tdp)

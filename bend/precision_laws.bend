@@ -75,8 +75,8 @@ law served_never_less_precise:
   {Bool.or(E.is_stock(op, m), Ord.dom(E.acc(op, m, S.served_env(), S.tunes(gs, gg, hs, hg, fb)),
     S.acc(op, m, S.served_env(), S.tunes(gs, gg, hs, hg, fb)))) == True{} : Bool}
 
-# Cross-check of the stock model against /tmp/kernel-work/Int8Linear/decacc/work/partA.md (the table
-# computed by analyze_a.py from the same sources and the persisted autotune cache): the stock class of
+# Cross-check of the stock model against bend/gen/precision_parta.txt (the partA table computed by the
+# untracked analyze_a.py from the same sources and the persisted autotune cache): the stock class of
 # every served (op, m) except lm_head (whose class the unary checker cannot normalize; elpis runs that
 # same kernel) is partA's run range, in k-values (PA.part_a, bend/precision_parta.bend).
 law stock_table_partA:

@@ -1,9 +1,12 @@
 #!/usr/bin/env python3
 """Cross-check the Bend precision table (bend/PRECISION_TABLE.bend) against the CPU-computed decode table
-/tmp/kernel-work/Int8Linear/decacc/work/partA.md (analyze_a.py over the stock sources and the persisted
-autotune cache): per (op, m), the stock run range / int8, and the elpis run range / "= stock".
+partA.md (analyze_a.py over the stock sources and the persisted autotune cache): per (op, m), the stock run
+range / int8, and the elpis run range / "= stock".
 
-    python3 bend/precision_diff.py [--parta PATH] [--bend BEND]
+    python3 bend/precision_diff.py [--parta PATH]
+
+PATH: the partA.md decode table; the default is bend/gen/precision_parta.txt. The script runs the `bend` on
+PATH (exactly bend 2.0.35, bend/source_link.py).
 
 Prints one line per disagreement and exits 1 if any; lm_head's stock class is not normalized by Bend
 (unary Nat), so only its elpis route (= stock) is compared.
@@ -15,6 +18,8 @@ import sys
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
+sys.path.insert(0, str(HERE))
+import source_link  # noqa: E402
 
 
 def parta_rows(path):
@@ -54,14 +59,13 @@ def run_range(cls):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--parta", default="/tmp/kernel-work/Int8Linear/decacc/work/partA.md")
-    ap.add_argument("--bend", default="bend")
+    ap.add_argument("--parta", default=str(HERE / "gen/precision_parta.txt"))
     # partA.md predates ext 3023 (m16 fold-32): its elpis longest run is the FOLD = 4 instance's 64 k-values;
     # the served EXL3_M16_FOLD32 = 1 instance folds every 2 k16 tiles = 32 k-values (bend/m16_diet.bend cfg_fold).
     ap.add_argument("--elpis-run", default="32")
     ap.add_argument("--parta-run", default="64")
     a = ap.parse_args()
-    pa, bd = parta_rows(a.parta), bend_rows(a.bend)
+    pa, bd = parta_rows(a.parta), bend_rows(source_link.bend())
     bad = 0
     for key in sorted(pa):
         if key not in bd:

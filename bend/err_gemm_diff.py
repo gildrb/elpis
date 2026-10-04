@@ -14,7 +14,8 @@ order). This script
      and in the elpis tree.
 Exit status 0 iff every check passes.
 
-Usage: python3 -B bend/err_gemm_diff.py [--stock STOCK]
+Usage: python3 -B bend/err_gemm_diff.py --stock STOCK
+  STOCK: the stock exllamav3 package directory at 355c6ee (OUT/stock of bend/engine_trees.py).
 """
 
 from __future__ import annotations
@@ -28,7 +29,6 @@ import tempfile
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
-DEFAULT_STOCK = "/tmp/kernel-work/PrecisionLaw/stock/exllamav3"
 SERIES = [REPO / "patches/exl3", REPO / "patches/exl3-ext"]
 SHARED = [
     "exllamav3_ext/quant/hadamard_inner.cuh",
@@ -342,7 +342,7 @@ def check(tree: Path, frags, label: str) -> int:
 
 def main() -> int:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--stock", default=DEFAULT_STOCK)
+    ap.add_argument("--stock", required=True)
     a = ap.parse_args()
     stock = Path(a.stock)
     bad = 0

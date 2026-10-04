@@ -372,7 +372,7 @@ def use_mgemm(+K: Nat, +out: Nat, mul1: Bool) -> Bool:
 # out_proj, mlp.cpp:72-73 gate / up when the gate/up pair is not fused (modules/mlp.py:642-645
 # use_mgemm(K, out_features)), mlp.cpp:88 down).
 # Output dtype (fp32 flag) of o_proj / out_proj / down (True) and gate / up / lm_head (False): taken from
-# /tmp/kernel-work/Int8Linear/decacc/work/analyze_a.py:35-47, UNVERIFIED here; no law depends on them
+# the untracked analyze_a.py:35-47 of the decode-accuracy work, UNVERIFIED here; no law depends on them
 # (elpis keeps fp32 partials, and lm_head is the same kernel on both sides).
 # lm_head mul1: UNVERIFIED; irrelevant at K = 6 (int8_gate needs K <= 5, gemv_cfg needs K <= 4).
 type Op is Data:
@@ -389,8 +389,8 @@ type Op is Data:
   LmHead{}
 
 # Persisted stock autotune records (the served containers' coop_autotune_v1.bin, decoded by
-# /tmp/kernel-work/Int8Linear/decacc/work/tunecache.py; per
-# /tmp/kernel-work/Int8Linear/decacc/work/partA.md the record is the same for every m = 1 .. 8):
+# the untracked tunecache.py of the decode-accuracy work; per partA.md = bend/gen/precision_parta.txt
+# the record is the same for every m = 1 .. 8):
 #   attention sliced bundle (k 5120, slice 1024, fp16 C): shape 4, grid 4 (x z 14)   partA.md:3-26
 #   GDN sliced bundle (k 5120, slice 2048, fp32 C):      shape 4, grid 10 (x z 8)    partA.md:35-50
 #   MLP gate / up (5120 -> 17408, m >= 2 key):           shape 4, grid 82            partA.md:61-74
