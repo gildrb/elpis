@@ -34,10 +34,10 @@ from typing import NoReturn
 HERE = Path(__file__).resolve().parent
 BEND = "/nix/store/kqhwjzdm96d14fvzblb4jz9m73cr3i0j-bend-2.0.34/bin/bend"
 LOCK = ["flock", "-s", "/tmp/elpis-gpu.lock", "nice", "-n", "19"]
-PINS = {  # post-images: 0005 scratch manifest (dflash.py), repo exl3-ext.json (the others)
-    "architecture/dflash.py": "fa07b1b8263b3f725f01f7ba5f27438702ac3ed5993e8839d1dafe44b568b8f4",
-    "architecture/dflash2.py": "16a2982724b070b7328a652e4127fda0da3e3836228234bc864f6190b8657fa2",
-    "modules/attention_fn/triton_paged.py": "12896d430c94639ec4157a967f1635cc4a0dcc2198294d6349a9a2749ed9623e",
+PINS = {  # post-images of the full patched tree (patches/exl3/series + patches/exl3-ext/series through 3031)
+    "architecture/dflash.py": "1440f55c4cbf7e1367ce4bc41cb633c673d44e137b966ee5cf2ce320bd062d48",
+    "architecture/dflash2.py": "3eb3fda82aa99652eed42998b0d79a6c2add74d094bf453650b29c74e90dbd69",
+    "modules/attention_fn/triton_paged.py": "378a397fd0f9d197d6e19d9f070b90b56c3ff755c5e35e21d678795e5a6524d3",
 }
 KERNEL_START = [
     "    total_k_len = tl.load(cache_seqlens + batch) + kv_append_len",

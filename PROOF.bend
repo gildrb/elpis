@@ -43,3 +43,27 @@ import ./bend/exl3_tree_derive_proof.bend as Exl3TreeDeriveProof
 import ./bend/exl3_tree_path_proof.bend as Exl3TreePathProof
 import ./bend/spec_inv_tree_proof.bend as SpecInvTreeProof
 import ./bend/tree_desc_agree_proof.bend as TreeDescAgreeProof
+import ./bend/pattn8_sched_proof.bend as Pattn8SchedProof
+import ./bend/act_fuse_proof.bend as ActFuseProof
+import ./bend/gdn_conv_qkv_proof.bend as GdnConvQkvProof
+import ./bend/prefill_merge_proof.bend as PrefillMergeProof
+import ./bend/kv_compact_proof.bend as KvCompactProof
+import ./bend/rowinv_link_proof.bend as RowinvLinkProof
+import ./bend/rowinv_served_proof.bend as RowinvServedProof
+import ./bend/lmhead_proof.bend as LmHeadProof
+import ./bend/nat_order_proof.bend as NatOrderProof
+import ./bend/err_bound_proof.bend as ErrBoundProof
+import ./bend/err_elem_proof.bend as ErrElemProof
+import ./bend/err_gdn_proof.bend as ErrGdnProof
+import ./bend/err_attn_proof.bend as ErrAttnProof
+# Finding, not contract: the current decode attention core is not dominated by stock's
+# (counterexample at context 2). Replaced by a domination law in LAWS.bend after a kernel fix.
+import ./bend/err_attn_finding_proof.bend as ErrAttnFindingProof
+import ./bend/err_prefill_proof.bend as ErrPrefillProof
+# Finding, not contract: 3022 v4 prefill attention is not dominated by stock's in two row classes.
+import ./bend/err_prefill_finding_proof.bend as ErrPrefillFindingProof
+import ./bend/err_gemm_proof.bend as ErrGemmProof
+import ./bend/err_gemm_runs_proof.bend as ErrGemmRunsProof
+import ./bend/err_attn_dec_proof.bend as ErrAttnDecProof
+import ./bend/err_pfix_proof.bend as ErrPfixProof
+import ./bend/rinv_proof.bend as RinvProof

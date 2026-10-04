@@ -2,7 +2,10 @@
 """
 Finite differential check of bend/attn_stride.bend + bend/attn_stride_bounds.bend (ext patch 3006
 verify attention: strided absolute 64-token tiles, one partial slot per split CTA) against the
-shipped expressions.
+shipped expressions. Valid for the current series (3006 partition, unchanged by 3012 / 3030 / 3031):
+the AV_TD_* TreeDesc offsets (3012) are ignored as non-partition constants, the replay runs the chain
+kernel (TREE = false, q_lim = q_abs: the 3012 tree passes are bend/attn_tree_laws.bend's), and the
+3030 combine weight pow2i is stubbed by exp2f (the replay uses only its sign and the skip).
 
 Quoted verbatim from the patched engine tree (argument = the exllamav3 package directory):
   exllamav3_ext/attn_verify.cuh   the AV_* constants, av_live_tiles, av_cta_tiles, av_live_slots
@@ -85,7 +88,7 @@ MUTATIONS = {
     # combine reads every grid slot, live or not
     "combine_live_S": ("const int live = av_live_slots(av_live_tiles(L), splits);", "const int live = splits;", "cu", 1),
     # causal mask admits the next position
-    "mask_off_by_one": ("tok <= q_abs;", "tok <= q_abs + 1;", "cu", 1),
+    "mask_off_by_one": ("tok <= q_lim;", "tok <= q_lim + 1;", "cu", 1),
     # split slots laid out by kv heads instead of the grid width
     "pbase_nkv": ("* S + cta) * AV_ROWS;", "* n_kv_heads + cta) * AV_ROWS;", "cu", 1),
     # block-table trap one page short: rounds the table spans trap
@@ -145,6 +148,8 @@ static D3 blockIdx, gridDim;
 static int trapped = 0;
 static void __trap() { trapped = 1; }
 static float ex2(float x) { return exp2f(x); }
+// ext 3030: the combine weight is pow2i(m_s - m_use), an exact power of two; only its sign is used here
+static float pow2i(float x) { return exp2f(x); }
 @@LIVE_TILES@@
 @@CTA_TILES@@
 @@LIVE_SLOTS@@
@@ -229,7 +234,10 @@ static CtaRun split_cta(int seqlen, int q_len, int num_pages_per_seq, int b, int
         @@N0_LOOP@@
         R.n0s.push_back(n0);
         for (int gid = g_lo; gid < g_hi; ++gid) {
+            // ext 3012: the chain kernel (TREE = false) is replayed; its row bound is q_lim = q_abs
+            const bool TREE = false; const int base = 0, my_depth = 0;
             @@QABS@@
+            const int q_lim = q_abs;
             bool row_ok[6];
             @@ROW_OK@@
             std::vector<int> v;
@@ -558,6 +566,9 @@ int main() {
 def c_program(cuh: str, cu: str, gr: str, cpp: str, hostv: list) -> str:
     q = {}
     defs = re.findall(r"#define AV_(\w+) (\d+)", cuh)
+    names = [n for n, _ in defs]
+    # the TreeDesc byte offsets (AV_TD_*, ext 3012) are not partition constants
+    defs = [(n, v) for n, v in defs if not n.startswith("TD_")]
     names = [n for n, _ in defs]
     if sorted(names) != sorted(["HD", "ROWS", "QPOS", "NW", "T", "STAGES", "PAGE"]):
         fail(f"unexpected AV_* constants {names}")

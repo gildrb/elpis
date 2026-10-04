@@ -161,3 +161,139 @@ import ./bend/spec_inv_tree_laws.bend as SpecInvTreeLaws
 # The host TreeDesc reference (exl3_tree_accept_spec.derive) and the tree-attention reference
 # (attn_tree_spec.desc) agree on the fields both read, on every legal parent array.
 import ./bend/tree_desc_agree_laws.bend as TreeDescAgreeLaws
+# ext 3020 8-warp prefill attention (exllamav3_ext/pattn8_kernel.cuh; bend/pattn8_sched.bend against 3010's model
+# bend/pattn_sched.bend): warp w < 8 of pair < 3 runs 3010 warp 2 pair + w / 4 of query block 4 qc + w % 4 (forward,
+# injective and onto; every 3010 block lies in a launched 64-row chunk); that warp has 3010's q head, positions, row
+# bounds and mask state, computes in exactly 3010's tile iterations 0 .. ntiles - 1 in loop order (the CTA loop runs at
+# least that many), keeps the same keys per tile (so every causal (row, key) pair is attended exactly once, in tile
+# p / 32); warps past q_len compute and store nothing; the q prologue fills each warp's own rows; K / V tile chunks are
+# issued exactly once for 256 (3020) and 192 (3010) threads. The per-warp arithmetic below the warp map is 3010's text
+# (bend/pattn8_sched_diff.py), so outputs are bit-identical to 3010.
+import ./bend/pattn8_sched_laws.bend as Pattn8SchedLaws
+# ext 5112 SiLU-gate product in the prefill up-projection GEMM epilogue (exllamav3_ext/hgemm_act.cu; bend/act_fuse.bend
+# against stock hgemm_recon + silu_mul, bend/act_fuse_spec.bend): every fused store (row, 2 c) is act_mul_kernel_h's half2
+# index row n + c (N = 2 n, pair-aligned columns, a bijection onto the stock indices) and stores the same half2 operation
+# term (same operands, same order, same rounding points) for both act_limit branches; the stock launch covers each index
+# once; the fused route runs only with both switches on, sm86, K 5120 x N 17408, M >= 1024, where stock hgemm_recon takes
+# the 3011 wide kernel (route and worthwhile() hold). K loop and store map are 3011's text (bend/act_fuse_diff.py).
+import ./bend/act_fuse_laws.bend as ActFuseLaws
+# ext 5111 GDN prefill conv on the fp32 qkv (modules/gated_delta_net_fn/conv1d.py; bend/gdn_conv_qkv.bend against the
+# stock transpose / bf16 cast / split / contiguous path, bend/gdn_conv_qkv_spec.bend): each input read is the qkv element
+# the stock transposed copy held at the stock kernel's address; each output (s, d) lands at its q / k / v view element
+# (s, j) = view base + s width + j, the three views tile the buffer back to back and each view's layout is a bijection,
+# so the store map is a bijection onto the buffer. The conv arithmetic is the stock kernels' text (bend/gdn_conv_qkv_diff.py).
+import ./bend/gdn_conv_qkv_laws.bend as GdnConvQkvLaws
+# ext 5110g merged 4096-row prefill pieces (generator/job.py; bend/prefill_merge.bend against the 2048-row step,
+# bend/prefill_merge_spec.bend; text-only recurrent model, no prompt-cache page hit in the pieces): a merged step is
+# exactly two 2048-row steps (ends k + mc and k + 2 mc, no last-page cut), any other step is the 2048-row step, a merge
+# needs last_tok <= M4096_MAX_PROMPT (131072) and above it the whole schedule is the 2048-row one, the merged forward's
+# rows are the two pieces' rows in order; the 3010 prefill attention row is chunk-independent and the 3011 wide-GEMM route
+# is the same at M 2048 and 4096. NOT covered (checkpoint_positions shows it): recurrent checkpoints are stashed only at
+# visited positions, and a merged run from a start = mc (mod 2 mc) skips pp-interval checkpoints the 2048 schedule takes.
+import ./bend/prefill_merge_laws.bend as PrefillMergeLaws
+# ext 3013 tree-verify KV commit (cache/kv_compact.py kv_moves, exllamav3_ext/kv_compact.cu; bend/kv_compact.bend against
+# bend/kv_compact_spec.bend): for all 128 legal accepted paths of the 8-row window, the derived moves pass the extension's
+# checks, the read-all-then-write kernel equals the sequential ascending copy, and slots 0 .. count - 1 end up holding the
+# path rows (what a chain verify of the path writes). Logical slots; phys injective by the distinct-page check.
+import ./bend/kv_compact_laws.bend as KvCompactLaws
+# The ~rinv link, generic (bend/rowinv_link.bend served-forward model over L layers with opaque
+# arithmetic, reference bend/rowinv_link_spec.bend = every position computed as row 0 of a 1-row
+# round after the prefill): if every layer's kernel plan depends only on the row's absolute
+# position (O_plan / O_head), every layer gathers exactly the row's ancestors in logical order
+# (O_gat), the round's paths form a tree (W_last / W_pre / W_rng / W_dep) and the committed state
+# is the 1-row rounds' (commit), then every verify row's token is its absolute prefix's token; and
+# the engine's commit of a row's path leaves exactly the 1-row rounds' committed state (commit_path).
+import ./bend/rowinv_link_laws.bend as RowinvLinkLaws
+# The ~rinv link for the served configuration (bend/rowinv_served.bend: chain rounds of 1..8 rows
+# and the 5040 legal 8-row trees; plans from the 3006 / m16 / m16g / 8201 / 8205 / 5106 Nat models;
+# gathers from the 3012 / 5109 models): every obligation discharged from the per-kernel laws, with
+# no hypothesis left on plans: the 3006 split grid S = max(1, SMs // kv_heads) >= 1 (grid_pos), the
+# split-K counter barrier sums exactly the group's contributors in ascending order for every
+# arrival order and stale workspace (splitk_group), and the head plan (final norm, stock lm_head,
+# fused argmax split) is the 1-row plan (served_o_head). The only premise is the host's descriptor
+# guard (~hcfg, Served.cfg_ok).
+import ./bend/rowinv_served_laws.bend as RowinvServedLaws
+# Stock lm_head head plan (bend/lmhead.bend: stock exl3_gemm_gr dispatch, persisted autotune record,
+# tensor-core fold schedule, final norm width, fused-greedy argmax split): row r of an m-row call
+# (m <= 8) has the 1-row call's element order and head plan (H_lmhead of the ~rinv link).
+import ./bend/lmhead_laws.bend as LmHeadLaws
+# ~rinv closed for the served engine (bend/rinv_engine.bend, the engine's chain / tree jobs with its
+# own commits, 0006 + 3013 + 5109): while a job runs, its committed state is the 1-row rounds' state
+# of its committed stream (served_chain_commit / served_tree_commit, so `commit` is proven), every
+# round's verify ids are the served forward's, and the output is a prefix of the greedy decode of
+# the prompt by ref_row (one token per round, served plans), for every drafter: chains of at most 7
+# drafts per round and every list of legal 8-row trees (served_*_job, served_*_greedy_prefix,
+# served_chain_spec_invariance). Remaining trust base, outside Bend: deterministic kernels (H_det),
+# opaque arithmetic (H_fp), mma.m16n8k16 row-locality (H_mma), row-local norm / argmax and slot code
+# (H_slots / H_rowloc), the GPU memory model at the split-K barrier (H_mem), code conformance to the
+# models (H_conform, *_diff.py) and deployment facts (H_deploy).
+import ./bend/rinv_laws.bend as RinvLaws
+# Rounding-error bounds (bend/err_bound.bend): a Path counts the rounding steps from one input
+# term to one output by class (fp32 RN, fp32 tensor-core, fp16 RN, fp16 tensor-core, int8
+# activation, special functions). For every assignment of per-class bounds in the class order,
+# a dominated path has a sum of bounds (sigma) no larger than its dominator; with Higham's
+# Lemma 3.1 (error factor sigma / (1 - sigma), increasing) that is a no-larger worst-case
+# rounding error bound. Domination composes over path segments, is reflexive and transitive.
+import ./bend/nat_order_laws.bend as NatOrderLaws
+import ./bend/err_bound_laws.bend as ErrBoundLaws
+# Error bounds, norms and elementwise decode ops (bend/err_elem.bend: stock 355c6ee M=1 vs the
+# elpis verify path, file:line cited, bend/err_elem_diff.py source and SASS link): every tensor
+# between kernels keeps stock's dtype; residual adds round as stock's; the input and final
+# RMSNorm paths equal stock's; the layer tail's post-attention RMSNorm is dominated (exchange
+# 128) on every leaf; SiLU(gate) * up runs stock's operations in stock's order.
+import ./bend/err_elem_laws.bend as ErrElemLaws
+# Error bounds, decode Gated DeltaNet (bend/err_gdn.bend: stock 355c6ee M=1 split path vs the
+# elpis verify kernel gdn_conv_rule_norm_kernel, file:line cited, bend/err_gdn_diff.py): both
+# compute the same exact recurrence with the same operations in the same order (conv, SiLU, l2
+# norm, delta rule, gated norm; fp32 state) except the b/a GEMV, which sums the same products
+# (a bijection of terms) in fewer steps (at most 30 fp32 steps per term vs stock's 165); every
+# elpis route from an input term to an output, across tokens through the state and the conv
+# window, is dominated (exchange 128) by a real stock route with the same bf16 / log1pf steps.
+import ./bend/err_gdn_laws.bend as ErrGdnLaws
+# Error bounds, decode attention (bend/err_attn.bend: stock 355c6ee M=1 Triton paged decode vs
+# the elpis verify kernels, file:line cited, bend/err_attn_diff.py): the pre kernel (q / k norm,
+# RoPE) has stock's rope_kernel arithmetic on every route; at context 2 both sides share one
+# tile, one slot and the denominator. The attention core is NOT dominated by stock's today
+# (bend/err_attn_finding_laws.bend, proven counterexample, discharged in PROOF.bend): output
+# back-rotation chain, sequential denominator sum, 20-slot combine, P.V chain length.
+import ./bend/err_attn_laws.bend as ErrAttnLaws
+# Error bounds, prefill (bend/err_prefill.bend: stock 355c6ee Triton prefill attention, conv and
+# f16acc GEMM vs elpis 3010 / 3020 / 3022 v4, 5111, 3011 / 5112, file:line cited,
+# bend/err_prefill_diff.py): the score segment (QK, scale, exp2) is stock's path; against unsplit
+# stock every 3022 v4 P.V leaf of a row seeing 3 or more key tiles is dominated (exchange 128);
+# the 5111 GDN conv runs stock's step sequence on both routes; every 3011 / 5112 GEMM product term
+# has stock's path. NOT dominated today (bend/err_prefill_finding_laws.bend, proven
+# counterexamples, discharged in PROOF.bend): rows seeing 1-2 tiles (denominator depth) and rows
+# of block tables >= 8192 keys against stock's 2-way split (ex2 rescale count).
+import ./bend/err_prefill_laws.bend as ErrPrefillLaws
+# Error bounds, decode GEMMs (bend/err_gemm.bend: stock 355c6ee M=1 dispatch (sliced exl3_mgemm,
+# int8 sq GEMV, gdn_ba_gemv, stock lm_head) vs the elpis verify kernels (m16g fold-32, 8201 /
+# 8202 tail phases, 5106 b/a k-split), file:line cited, bend/err_gemm_diff.py): for m = 1..8 and
+# every leaf, attention q|gate / k / v and GDN qkv / z are dominated (m >= 2; stock's own kernel
+# at m = 1), o_proj / out_proj / MLP gate / up / down are dominated by stock's int8-activation
+# GEMV, GDN b/a by stock's lane chain, and lm_head has stock's per-row reduction order.
+import ./bend/err_gemm_laws.bend as ErrGemmLaws
+# The run schedules the GEMM bounds use (bend/err_gemm_runs.bend over the DIET traces of
+# bend/m16_diet.bend and the stock partition of bend/precision_stock.bend): every fp16 run of the
+# served m16g and tail traces is at most FOLD = 2 k16 tiles (ext 3023 fold-32) for every block
+# slice, every tile event sits at run position 1 .. FOLD, and the stock main loop's fp16 runs are
+# exactly the column pieces of a block's slice.
+import ./bend/err_gemm_runs_laws.bend as ErrGemmRunsLaws
+# Error bounds, decode attention with ext 3030 (bend/err_attn_dec.bend, model of the fixed
+# attn_verify kernels; stock side bend/err_attn.bend; bend/err_attn_dec_diff.py source, SASS-count
+# and replay links): for every context length L >= 1, every live key and every route kind (q, K,
+# V, the tile coefficient, the gate), the elpis path is dominated (exchange 128) by stock M=1
+# decode's path of the same kind, with the coefficients' own ex2 / FADD steps counted kind by kind.
+# 3030: integer running max (exact power-of-two rescales), per-tile p sums by a balanced tree,
+# per-tile fresh fp32 P.V accumulators joined by one fma, a pairwise combine tree, and stock's
+# two-step tensor-core output rotation.
+import ./bend/err_attn_dec_laws.bend as ErrAttnDecLaws
+# Error bounds, prefill attention with ext 3031 (bend/err_pfix.bend, model of the fixed pattn /
+# pattn8 kernels; stock side bend/err_prefill.bend): for every 64-row block, every row and every
+# stock split count 1..8, every elpis composite (any numerator and denominator tile, either k16
+# half, any score steps) is dominated (exchange 128) by stock's tile-0 composite, which is a real
+# stock leaf; the chain plan is the same in every chunking that starts at a multiple of 64.
+# 3031: per-thread balanced-tree denominators (depth 5, as stock's tl.sum) and online-softmax
+# chains of E = (q_abs64 + 256) / 256 tiles, never longer than a stock split, combined with
+# stock's weights.
+import ./bend/err_pfix_laws.bend as ErrPfixLaws

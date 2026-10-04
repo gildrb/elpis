@@ -8,13 +8,15 @@ serve/exl3_server.Server, then drives server.gen directly, one process, several 
           token: acceptance per round is capped by a varying k, so rounds are cut differently
   wrong0  every proposal replaced by a wrong token: each round commits exactly 1 token, i.e.
           every token is verified as row 0 of its own 8-row round
-  m1      no draft at all: the generator's regular M=1 decode (different kernels; reported as a
-          distance, not required to match)
+  m1      no draft at all: the generator's regular M=1 decode (its own kernel set; needs
+          EXL3_TREE=0: a tree engine refuses a round without a draft). Reported as a distance with
+          the logit margin at the first divergence, not required to match: the claim tested here is
+          that the draft never changes the output, and m1 runs other kernels (other rounding)
 
-Draft perturbation is done in the harness (no engine knob): after the engine's own
-iterate_draftmodel_dflash_gen returns the pinned draft-id view, the harness waits for its
-readback event and rewrites positions in place. A replaced token is (t + 1) % 248000, a valid
-id; if it happens to be the target's argmax it is simply accepted (still a valid round cut).
+Draft perturbation is done in the harness (no engine knob), on the ids the draft sampler
+returns (Arms below): replaced rows get distinct valid ids from REPLACE_BASE up that differ from
+every drafted id; if one happens to be the target's argmax it is simply accepted (still a valid
+round cut).
 
 Requirement: for every case, ids(normal) == ids(cap) == ids(wrong0) exactly. For every
 divergent pair a probe re-runs both arms and captures, per module (Python forward calls, in
@@ -24,7 +26,7 @@ first module whose output differs between the arms at the earliest differing pos
 in which (round start, row) each arm computed it.
 
 Subcommands:
-  run   [--arms normal,cap,wrong0,m1] [--cases a,b] [--bench DIR --tiny 3,10] [--no-probe]
+  run   [--arms normal,cap,wrong0[,m1]] [--cases a,b] [--bench DIR --tiny 3,10] [--no-probe]
   oob   partial_o / partial_ml extent vs backing for every BC attention slot configured during
         a short warm run, and the CUDA allocator blocks (with allocation stacks) that lie in
         any out-of-bounds range
@@ -50,8 +52,8 @@ PARITY_PY = "/parity/parity.py"
 TARGET = "/models/qwen38-27b-exl3"
 DRAFT = "/models/dflash2-exl3"
 TRACES = "tiny-math/aime25/aime25--qwen3.8-27b--null--f4fcb374/traces.jsonl"
-WRONG_MOD = 248000
 REQUIRED_EQUAL = ("cap", "wrong0")
+REPORTED = ("m1",)  # probed when divergent (first module, logit margin), never fails the gate
 
 
 def fail(msg):
@@ -67,9 +69,13 @@ def load_module(name, path):
 
 
 def make_server(srv):
+    # prefix_cache=None: the elpis server (9501b) reads args.prefix_cache; the gate must run without persistence
     ns = argparse.Namespace(target=TARGET, draft=DRAFT, model_name=srv.MODEL_NAME,
-                            max_model_len=srv.CONTEXT, cache_tokens=srv.CACHE_TOKENS, cq=3)
-    return srv.Server(ns)
+                            max_model_len=srv.CONTEXT, cache_tokens=srv.CACHE_TOKENS, cq=3, prefix_cache=None)
+    server = srv.Server(ns)
+    if getattr(server, "persist", None) is not None:
+        fail("prefix-cache persistence is active; the invariance gate needs it off")
+    return server
 
 
 def workloads(srv, server, args):
@@ -108,33 +114,71 @@ def workloads(srv, server, args):
 
 # ---------------------------------------------------------------- draft arms
 
+REPLACE_BASE = 247000   # replacement ids: valid (< 248320), chosen per round to differ from every row of the record
+
+
+def perturb_rows(rows, k):
+    """rows: the round's drafted row tokens [anchor, d1, .., dW] (host ints). Returns the new list: rows 1..k kept,
+    rows k+1..W replaced by ids that differ from every original and every other replacement, so a replaced row
+    never repeats a sibling (tree record rule: children of one parent carry distinct tokens) and never equals its
+    old (possibly correct) token. Row 0 (the anchor) is never touched."""
+    used = set(rows)
+    out = list(rows)
+    cand = REPLACE_BASE
+    for r in range(k + 1, len(rows)):
+        while cand in used:
+            cand += 1
+        out[r] = cand
+        used.add(cand)
+        cand += 1
+    return out
+
+
 class Arms:
-    """Replaces gen.iterate_draftmodel_dflash_gen by a wrapper that applies the active arm."""
+    """Perturbs the draft INSIDE draft_model.sample_from_state, i.e. on the tensor the draft sampler returns before
+    iterate_draftmodel_dflash_gen copies it anywhere. On tree engines (ext 9008 + exl3 0006) that tensor is a view
+    of the builder record (gen.tree_out, rows 1..7 at byte 8: generator.iterate_draftmodel_dflash_gen checks
+    new_ids.data_ptr() == tree_out.data_ptr() + 8), so the record, its pinned readback and the drafted ids stay one
+    and the same (the verify path requires drafted ids == record rows 1..7 and tree_round.check_output requires
+    distinct sibling tokens). The forced chain (EXL3_TREE_FORCE_CHAIN=1) runs the same builder in mode 0, so the
+    same hook covers it; engines without the tree get the same perturbation on their own sampler output.
+      cap    rows 1..k kept, k = (3 * round) % 8, rows k+1..7 forced wrong
+      wrong0 rows 1..7 forced wrong (every round commits exactly the target's own token)
+      m1     no draft at all (regular decode)"""
 
     def __init__(self, gen):
         self.gen = gen
-        self.orig = gen.iterate_draftmodel_dflash_gen
+        self.orig_gen = gen.iterate_draftmodel_dflash_gen
+        dm = gen.draft_model
+        self.orig_sample = dm.sample_from_state
         self.arm = "normal"
         self.round = 0
         self.rewritten = 0
-        gen.iterate_draftmodel_dflash_gen = self.wrapped
+        gen.iterate_draftmodel_dflash_gen = self.wrapped_gen
+        dm.sample_from_state = self.wrapped_sample
 
-    def wrapped(self, results):
+    def wrapped_gen(self, results):
         if self.arm == "m1":
             return None
-        out = self.orig(results)
-        if out is None or self.arm == "normal":
-            return out
-        ev = self.gen.draft_ids_ready
-        if ev is not None:
-            ev.synchronize()
-        window = out.shape[-1]
+        return self.orig_gen(results)
+
+    def wrapped_sample(self, *a, **kw):
+        new_ids = self.orig_sample(*a, **kw)
+        if self.arm not in ("cap", "wrong0"):
+            return new_ids
+        import torch
+        window = new_ids.shape[-1] - 1
         k = (3 * self.round) % (window + 1) if self.arm == "cap" else 0
         self.round += 1
-        if k < window:
-            out[:, k:] = (out[:, k:] + 1) % WRONG_MOD
-            self.rewritten += 1
-        return out
+        if k >= window:
+            return new_ids
+        if new_ids.is_cuda:
+            torch.cuda.current_stream(new_ids.device).synchronize()
+        rows = [int(v) for v in new_ids[0].cpu().tolist()]
+        out = perturb_rows(rows, k)
+        new_ids[0].copy_(torch.tensor(out, dtype=new_ids.dtype), non_blocking=False)
+        self.rewritten += 1
+        return new_ids
 
 
 # ---------------------------------------------------------------- per-module capture (probe)
@@ -223,6 +267,15 @@ def generate(server, arms, arm, ids, max_tokens, capture=None, capture_positions
             for e in gen.iterate():
                 if e.get("identifier") == job.identifier and e.get("eos"):
                     final = e
+                if e.get("stage") == "error" and e.get("job") is job:
+                    raise RuntimeError(f"generator reaped the job: {e.get('error')!r}")
+    except BaseException:
+        # leave the generator idle for whatever runs next (the error is re-raised to the caller)
+        try:
+            gen.cancel(job)
+        except Exception:
+            pass
+        raise
     finally:
         if capture is not None:
             capture.disarm()
@@ -311,6 +364,8 @@ def run(args):
     arm_list = args.arms.split(",")
     if arm_list[0] != "normal":
         fail("the first arm must be normal (the reference)")
+    if "m1" in arm_list and getattr(gen, "tree", False):
+        fail("the m1 arm needs EXL3_TREE=0 (the tree verify has no serial decode)")
     os.makedirs(args.out, exist_ok=True)
     result = {"arms": arm_list, "cases": {}, "probes": [], "errors": []}
     ok = True
@@ -325,7 +380,12 @@ def run(args):
                 result["errors"].append({"case": name, "arm": arm, "error": repr(e),
                                          "trace": traceback.format_exc()})
                 print(f"[{name}] {arm}: ERROR {e!r}", flush=True)
-                continue
+                # an arm error fails the gate: record it, write the partial result, stop the payload
+                result["cases"][name] = rec
+                result["pass"] = False
+                with open(os.path.join(args.out, "result.json"), "w") as f:
+                    json.dump(result, f)
+                fail(f"{name}/{arm}: {e!r}")
             r["ids_sha256"] = hashlib.sha256(json.dumps(r["ids"]).encode()).hexdigest()
             rec["arms"][arm] = r
             ref = rec["arms"].get("normal")
@@ -344,7 +404,7 @@ def run(args):
         if args.no_probe:
             continue
         ref = rec["arms"].get("normal")
-        for arm in REQUIRED_EQUAL:
+        for arm in REQUIRED_EQUAL + REPORTED:
             r = rec["arms"].get(arm)
             if ref is None or r is None or r["equal_to_normal"]:
                 continue
@@ -530,7 +590,7 @@ def main():
     sub = ap.add_subparsers(dest="cmd", required=True)
     a = sub.add_parser("run")
     a.add_argument("--out", required=True)
-    a.add_argument("--arms", default="normal,cap,wrong0,m1")
+    a.add_argument("--arms", default="normal,cap,wrong0")
     a.add_argument("--cases", default="")
     a.add_argument("--bench", default="")
     a.add_argument("--tiny", default="3")

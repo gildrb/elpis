@@ -1,0 +1,271 @@
+--- a/exllamav3_ext/attn_verify.cu
++++ b/exllamav3_ext/attn_verify.cu
+@@ -108,6 +108,15 @@
+         : "r"(a[0]), "r"(a[1]), "r"(a[2]), "r"(a[3]), "r"(b0), "r"(b1));
+ }
+ 
++// The same MMA from a zero accumulator (ext 3030): c = A B, a fresh fp32 partial
++__device__ __forceinline__ void mma16816_z(float* c, const uint32_t* a, uint32_t b0, uint32_t b1)
++{
++    asm volatile(
++        "mma.sync.aligned.m16n8k16.row.col.f32.f16.f16.f32 {%0,%1,%2,%3}, {%4,%5,%6,%7}, {%8,%9}, {%10,%10,%10,%10};\n"
++        : "=f"(c[0]), "=f"(c[1]), "=f"(c[2]), "=f"(c[3])
++        : "r"(a[0]), "r"(a[1]), "r"(a[2]), "r"(a[3]), "r"(b0), "r"(b1), "f"(0.f));
++}
++
+ __device__ __forceinline__ void ldsm_x4(uint32_t* r, const void* p)
+ {
+     uint32_t a = (uint32_t) __cvta_generic_to_shared(p);
+@@ -133,6 +142,15 @@
+     return y;
+ }
+ 
++// 2^d for an integer-valued d <= 0 (ext 3030), built exactly from the exponent bits; 0 below the
++// normal range, where ex2.approx.ftz flushes too. The running maxima are integers (floorf of the
++// log2-domain tile max), so every rescale alpha and combine weight is an exact power of two
++__device__ __forceinline__ float pow2i(float d)
++{
++    int e = __float2int_rn(d) + 127;
++    return e > 0 ? __int_as_float(e << 23) : 0.f;
++}
++
+ #define NEG_INF (-CUDART_INF_F)
+ 
+ // Stage one tile (AV_T tokens starting at n0, one page) of K and V words + scales into smem
+@@ -442,7 +460,7 @@
+         }
+         __syncthreads();                                      // (B)
+ 
+-        float alpha[6];
++        float alpha[6], cs[6];
+         #pragma unroll
+         for (int s = 0; s < 6; ++s)
+         {
+@@ -450,13 +468,20 @@
+             float tmax = red_max[r];
+             #pragma unroll
+             for (int w = 1; w < AV_NW; ++w) tmax = fmaxf(tmax, red_max[w * AV_ROWS + r]);
+-            float m_new = fmaxf(m[s], tmax);
++            // Ext 3030: the running max m is an integer (floorf of the log2-domain tile maxima), so the
++            // rescale alpha and the combine weights are exact powers of two. p is taken against the
++            // tile's own max (its top key exactly 1, as stock's), and the tile joins the m-scaled
++            // state through cs = ex2(tmax - m) in (0, 2), one factor per tile
++            float m_new = fmaxf(m[s], floorf(tmax));
+             float m_use = m_new == NEG_INF ? 0.f : m_new;
++            float t_use = tmax == NEG_INF ? 0.f : tmax;
+             // m unchanged (every token of the tile masked or below the running max): alpha is
+-            // exactly 1, so masked tail tiles of a round leave (m, l, acc) bit-identical
+-            alpha[s] = m[s] == NEG_INF ? 0.f : (m_new == m[s] ? 1.f : ex2(m[s] - m_use));
+-            float p0 = x[s][0] == NEG_INF ? 0.f : ex2(x[s][0] - m_use);
+-            float p1 = x[s][1] == NEG_INF ? 0.f : ex2(x[s][1] - m_use);
++            // exactly 1 and a masked tile has cs = 0 and p = 0, so masked tail tiles of a round leave
++            // (m, l, acc) bit-identical
++            alpha[s] = m[s] == NEG_INF ? 0.f : (m_new == m[s] ? 1.f : pow2i(m[s] - m_use));
++            cs[s] = tmax == NEG_INF ? 0.f : ex2(t_use - m_use);
++            float p0 = x[s][0] == NEG_INF ? 0.f : ex2(x[s][0] - t_use);
++            float p1 = x[s][1] == NEG_INF ? 0.f : ex2(x[s][1] - t_use);
+             *reinterpret_cast<uint32_t*>(ps + r * PSTR + warp * 8 + 2 * t) = pack_h2(p0, p1);
+             float ssum = p0 + p1;
+             ssum += __shfl_xor_sync(0xffffffffu, ssum, 1);
+@@ -466,27 +491,22 @@
+         }
+         __syncthreads();                                      // (C)
+ 
++        // Tile sum (ext 3030): the 64 p of a row form one balanced tree, p0 + p1, two lane xors,
++        // then the 8 warp partials pairwise; l alpha is exact, so the fold rounds once
++        static_assert(AV_NW == 8, "the warp-partial tree is written for 8 warps");
+         #pragma unroll
+         for (int s = 0; s < 6; ++s)
+         {
+             int r = 8 * s + gid;
+-            float tsum = red_sum[r];
+-            #pragma unroll
+-            for (int w = 1; w < AV_NW; ++w) tsum += red_sum[w * AV_ROWS + r];
+-            l[s] = l[s] * alpha[s] + tsum;
++            float tsum = ((red_sum[r] + red_sum[AV_ROWS + r]) + (red_sum[2 * AV_ROWS + r] + red_sum[3 * AV_ROWS + r]))
++                       + ((red_sum[4 * AV_ROWS + r] + red_sum[5 * AV_ROWS + r]) + (red_sum[6 * AV_ROWS + r] + red_sum[7 * AV_ROWS + r]));
++            l[s] = fmaf(tsum, cs[s], l[s] * alpha[s]);
+         }
+-        #pragma unroll
+-        for (int i = 0; i < 3; ++i)
+-            #pragma unroll
+-            for (int j = 0; j < 4; ++j)
+-            {
+-                acc[i][j][0] *= alpha[2 * i];
+-                acc[i][j][1] *= alpha[2 * i];
+-                acc[i][j][2] *= alpha[2 * i + 1];
+-                acc[i][j][3] *= alpha[2 * i + 1];
+-            }
+ 
+-        // O += P V: this warp owns dims [32 warp, 32 warp + 32) = scale group `warp`
++        // O = O alpha + cs P V (ext 3030): this warp owns dims [32 warp, 32 warp + 32) = scale group
++        // `warp`; the tile's P V runs in a fresh fp32 accumulator (4 k16 steps from zero) and joins O
++        // by one fma.rn (O alpha exact), so no tensor-core step touches the running O
++        float pv[3][4][4];
+         #pragma unroll
+         for (int kk = 0; kk < AV_T / 16; ++kk)
+         {
+@@ -510,9 +530,23 @@
+                 uint32_t b0 = pack_h2(vv[0][j], vv[1][j]);
+                 uint32_t b1 = pack_h2(vv[2][j], vv[3][j]);
+                 #pragma unroll
+-                for (int i = 0; i < 3; ++i) mma16816(acc[i][j], pa[i], b0, b1);
++                for (int i = 0; i < 3; ++i)
++                {
++                    if (kk == 0) mma16816_z(pv[i][j], pa[i], b0, b1);
++                    else mma16816(pv[i][j], pa[i], b0, b1);
++                }
+             }
+         }
++        #pragma unroll
++        for (int i = 0; i < 3; ++i)
++            #pragma unroll
++            for (int j = 0; j < 4; ++j)
++            {
++                acc[i][j][0] = fmaf(pv[i][j][0], cs[2 * i], acc[i][j][0] * alpha[2 * i]);
++                acc[i][j][1] = fmaf(pv[i][j][1], cs[2 * i], acc[i][j][1] * alpha[2 * i]);
++                acc[i][j][2] = fmaf(pv[i][j][2], cs[2 * i + 1], acc[i][j][2] * alpha[2 * i + 1]);
++                acc[i][j][3] = fmaf(pv[i][j][3], cs[2 * i + 1], acc[i][j][3] * alpha[2 * i + 1]);
++            }
+         }   // pass
+     }
+     cp_wait<0>();
+@@ -565,12 +599,17 @@
+                            tree);
+ }
+ 
+-// Combine: one CTA per (row, kv head, batch), thread = output dim. The live partial slots are merged
++// Combine: one CTA per (row, kv head, batch), thread = output dim. The live partial slots are visited
+ // in slot order 0 .. live - 1 with the exact log-sum-exp weights; slots holding no position the row
+ // sees (m = -inf: every tile of the slot past the row's absolute position) are skipped, so the
+ // merged set is the row's slots 0 .. min(S - 1, q_abs / 64) whatever the round. Thread s < live
+ // stages slot s's (m, l) and then its weight in shared memory, so the per-dimension loop issues
+-// its partial_o loads independently. Then fp16(o) is H32-rotated back (fp32 FMA, fp16 out).
++// its partial_o loads independently. Ext 3030: the slot maxima are integers, so each weight is an
++// exact power of two and v w, l w are exact; the merged slots are summed by the balanced pairwise
++// tree over their merge order (binary counter: block sums of 2^k consecutive merged slots, the
++// partial blocks joined from the last), so a slot's term passes ceil(log2(merged)) adds at most.
++// Then fp16(o) is H32-rotated back as stock's _rot_h32 does it (two k16 MMA steps from zero, fp16
++// out).
+ // GATE (ext 3007, attn_verify_combine_gate): the output gate o *= sigmoid(g) of the interleaved /
+ // full-gate attention is applied to the stored fp16 o exactly as mul_sigmoid_kernel_h does it (the
+ // same half2 pair (2i, 2i + 1), the same half2 intrinsics), instead of a separate launch
+@@ -588,7 +627,9 @@
+ template <bool GATE>
+ __device__ __forceinline__ void combine_body(AV_COMBINE_ARGS, const half* __restrict__ gate)
+ {
++    constexpr int MERGE_LV = 9;                               // binary-counter levels: live <= AV_HD = 2^8
+     __shared__ half oh[AV_HD];
++    __shared__ float sy[AV_HD];                               // the back-rotated row, fp32
+     __shared__ float sw[AV_HD];                               // slot s: m, then its weight (-1: skipped)
+     __shared__ float sl[AV_HD];                               // slot s: l
+     const int r = blockIdx.x;
+@@ -616,25 +657,84 @@
+     for (int s = 0; s < live; ++s) mmax = fmaxf(mmax, sw[s]);
+     float m_use = mmax == NEG_INF ? 0.f : mmax;
+     __syncthreads();
+-    if (d < live) sw[d] = sw[d] == NEG_INF ? -1.f : ex2(sw[d] - m_use);
++    if (d < live) sw[d] = sw[d] == NEG_INF ? -1.f : pow2i(sw[d] - m_use);
+     __syncthreads();
+-    float acc = 0.f, lsum = 0.f;
++    float ta[MERGE_LV], tl[MERGE_LV];                        // block sums of the binary counter
++    int n = 0;                                                // slots merged so far
+     #pragma unroll 4
+     for (int s = 0; s < live; ++s)
+     {
+         float v = partial_o[(base + (size_t) s * AV_ROWS) * AV_HD + d];   // slot s < live: stored this launch
+         float w = sw[s];
+         if (w < 0.f) continue;
+-        acc = fmaf(v, w, acc);
+-        lsum = fmaf(sl[s], w, lsum);
++        float a = v * w;                                      // exact: w is a power of two
++        float c = sl[s] * w;
++        bool carry = true;                                    // n's trailing ones: blocks to join
++        #pragma unroll
++        for (int k = 0; k < MERGE_LV; ++k)
++        {
++            const bool full = ((n >> k) & 1) != 0;
++            if (carry && full)
++            {
++                a = ta[k] + a;                                // left block + right block
++                c = tl[k] + c;
++            }
++            if (carry && !full)
++            {
++                ta[k] = a;
++                tl[k] = c;
++            }
++            carry = carry && full;
++        }
++        ++n;
+     }
++    float acc = 0.f, lsum = 0.f;
++    #pragma unroll
++    for (int k = 0; k < MERGE_LV; ++k)
++        if ((n >> k) & 1)
++        {
++            acc = ta[k] + acc;                                // earlier (left) blocks join last
++            lsum = tl[k] + lsum;
++        }
+     oh[d] = __float2half_rn(acc / (lsum == 0.f ? 1.f : lsum));
+     __syncthreads();
+-    const int g0 = d & ~31;
+-    const int jn = d & 31;
+-    float y = 0.f;
+-    #pragma unroll
+-    for (int i = 0; i < 32; ++i) y = fmaf(__half2float(oh[g0 + i]), __half2float(h32[i * 32 + jn]), y);
++    {
++        // Warp w rotates the 32-dim group 32 w: A row 0 = oh[32 w .. 32 w + 31] (rows 1..15 zero),
++        // B = H32 [k][n]; c0, c1 of the gid-0 lanes hold row 0, n = 8 nt + 2 t, + 1
++        const int lane = d & 31;
++        const int gid = lane >> 2;
++        const int t = lane & 3;
++        const int g0 = d & ~31;
++        uint32_t a[2][4];
++        #pragma unroll
++        for (int ks = 0; ks < 2; ++ks)
++        {
++            a[ks][0] = gid == 0 ? *reinterpret_cast<const uint32_t*>(oh + g0 + 16 * ks + 2 * t) : 0u;
++            a[ks][1] = 0u;
++            a[ks][2] = gid == 0 ? *reinterpret_cast<const uint32_t*>(oh + g0 + 16 * ks + 8 + 2 * t) : 0u;
++            a[ks][3] = 0u;
++        }
++        #pragma unroll
++        for (int nt = 0; nt < 4; ++nt)
++        {
++            uint32_t hb[2][2];
++            #pragma unroll
++            for (int ks = 0; ks < 2; ++ks)
++                #pragma unroll
++                for (int hh = 0; hh < 2; ++hh)
++                {
++                    int k = 16 * ks + 8 * hh + 2 * t;
++                    half2 hv = __halves2half2(h32[k * 32 + 8 * nt + gid], h32[(k + 1) * 32 + 8 * nt + gid]);
++                    hb[ks][hh] = *reinterpret_cast<uint32_t*>(&hv);
++                }
++            float c[4];
++            mma16816_z(c, a[0], hb[0][0], hb[0][1]);
++            mma16816(c, a[1], hb[1][0], hb[1][1]);
++            if (gid == 0) *reinterpret_cast<float2*>(sy + g0 + 8 * nt + 2 * t) = make_float2(c[0], c[1]);
++        }
++    }
++    __syncwarp();                                             // the warp's row 0 staged in sy
++    const float y = sy[d];
+     out[((size_t) (b * q_len + q_pos) * n_q_heads + kvh * group + hl) * AV_HD + d] = __float2half_rn(y);
+     if constexpr (GATE)
+     {
+--- a/exllamav3_ext/attn_verify.cuh
++++ b/exllamav3_ext/attn_verify.cuh
+@@ -12,6 +12,12 @@
+ // a row sees leaves that row's (m, l, acc) bit-identical, so the tiles past the row's position
+ // (other rows of the round, round tails) do not change it.
+ // Combine kernel: exact log-sum-exp merge of the live slots in slot order, H32 back-rotation.
++// Rounding structure (ext 3030; bend/err_attn_dec*.bend proves every output's rounding path no
++// longer than stock 355c6ee's decode attention at every L): the running max is an integer (floorf
++// of the log2-domain tile max), so every rescale alpha and combine weight is an exact power of
++// two; a tile's 64 p are summed by one balanced tree; its P V runs in a fresh fp32 MMA accumulator
++// folded into O by one fma.rn; the combine sums the merged slots by a balanced pairwise tree; the
++// back-rotation is stock's two k16 MMA steps.
+ // A verify row's result depends only on its absolute position, S and the cache contents: its
+ // tiles, per-slot tile lists, visible positions and combine order do not depend on the round's
+ // start or row count (bend/attn_stride_laws.bend: attend_once, row_invariant, slot_once).

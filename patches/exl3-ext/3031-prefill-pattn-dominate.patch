@@ -1,0 +1,453 @@
+--- a/exllamav3_ext/bindings.cpp
++++ b/exllamav3_ext/bindings.cpp
+@@ -268,7 +268,10 @@
+         .def(py::init<const at::Tensor&, const at::Tensor&, const at::Tensor&, const at::Tensor&>(),
+              py::arg("qk"), py::arg("qv"), py::arg("sk"), py::arg("sv"));
+     m.def("kv_compact_rows", &kv_compact_rows, py::arg("layer_jobs"), py::arg("moves"), py::arg("device_index"));
+-    m.def("pattn_prefill", &pattn_prefill, "pattn_prefill");
++    m.def("pattn_prefill", &pattn_prefill, "pattn_prefill",
++          py::arg("q"), py::arg("k16"), py::arg("v16"), py::arg("block_table"), py::arg("cache_seqlens"), py::arg("out"),
++          py::arg("kv_append_len"), py::arg("scale_log2"), py::arg("mode"), py::arg("park") = py::none());
++    m.def("pattn_scratch_numel", &pattn_scratch_numel, "pattn_scratch_numel");
+ 
+     m.def("count_inf_nan", &count_inf_nan, "count_inf_nan");
+     m.def("histogram", &histogram, "histogram");
+--- a/exllamav3_ext/pattn.cu
++++ b/exllamav3_ext/pattn.cu
+@@ -1,6 +1,7 @@
+ #include "pattn.cuh"
+ #include "pattn_kernel.cuh"
+ #include "pattn8_kernel.cuh"
++#include <ATen/ATen.h>
+ #include <c10/cuda/CUDAGuard.h>
+ #include <ATen/cuda/CUDAContext.h>
+ #include <cstdlib>
+@@ -19,6 +20,41 @@
+     return false;
+ }
+ 
++// Ext 3031: the chain scratch has one slot per SM id (%smid < %nsmid); the kernels run one CTA per SM (checked below),
++// so a running CTA owns its slot
++__global__ void pattn_nsmid_kernel(int* out)
++{
++    int n;
++    asm volatile("mov.u32 %0, %%nsmid;" : "=r"(n));
++    *out = n;
++}
++
++static int pattn_slots(int device)
++{
++    static int slots[64] = {};
++    TORCH_CHECK(device >= 0 && device < 64, "pattn: device index");
++    if (!slots[device])
++    {
++        int* d;
++        int n = 0;
++        cuda_check(cudaMalloc(&d, sizeof(int)));
++        pattn_nsmid_kernel<<<1, 1>>>(d);
++        cuda_check(cudaPeekAtLastError());
++        cuda_check(cudaMemcpy(&n, d, sizeof(int), cudaMemcpyDeviceToHost));
++        cuda_check(cudaFree(d));
++        TORCH_CHECK(n > 0, "pattn: %nsmid probe");
++        slots[device] = n;
++    }
++    return slots[device];
++}
++
++int64_t pattn_scratch_numel()
++{
++    int device;
++    cuda_check(cudaGetDevice(&device));
++    return (int64_t) pattn_slots(device) * PA_SLOT_F4 * 4;
++}
++
+ void pattn_prefill
+ (
+     const at::Tensor& q,
+@@ -29,7 +65,8 @@
+     const at::Tensor& out,
+     int kv_append_len,
+     float scale_log2,
+-    int mode
++    int mode,
++    const c10::optional<at::Tensor>& park
+ )
+ {
+     const at::cuda::OptionalCUDAGuard device_guard(q.device());
+@@ -50,8 +87,26 @@
+     {
+         cuda_check(cudaFuncSetAttribute(pattn_detail::pattn_kernel<false>, cudaFuncAttributeMaxDynamicSharedMemorySize, PA_SMEM));
+         cuda_check(cudaFuncSetAttribute(pattn_detail::pattn8_kernel<false>, cudaFuncAttributeMaxDynamicSharedMemorySize, P8_SMEM));
++        // Ext 3031: a CTA owns the scratch slot of its SM only while no second CTA can be resident there
++        int b6 = 0, b8 = 0;
++        cuda_check(cudaOccupancyMaxActiveBlocksPerMultiprocessor(&b6, pattn_detail::pattn_kernel<false>, PA_THREADS, PA_SMEM));
++        cuda_check(cudaOccupancyMaxActiveBlocksPerMultiprocessor(&b8, pattn_detail::pattn8_kernel<false>, P8_THREADS, P8_SMEM));
++        TORCH_CHECK(b6 == 1 && b8 == 1, "pattn: the chain scratch needs one CTA per SM");
+         init = true;
+     }
++    // Ext 3031: the chain scratch, given (a float32 slice the caller carved) or allocated here for this call
++    const int64_t need = (int64_t) pattn_slots(q.get_device()) * PA_SLOT_F4 * 4;
++    at::Tensor scratch;
++    if (park.has_value())
++    {
++        scratch = park.value();
++        TORCH_CHECK(scratch.is_cuda() && scratch.get_device() == q.get_device() && scratch.dtype() == at::kFloat &&
++                    scratch.is_contiguous() && scratch.numel() >= need && (reinterpret_cast<uintptr_t>(scratch.data_ptr()) & 15) == 0,
++                    "pattn: park must be a contiguous, 16-byte aligned float32 CUDA tensor of at least pattn_scratch_numel() elements");
++    }
++    else
++        scratch = at::empty({need}, q.options().dtype(at::kFloat));
++    float4* pk = reinterpret_cast<float4*>(scratch.data_ptr());
+     if (pattn8_enabled())
+     {
+         const int nqc = (q_len + P8_NB * PA_BQ - 1) / (P8_NB * PA_BQ);
+@@ -60,7 +115,7 @@
+         pattn_detail::pattn8_kernel<false><<<grid, P8_THREADS, P8_SMEM, stream>>>(
+             (const half*) q.data_ptr(), (const half*) k16.data_ptr(), (const half*) v16.data_ptr(),
+             (const int*) block_table.data_ptr(), (const int*) cache_seqlens.data_ptr(), (half*) out.data_ptr(),
+-            (int) block_table.size(1), q_len, kv_append_len, n_q_heads, n_kv_heads, scale_log2);
++            (int) block_table.size(1), q_len, kv_append_len, n_q_heads, n_kv_heads, scale_log2, pk);
+         cuda_check(cudaPeekAtLastError());
+         return;
+     }
+@@ -68,6 +123,6 @@
+     pattn_detail::pattn_kernel<false><<<grid, PA_THREADS, PA_SMEM, stream>>>(
+         (const half*) q.data_ptr(), (const half*) k16.data_ptr(), (const half*) v16.data_ptr(),
+         (const int*) block_table.data_ptr(), (const int*) cache_seqlens.data_ptr(), (half*) out.data_ptr(),
+-        (int) block_table.size(1), q_len, kv_append_len, n_q_heads, n_kv_heads, scale_log2);
++        (int) block_table.size(1), q_len, kv_append_len, n_q_heads, n_kv_heads, scale_log2, pk);
+     cuda_check(cudaPeekAtLastError());
+ }
+--- a/exllamav3_ext/pattn.cuh
++++ b/exllamav3_ext/pattn.cuh
+@@ -5,11 +5,13 @@
+ // 6 q heads per kv head, q_len >= 1. See pattn_kernel.cuh.
+ 
+ #include <ATen/Tensor.h>
++#include <c10/util/Optional.h>
+ 
+ // q (bsz, q_len, n_q_heads, 256) fp16; k16 / v16 (pages, 256, n_kv_heads, 256) fp16; block_table (bsz, pages)
+ // int32; cache_seqlens (bsz) int32 (keys before the chunk); out like q. mode must be 0 (ext 3022: stock's
+ // precision class, see pattn_kernel.cuh; the f16-accumulating mode 1 was removed). scale_log2 = softmax
+-// scale * log2(e), applied to the fp32 scores
++// scale * log2(e), applied to the fp32 scores. park (ext 3031): the chain scratch, a contiguous float32 CUDA
++// tensor of at least pattn_scratch_numel() elements; None allocates it for the call
+ void pattn_prefill
+ (
+     const at::Tensor& q,
+@@ -20,5 +22,9 @@
+     const at::Tensor& out,
+     int kv_append_len,
+     float scale_log2,
+-    int mode
++    int mode,
++    const c10::optional<at::Tensor>& park
+ );
++
++// Ext 3031: float32 elements of the chain scratch on the current device (one slot per SM id)
++int64_t pattn_scratch_numel();
+--- a/exllamav3_ext/pattn8_kernel.cuh
++++ b/exllamav3_ext/pattn8_kernel.cuh
+@@ -12,6 +12,8 @@
+ // A warp past its own last tile (the CTA's earlier blocks need up to 2 fewer tiles) only joins the
+ // barriers; a warp whose 16 positions all lie past q_len does no work and stores nothing.
+ // K / V tiles are loaded once per CTA and shared by the 8 warps (3010: 6).
++// Ext 3031: the 3010 chains (pattn_kernel.cuh header) with the same per-warp text: the CTA's 64 positions are stock's
++// 64-row block, so every warp has 3010's chain length; a warp parks only at its own active tiles.
+ #include "pattn_kernel.cuh"
+ 
+ #define P8_NW 8
+@@ -38,7 +40,8 @@
+     const int* __restrict__ block_table,   // (bsz, num_pages_per_seq)
+     const int* __restrict__ cache_seqlens, // (bsz) keys before this chunk
+     half* __restrict__ out,                // like q
+-    int num_pages_per_seq, int q_len, int kv_append_len, int n_q_heads, int n_kv_heads, float scale_log2)
++    int num_pages_per_seq, int q_len, int kv_append_len, int n_q_heads, int n_kv_heads, float scale_log2,
++    float4* __restrict__ park)             // Ext 3031: chain scratch, PA_SLOT_F4 float4 per SM slot
+ {
+     extern __shared__ __align__(16) unsigned char smem[];
+     half* qs = (half*) (smem + P8_Q_OFF);
+@@ -65,6 +68,9 @@
+     // stock's 64-row prefill block holding this warp's rows (= the CTA's 64 positions, c0 = p0 & ~63)
+     const int q_abs64 = total - q_len + (p0 & ~63);
+     const int n_full = max(((q_abs64 + 1) / PA_BN) * PA_BN, 0);
++    // Ext 3031: chain length in tiles, ceil((q_abs64 + 1) / 256), and this CTA's scratch slot (one CTA per SM)
++    const int ch_tiles = (q_abs64 + 256) / 256;
++    const int slot = sm_slot();
+ 
+     // one 32-key x 256-dim fp16 tile of K or V (512 B per key: 32 chunks of 16 B); keys >= total zero-filled
+     auto issue = [&] (const half* src, half* dst, int it)
+@@ -123,6 +129,8 @@
+ 
+         if (act)
+         {
++            if (it > 0 && it % ch_tiles == 0) park_chain(park, slot, it / ch_tiles - 1, warp, lane, acc, m, l);
++
+             // S = Q K^T (raw fp32 sums)
+             float sc[4][4];
+             #pragma unroll
+@@ -202,17 +210,17 @@
+                 float m_new = f_max(m[r], mx);
+                 float m_use = is_ninf(m_new) ? 0.f : m_new;
+                 alpha[r] = is_ninf(m[r]) ? 0.f : ex2(f_sub(m[r], m_use));
+-                float sum = 0.f;
+                 #pragma unroll
+                 for (int nt = 0; nt < 4; ++nt)
+                     #pragma unroll
+                     for (int e = 0; e < 2; ++e)
+                     {
+                         float x = sc[nt][2 * r + e];
+-                        float p = ex2(interior ? f_fma(x, scale_log2, f_neg(m_use)) : f_sub(x, m_use));   // -inf -> 0
+-                        sc[nt][2 * r + e] = p;
+-                        sum = f_add(sum, p);
+-                    }
++                        sc[nt][2 * r + e] = ex2(interior ? f_fma(x, scale_log2, f_neg(m_use)) : f_sub(x, m_use));   // -inf -> 0
++                    }
++                // Ext 3031: the thread's 8 p as a balanced tree (with the final quad reduction: depth 5, stock's tl.sum)
++                const float sum = f_add(f_add(f_add(sc[0][2 * r], sc[0][2 * r + 1]), f_add(sc[1][2 * r], sc[1][2 * r + 1])),
++                                        f_add(f_add(sc[2][2 * r], sc[2][2 * r + 1]), f_add(sc[3][2 * r], sc[3][2 * r + 1])));
+                 l[r] = f_fma(l[r], alpha[r], sum);
+                 m[r] = m_new;
+             }
+@@ -277,6 +285,14 @@
+     cp_wait0();
+     if (ntiles == 0) return;                          // all 16 positions past q_len: nothing to store
+ 
++    // Ext 3031: more than one chain: stock's split combine of the parked chains and the live one
++    const int nch = (ntiles + ch_tiles - 1) / ch_tiles;
++    if (nch > 1)
++    {
++        const int kr[2] = {row_chains(q_abs_r0, ch_tiles, nch), row_chains(q_abs_r1, ch_tiles, nch)};
++        pattn_chain_combine(park, slot, nch, kr, warp, lane, acc, m, l);
++    }
++
+     // out = acc / l, fp16
+     #pragma unroll
+     for (int r = 0; r < 2; ++r)
+--- a/exllamav3_ext/pattn_kernel.cuh
++++ b/exllamav3_ext/pattn_kernel.cuh
+@@ -14,6 +14,15 @@
+ // the tensor core's alignment truncates each tile's products against O's exponent; here every tile's P V
+ // starts from a zero C and joins O with one IEEE RN fma (acc = fma.rn(acc, alpha, tile)).
+ // The F16 = true branches (fp16-accumulated spans) are dead code: pattn.cu never launches them.
++// Ext 3031: two more points make every output's worst-case rounding path no longer than stock's, for every
++// row and context (bend/err_pfix_laws.bend). (1) A thread sums its 8 p of a tile as a balanced tree (depth 3,
++// plus the final quad reduction: depth 5, stock's tl.sum). (2) A row's keys run as chains of E = ceil((q_abs64
++// + 1) / 256) tiles from key 0 (q_abs64: the absolute start of stock's 64-row block, so E is stock's span for
++// 8 splits of the block's smallest key range, and no stock split count (1 .. 8) has shorter chains): each
++// chain is its own online softmax (O, m, l from zero, as one of stock's split programs), parked in fp32 in a
++// per-SM scratch slot at its end, and the epilogue combines them as stock's split combine does (w = exp2(m_c
++// - max m), O and l folded with fma.rn), summed as pairs plus a sequential tail of 3 (pattn_chain_fold).
++// E depends only on the block's absolute start, so a row's arithmetic is the same in every chunking.
+ #include <cuda_fp16.h>
+ #include <cuda_runtime.h>
+ #include <stdint.h>
+@@ -30,6 +39,14 @@
+ #define PA_K_OFF (PA_Q_OFF + PA_G * PA_BQ * PA_HD * 2)      // [32][256] fp16, swizzled
+ #define PA_V_OFF (PA_K_OFF + PA_BN * PA_HD * 2)
+ #define PA_SMEM (PA_V_OFF + PA_BN * PA_HD * 2)
++// Ext 3031 chains: a row of n <= 8 E + 2 tiles (n <= ceil((q_abs64 + 64) / 32)) has at most 10 chains, all parked
++// (the live one at the epilogue). Scratch slot of one SM (the kernels run one CTA per SM: shared memory, checked on
++// the host): per chain, per warp (8 for pattn8, 6 used by pattn), 33 float4 per lane: acc[j][0..3] for j < 32, then
++// (m0, m1, l0, l1)
++#define PA_MAXCH 10
++#define PA_PARK_W 8
++#define PA_PARK_Q 33
++#define PA_SLOT_F4 (PA_MAXCH * PA_PARK_W * PA_PARK_Q * 32)
+ 
+ namespace pattn_detail {
+ 
+@@ -109,6 +126,108 @@
+     return *reinterpret_cast<uint32_t*>(&h);
+ }
+ 
++__device__ __forceinline__ int sm_slot() { int s; asm volatile("mov.u32 %0, %%smid;" : "=r"(s)); return s; }
++
++// Ext 3031: float4 q of (chain c, warp, lane) in an SM's scratch slot
++__device__ __forceinline__ float4* park_at(float4* park, int slot, int c, int warp, int lane, int q)
++{
++    return park + (size_t) slot * PA_SLOT_F4 + (((size_t) c * PA_PARK_W + warp) * PA_PARK_Q + q) * 32 + lane;
++}
++
++// Ext 3031: chain c of this warp ends; park its O, m, l and restart the online softmax from zero
++__device__ __forceinline__ void park_chain(float4* park, int slot, int c, int warp, int lane, float (&acc)[32][4],
++                                           float (&m)[2], float (&l)[2])
++{
++    #pragma unroll
++    for (int j = 0; j < 32; ++j)
++    {
++        *park_at(park, slot, c, warp, lane, j) = make_float4(acc[j][0], acc[j][1], acc[j][2], acc[j][3]);
++        #pragma unroll
++        for (int e = 0; e < 4; ++e) acc[j][e] = 0.f;
++    }
++    *park_at(park, slot, c, warp, lane, 32) = make_float4(m[0], m[1], l[0], l[1]);
++    m[0] = -INFINITY; m[1] = -INFINITY; l[0] = 0.f; l[1] = 0.f;
++}
++
++// Ext 3031: chain weight of both rows of chain c: (m_c == -inf) ? 0 : exp2(m_c - m_safe), stock's combine weight
++__device__ __forceinline__ void chain_w(const float4& ml, const float (&ms)[2], float (&w)[2])
++{
++    w[0] = is_ninf(ml.x) ? 0.f : ex2(f_sub(ml.x, ms[0]));
++    w[1] = is_ninf(ml.y) ? 0.f : ex2(f_sub(ml.y, ms[1]));
++}
++
++// Ext 3031: one step of a row's chain sum over its K chains (K = ceil(n / E) for the row's n visible tiles; the
++// warp's later chains are all-masked for this row: w = 0 and x = 0, folded exactly as tail steps). The sum of
++// x_c * w_c is formed as pairs fma(x_c, w_c, x_{c+1} * w_{c+1}) over the first B = (K > 4 ? K - 3 : 1) chains
++// (B = 1: x_0 * w_0), added in chain order, then the last K - B chains folded by fma in chain order. A step takes the
++// even chain c and, if it exists for the row (c + 1 < K), chain c + 1; v is the running sum (ignored at c = 0).
++__device__ __forceinline__ void chain_step(int c, int B, int K, float& v, float x0, float w0, float x1, float w1)
++{
++    if (c >= B)
++    {
++        v = f_fma(x0, w0, v);
++        if (c + 1 < K) v = f_fma(x1, w1, v);
++        return;
++    }
++    if (c + 1 < B)
++    {
++        const float pr = f_fma(x0, w0, f_mul(x1, w1));
++        v = c == 0 ? pr : f_add(v, pr);
++        return;
++    }
++    const float pr = f_mul(x0, w0);
++    v = c == 0 ? pr : f_add(v, pr);
++    if (c + 1 < K) v = f_fma(x1, w1, v);
++}
++
++// Ext 3031: the epilogue's combine of the warp's nch >= 2 chains, as stock's _paged_attn_prefill_combine_kernel: the
++// live chain is parked as chain nch - 1, m_safe = max over the chains (0 if -inf), every chain weighted by chain_w and
++// summed by chain_step with the pairing of each row's own chain count kr[r] (rows gid, gid + 8); acc and the
++// per-thread l partials become the sums (l is quad-reduced afterwards, as for one chain)
++__device__ __forceinline__ void pattn_chain_combine(float4* park, int slot, int nch, const int (&kr)[2], int warp, int lane,
++                                                    float (&acc)[32][4], float (&m)[2], float (&l)[2])
++{
++    park_chain(park, slot, nch - 1, warp, lane, acc, m, l);
++    float ms[2] = {-INFINITY, -INFINITY};
++    #pragma unroll 1
++    for (int c = 0; c < nch; ++c)
++    {
++        const float4 ml = *park_at(park, slot, c, warp, lane, 32);
++        ms[0] = f_max(ms[0], ml.x); ms[1] = f_max(ms[1], ml.y);
++    }
++    ms[0] = is_ninf(ms[0]) ? 0.f : ms[0];
++    ms[1] = is_ninf(ms[1]) ? 0.f : ms[1];
++    const int B0 = kr[0] > 4 ? kr[0] - 3 : 1, B1 = kr[1] > 4 ? kr[1] - 3 : 1;
++    #pragma unroll 1
++    for (int c = 0; c < nch; c += 2)
++    {
++        const bool two = c + 1 < nch;
++        const float4 zero = make_float4(0.f, 0.f, 0.f, 0.f);
++        const float4 ml0 = *park_at(park, slot, c, warp, lane, 32);
++        const float4 ml1 = two ? *park_at(park, slot, c + 1, warp, lane, 32) : zero;
++        float w0[2], w1[2];
++        chain_w(ml0, ms, w0);
++        chain_w(ml1, ms, w1);
++        chain_step(c, B0, kr[0], l[0], ml0.z, w0[0], ml1.z, w1[0]);
++        chain_step(c, B1, kr[1], l[1], ml0.w, w0[1], ml1.w, w1[1]);
++        #pragma unroll
++        for (int j = 0; j < 32; ++j)
++        {
++            const float4 x0 = *park_at(park, slot, c, warp, lane, j);
++            const float4 x1 = two ? *park_at(park, slot, c + 1, warp, lane, j) : zero;
++            chain_step(c, B0, kr[0], acc[j][0], x0.x, w0[0], x1.x, w1[0]);
++            chain_step(c, B0, kr[0], acc[j][1], x0.y, w0[0], x1.y, w1[0]);
++            chain_step(c, B1, kr[1], acc[j][2], x0.z, w0[1], x1.z, w1[1]);
++            chain_step(c, B1, kr[1], acc[j][3], x0.w, w0[1], x1.w, w1[1]);
++        }
++    }
++}
++
++// Ext 3031: a row's own chain count, ceil((q_abs / 32 + 1) / E) tiles' worth, at most the warp's nch
++__device__ __forceinline__ int row_chains(int q_abs, int ch_tiles, int nch)
++{
++    return min((q_abs / PA_BN + ch_tiles) / ch_tiles, nch);
++}
+ 
+ template <bool F16>
+ __global__ void __launch_bounds__(PA_THREADS, 1) pattn_kernel(
+@@ -118,7 +237,8 @@
+     const int* __restrict__ block_table,   // (bsz, num_pages_per_seq)
+     const int* __restrict__ cache_seqlens, // (bsz): keys before the chunk
+     half* __restrict__ out,                // like q
+-    int num_pages_per_seq, int q_len, int kv_append_len, int n_q_heads, int n_kv_heads, float scale_log2)
++    int num_pages_per_seq, int q_len, int kv_append_len, int n_q_heads, int n_kv_heads, float scale_log2,
++    float4* __restrict__ park)             // Ext 3031: chain scratch, PA_SLOT_F4 float4 per SM slot
+ {
+     extern __shared__ __align__(16) unsigned char smem[];
+     half* qs = (half*) (smem + PA_Q_OFF);
+@@ -136,6 +256,9 @@
+     // stock's 64-row prefill block holding this CTA: its maskless loop covers the keys below n_full
+     const int q_abs64 = total - q_len + (p0 & ~63);
+     const int n_full = max(((q_abs64 + 1) / PA_BN) * PA_BN, 0);
++    // Ext 3031: chain length in tiles, ceil((q_abs64 + 1) / 256), and this CTA's scratch slot (one CTA per SM)
++    const int ch_tiles = (q_abs64 + 256) / 256;
++    const int slot = sm_slot();
+     const int* bt = block_table + (size_t) b * num_pages_per_seq;
+ 
+     // one 32-key x 256-dim fp16 tile of K or V (512 B per key: 32 chunks of 16 B); keys >= total zero-filled
+@@ -188,6 +311,7 @@
+         asm volatile("cp.async.wait_group 1;\n" ::);   // K(it) landed (V(it) may be in flight)
+         __syncthreads();                              // (A) K(it) visible; qs stored
+         const int n0 = it * PA_BN;
++        if (it > 0 && it % ch_tiles == 0) park_chain(park, slot, it / ch_tiles - 1, warp, lane, acc, m, l);
+ 
+         // S = Q K^T (raw fp32 sums)
+         float sc[4][4];
+@@ -269,17 +393,17 @@
+             float m_new = f_max(m[r], mx);
+             float m_use = is_ninf(m_new) ? 0.f : m_new;
+             alpha[r] = is_ninf(m[r]) ? 0.f : ex2(f_sub(m[r], m_use));
+-            float sum = 0.f;
+             #pragma unroll
+             for (int nt = 0; nt < 4; ++nt)
+                 #pragma unroll
+                 for (int e = 0; e < 2; ++e)
+                 {
+                     float x = sc[nt][2 * r + e];
+-                    float p = ex2(interior ? f_fma(x, scale_log2, f_neg(m_use)) : f_sub(x, m_use));   // -inf -> 0
+-                    sc[nt][2 * r + e] = p;
+-                    sum = f_add(sum, p);
++                    sc[nt][2 * r + e] = ex2(interior ? f_fma(x, scale_log2, f_neg(m_use)) : f_sub(x, m_use));   // -inf -> 0
+                 }
++            // Ext 3031: the thread's 8 p as a balanced tree (with the final quad reduction: depth 5, stock's tl.sum)
++            const float sum = f_add(f_add(f_add(sc[0][2 * r], sc[0][2 * r + 1]), f_add(sc[1][2 * r], sc[1][2 * r + 1])),
++                                    f_add(f_add(sc[2][2 * r], sc[2][2 * r + 1]), f_add(sc[3][2 * r], sc[3][2 * r + 1])));
+             l[r] = f_fma(l[r], alpha[r], sum);
+             m[r] = m_new;
+         }
+@@ -340,6 +464,14 @@
+     }
+     cp_wait0();
+ 
++    // Ext 3031: more than one chain: stock's split combine of the parked chains and the live one
++    const int nch = (ntiles + ch_tiles - 1) / ch_tiles;
++    if (nch > 1)
++    {
++        const int kr[2] = {row_chains(q_abs_r0, ch_tiles, nch), row_chains(q_abs_r1, ch_tiles, nch)};
++        pattn_chain_combine(park, slot, nch, kr, warp, lane, acc, m, l);
++    }
++
+     // out = acc / l, fp16
+     #pragma unroll
+     for (int r = 0; r < 2; ++r)
+--- a/modules/attention_fn/triton_paged.py
++++ b/modules/attention_fn/triton_paged.py
+@@ -2271,8 +2271,16 @@
+                     and q_len >= _pattn_min_q and window_left < 0 and window_right < 0 and softcap == 0.0
+                     and not has_sinks):
+                 o = out if out.is_contiguous() else torch.empty_like(q)
++                # Ext 3031: pattn's chain scratch (one slot per SM) lives in the staging scratch's power-of-two tail
++                # when that tail holds it (as for every job of 1025 .. 1056 pages, the served cache's largest, whose
++                # 2048-page staging leaves the card the least headroom); otherwise the extension allocates it
++                park = None
++                need = ext.pattn_scratch_numel() * 4
++                used = bsz * npps_w * kd[0].numel() * 2
++                if kd.numel() * 2 - used >= need:
++                    park = kd.view(-1).view(torch.uint8)[used:used + need].view(torch.float32)
+                 ext.pattn_prefill(q.contiguous(), kd, vd, block_table, cache_seqlens.to(torch.int32), o,
+-                                  kv_append_len, float(softmax_scale) * 1.4426950408889634, 0)
++                                  kv_append_len, float(softmax_scale) * 1.4426950408889634, 0, park)
+                 if o is not out:
+                     out.copy_(o)
+                 return out

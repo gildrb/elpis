@@ -1,16 +1,40 @@
-# elpis: Lossless greedy speculative decoding for 4-bit Qwen3.8-27B on one RTX 3090, with the acceptance logic proven in Bend
+# elpis: Lossless greedy speculative decoding for 4-bit Qwen3.8-27B on one RTX 3090, proven in Bend
 
-**EXL3 4.00 bpw · DFlash2 + 8-row token tree · 262,144 context · one RTX 3090 at 350 W, quiet fans · the draft never changes the output (acceptance proved in Bend).**
+**EXL3 4.00 bpw · DFlash2 + 8-row token tree · 262,144 context · one RTX 3090 at 350 W, quiet fans · the draft never changes the output, and no kernel is less accurate than stock ExLlamaV3: both proven in Bend and rechecked by its Lean-proven kernel (`bend PROOF.bend --verdict`).**
 
-elpis targets accurate serving; #76/#77 are not precision-qualified ([gate](docs/benchmarks.md#9-segment-14-the-precision-bar-exl3-native-prefill-ttft-v1-350-w-2026-09-30)). Its speed-first sibling is [elpis-fast](https://github.com/gildrb/elpis-fast): same model, same benchmarks, reduced-precision prefill.
+"Lossless" has one exact meaning here: [What lossless means](#what-lossless-means). elpis is the research build. Its speed-first sibling is [elpis-fast](https://github.com/gildrb/elpis-fast): same model, same benchmarks, reduced-precision prefill, no losslessness claim.
 
 | | elpis (this repo) | elpis-fast |
 |---|---|---|
-| Rule (target) | every speedup must be Bend-proven to keep the output bit for bit, or measured at least as accurate as the stock kernel it replaces; never less precise than stock ExLlamaV3; #76/#77 currently violate this bar | fastest serving whose quality is measured |
-| Speculative decoding | the draft never changes the output: Bend proof + bitwise tests | same |
-| Prefill arithmetic | fp32 sums in prefill attention (3022 v4); prefill GEMMs use stock's own scheme (fp16 partials per 32-wide K slice, fp32 adds), bit-exact with stock; no int8 | int8 Q·Kᵀ and fp16 P·V sums; outputs can differ from full-precision prefill |
-| Evidence | #76/#77 prefill fails the served-exact gate in 5/16 cells ([details](docs/benchmarks.md#9-segment-14-the-precision-bar-exl3-native-prefill-ttft-v1-350-w-2026-09-30)); decode error ≤ stock on every measured op; draft on/off byte-identity 90/90 | teacher-forced KL within exact-numerics floors; broad-suite rewards; attention error vs fp64 3.6-33× stock's (median 25×) |
+| Rule | a speedup is kept only if (1) the draft still cannot change the output and (2) no op's worst-case rounding-error bound rises above stock ExLlamaV3's; both proven in Bend | fastest serving whose quality is measured |
+| Speculative decoding | the draft never changes the output: Bend proof (`--verdict`) + bitwise tests | same |
+| Prefill arithmetic | attention with fp32 sums, tree denominators and stock-length chains (3022 v4 + 3031); prefill GEMMs bit-exact with stock; no int8 | int8 Q·Kᵀ and fp16 P·V sums |
+| Evidence | error-bound laws for every op elpis changed; measured error vs fp64 at or below stock on average (decode attention 0.9998×, prefill attention 0.890×) | teacher-forced KL within exact-numerics floors; attention error vs fp64 3.6-33× stock's |
 | Model | EXL3 4.00 bpw weights, 3-bit KV cache (not identical to BF16) | same |
+
+## What lossless means
+
+Lossless = all three rows below. Each row has a proof (Bend, checked by `bend PROOF.bend --verdict`) and a GPU test.
+
+| # | Claim | Proof | Test |
+|---|---|---|---|
+| 1 | **The draft never changes the output.** For every prompt and every drafter, also an adversarial one, elpis emits the tokens that its target emits when it decodes one token per round. | `rinv_laws` (served engine, chain and 8-row tree, with its own commits) over `spec_inv` / `spec_inv_tree`; the row hypothesis `~rinv` is derived from the kernel laws, not assumed. The acceptance leaves equal their references and ship as emitted C. | 15 prompts × tree / chain × normal / capped / all-rejected draft: 90/90 token-identical (#77 and #78). |
+| 2 | **Speculation adds zero error.** Acceptance compares token ids exactly. Nothing is approximated, sampled or thresholded. | follows from 1 | follows from 1 |
+| 3 | **No kernel is less accurate than stock.** For every op that elpis changed, decode and prefill, elpis's worst-case rounding-error bound is no larger than that of stock ExLlamaV3 355c6ee (non-speculative, one token at a time), for every input. | `err_*_laws`: the rounding steps from every input term to every output, for the elpis and the stock kernel, transcribed from source (file:line, checked by `bend/err_*_diff.py`); a dominated step count has a no-larger bound for every per-step rounding bound in the hardware order (`err_bound_laws.dom_sigma`; Higham 2002, Lemma 3.1). | error vs an fp64 reference per op ([benchmarks §10](docs/benchmarks.md#10-lossless-definition-draft-and-m1-checks-proof-status-2026-10-03)). |
+
+What lossless does not mean:
+
+- **Not lossless against BF16.** The 4.00 bpw weights and the 3-bit KV cache cost quality; the lane measures it, nothing proves it.
+- **Not bit-identical to stock**, or to elpis's own no-draft kernels: they round differently. A no-draft run diverges in 4 of 15 long generations, each time at a near-tie (top-2 logits 0.016-0.17 apart).
+- **Bounds, not samples.** The proof bounds the worst case. On one input either kernel can land closer to the exact value.
+
+Trust base, outside Bend (tested, not proven):
+
+- The CUDA and host code match their Bend models (`H_conform`; the `bend/*_diff.py` source links, GPU bitwise differentials).
+- Kernels are deterministic, and `mma.m16n8k16` computes each row from that row only (`H_det`, `H_mma`).
+- Rounding follows the standard model, with per-step bounds in the class order of `bend/err_bound.bend`; the GPU memory model holds at the split-K barrier (`H_mem`).
+- Deployment facts: the persisted autotune records, the default environment, stock's default dispatch (`H_deploy`, `H_route`, `H_stock`).
+- Each law module's header names its own remaining hypotheses (for example `H_park` in `bend/err_pfix_laws.bend`: one prefill CTA per SM, checked on the host before the first launch).
 
 ## How it compares with other RTX 3090 results for this model
 
@@ -66,7 +90,7 @@ In short:
 
 ## Speed
 
-**Target:** most tok/s at the native 262K context, one RTX 3090, 350 W, never less precise than stock ExLlamaV3. **Status:** historical measured image `p9502` (#77; 350 W, memory offset 0, 2026-09-30) = `p9501x4` (#76) + two bit-exact prefill scheduling patches (9502, 5110h); #76/#77 are **not precision-qualified**: 3022 v4 fails the served-exact gate in 5/16 cells. The GSM8K, C1 and decode-only rows were measured on `tree3s` (#68); since then elpis's decode changed only by fold-32 (3023), which leaves the round time within 1 % (table below). Live serving still runs `p3021r`, the elpis-fast prefill lineage, until an elpis image is promoted.
+**Target:** most tok/s at the native 262K context, one RTX 3090, 350 W, lossless as defined above. **Status:** elpis = `p3031b` (#78; `sha256:6f597b13…`) = `p9502` (#77) + 3030 + 3031, the attention fixes that make every op's worst-case rounding bound ≤ stock's. Against a fresh #77 run in the same session: decode +0.6-0.8 % ms per round, time to first token +0.4-0.8 %, lane scores 14/20 (#76: 13/20). The GSM8K, C1 and decode-only rows below were measured on `tree3s` (#68). Live serving runs the elpis-fast prefill lineage (`p3021r` and its successors) until an elpis image is promoted.
 
 | Workload | tok/s | Tokens / round | tok/J |
 |---|---|---|---|
@@ -78,16 +102,16 @@ In short:
 
 **elpis vs elpis-fast** (same prompts, same protocol, 350 W):
 
-| | elpis `p9502` (#77; historical, not precision-qualified) | elpis-fast `pfast1` |
+| | elpis `p3031b` (#78) | elpis-fast `pfast1` |
 |---|---|---|
-| Cold prefill, geomean over 8K / 32K / 128K / 262K | 1,031.2 tok/s | 1,164.9 tok/s (+13.0 %) |
-| Time to first token, 8K / 32K / 128K / 262K | 5.50 / 23.94 / 146.25 / 427.29 s | 5.58 / 22.67 / 123.66 / 322.98 s |
-| Decode: median ms per verify round at 1K / 8K / 32K context, 256 tokens (mean of three 350 W windows per image; elpis measured on `p9501x4`, #76) | 25.73 / 26.19 / 28.36 | 25.50 / 26.24 / 28.39 |
-| Scores: AIME 2025 · MMLU-Pro · I3 Logic · LiveCodeBench | 3/3 · 8/10 · 1/4 · 1/3 | 3/3 · 8/10 · 1/4 · 1/3 (`p3021p`, #73: same prefill arithmetic, without 5110g / 9501b) |
-| Prefill attention error vs fp64, relative to stock Triton | old staged-fp16 K/V reference, unsplit stock at prefix 0: ≤ stock 16/16 (cell means 1.84e-4 vs 2.88e-4); exact CQ3 K/V + served stock: fails 5/16 ([gate](docs/benchmarks.md#9-segment-14-the-precision-bar-exl3-native-prefill-ttft-v1-350-w-2026-09-30)) | median 25× stock (3.6-33×) |
+| Cold prefill, geomean over 8K / 32K / 128K / 262K | 1,014.7 tok/s (fresh #77 run: 1,020.8) | 1,164.9 tok/s |
+| Time to first token, 8K / 32K / 128K / 262K | 5.60 / 24.42 / 148.75 / 431.47 s (fresh #77 run: 5.55 / 24.31 / 147.78 / 429.02 s) | 5.58 / 22.67 / 123.66 / 322.98 s |
+| Decode: median ms per verify round at 1K / 8K / 32K context, 256 tokens (mean of three 350 W windows per image) | 25.75 / 26.40 / 28.60 (fresh #77 windows: 25.58 / 26.24 / 28.38) | 25.50 / 26.24 / 28.39 |
+| Scores: AIME 2025 · MMLU-Pro · I3 Logic · LiveCodeBench | 3/3 · 8/10 · 2/4 · 1/3 | 3/3 · 8/10 · 1/4 · 1/3 (`p3021p`, #73: same prefill arithmetic, without 5110g / 9501b) |
+| Attention error vs fp64, relative to stock (mean, geomean over cells) | decode 0.9998×, prefill 0.890×; worst-case bound ≤ stock (proven) | prefill median 25× stock (3.6-33×) |
 
 - The decode rows compare the same 8-row verify per round. Tokens per round follow each build's own text, so tok/s is not comparable across builds.
-- One more elpis window was discarded for host CPU load (1K rounds at 79.7 ms) and replaced by two clean windows (runs xfab, xfab2).
+- #78 and fresh #77 numbers: plan `g6f597b13`, windows interleaved #77 / #78, 2026-10-03/04 ([benchmarks §10](docs/benchmarks.md#10-lossless-definition-draft-and-m1-checks-proof-status-2026-10-03)). elpis-fast numbers are from 2026-09-30.
 
 <details><summary>Lane per task (#68, 350 W)</summary>
 
@@ -121,26 +145,30 @@ In short:
 
 </details>
 
-## The draft never changes the output: proof and tests
+## Proofs and tests
 
-| Claim | Proof | Result |
+| Claim | Proof or test | Result |
 |---|---|---|
-| The draft never changes the text | invariance gate: 15 prompts × normal / capped / all-rejected draft; `cs10`, then again on `p9501x4` (#76) for the tree and the forced chain | 45/45 (`cs10`); 90/90 (#76) identical token ids |
+| The draft never changes the output (served engine, every drafter) | Bend: `rinv_laws` (chain rounds of ≤ 7 drafts, every list of legal 8-row trees, the engine's own commits) over `spec_inv` / `spec_inv_tree`; `~rinv` derived from the kernel laws (`rowinv_link`, `rowinv_served`, `lmhead`) | proven |
+| Same, on the GPU | invariance gate: 15 prompts × normal / capped / all-rejected draft × tree and chain; `cs10`, `p9501x4` (#76), `p9502` (#77), `p3031b` (#78) | 45/45 (`cs10`); 90/90 on #76, #77, #78 |
+| No kernel is less accurate than stock (every op elpis changed) | Bend: `err_bound_laws`, `err_gemm`, `err_gemm_runs`, `err_gdn`, `err_elem`, `err_attn`, `err_attn_dec` (3030), `err_prefill`, `err_pfix` (3031) | proven; table in [benchmarks §10](docs/benchmarks.md#10-lossless-definition-draft-and-m1-checks-proof-status-2026-10-03) |
+| Same, measured against fp64 | per op, decode and prefill; attention on captured q and CQ3 K/V at 10 context lengths | decode ops ≤ stock (0.05-0.84×); attention mean error 0.9998× (decode) and 0.890× (prefill) stock |
+| Acceptance logic | `exl3_accept`, `exl3_tree_accept` leaves = list references; emitted to C unchanged and checked by table at build | proven |
+| Whole contract | `bend PROOF.bend --verdict` (Bend 2.0.34 + its Lean 4.34.0 kernel): 58 law modules, 62 proof modules | ALL PROOFS CHECK |
 | Decode speedups since `cs10` never changed the text | lane 20 + C1 15 answers, `cs10` → `cs11` → `cs12` → `tree3s` | byte-identical |
-| Arithmetic-changing speedups: measured precision status | decode 3003, 2102, 8202, 3006, 2105, 5106, 8205b (split-K order), 3023 (fold-32); prefill 3022 v4 (fp32 sums; replaces 3010's fp16 spans) | against fp64: decode error per measured op ≤ stock (0.05-0.84×; lm_head and GDN b/a bit-identical to stock); prefill's old staged-fp16 K/V / unsplit-stock gate passed 16/16, but exact CQ3 K/V / served-stock gate fails 5/16; #76/#77 not precision-qualified ([benchmarks §9](docs/benchmarks.md#9-segment-14-the-precision-bar-exl3-native-prefill-ttft-v1-350-w-2026-09-30)) |
 | Exact prefill patches 3020 / 5111 / 5112 never change the text | prefill suite, 9 rows: #71 and #72 vs #70 | byte-identical |
-| Prefill texts vs the pre-3020 baseline #70 (#76, #77) | prefill suite, 9 rows | first token 9/9 identical; 32-token continuations 6/9 identical (fp32 attention sums differ from 3010's fp16 spans); #77 = #76 in 9/9 rows |
 | Power and clocks never change the text | lane 20 + C1 15 answers, 250 W (#67) vs 350 W (#68); memory offsets 0 … −2000 (RoundBench ids) | byte-identical |
 | | GSM8K 40 answers × 21 runs, `cs12` + `tree3s`, 250 W + 350 W | byte-identical |
 | Forced chain = old engine | `EXL3_TREE_FORCE_CHAIN=1` vs `cs12`, 17 prompts: ids, every round, drafted ids, usage | identical |
-| Accept / commit logic | `bend PROOF.bend` (Bend 2.0.34): 41 modules, chain + tree acceptance, speculation invariance over trees | "ALL PROOFS CHECK" |
 | Kernel changes | GDN state hashes, 1-8 steps (5108); 64 layers × rows 1-8 × 30 graph replays (2113); all 5,040 tree shapes vs the chain kernel (3012) | bit-exact |
 | The tree costs no time (250 W) | tree − chain, ms per round, 4 fresh processes | 1K: −0.06 (95 % CI −0.31..+0.19); 8K: −0.02 (−0.21..+0.18) |
 | Scores, `tree3s` (#68) | AIME 2025 3/3 · MMLU-Pro 8/10 · I3 Logic 2/4 · LiveCodeBench 1/3 | = `cs12` |
-| Scores, `p9501x4` (#76) | AIME 2025 3/3 · MMLU-Pro 8/10 · I3 Logic 1/4 · LiveCodeBench 1/3 | = `p3021p` (#73); I3 task 1 hits the 16,384-token cap as on #73 (correct at 14,217 tokens on `tree3s`) |
+| Scores, `p9501x4` (#76) | AIME 2025 3/3 · MMLU-Pro 8/10 · I3 Logic 1/4 · LiveCodeBench 1/3 | = `p3021p` (#73) |
+| Scores, `p3031b` (#78) | AIME 2025 3/3 · MMLU-Pro 8/10 · I3 Logic 2/4 · LiveCodeBench 1/3 | 14/20 (#76: 13/20) |
 
 - [`LAWS.bend`](LAWS.bend) = contract; [`PROOF.bend`](PROOF.bend) = proofs. Order for every engine change: law → proof → measurement.
-- Proofs cover Bend models of the logic and of each modelled kernel's schedule: which outputs it computes, each exactly once, in which summation order, and row invariance for verify attention. Not proven: that the CUDA code matches those models, and the floating-point values themselves; both are tested (bitwise differentials above). The speculation proof assumes each verify row's token depends only on its prefix (`~rinv`, [`bend/spec_inv_tree_laws.bend`](bend/spec_inv_tree_laws.bend)); the kernel row-invariance laws support that assumption, but the link between them is a prose argument (the tree design note, not yet in this repo), not a proof.
+- Bend proves facts about Bend models of the kernels: which outputs each computes, in which order, with which rounding steps. The link from model to CUDA code is checked by the `bend/*_diff.py` source links and by GPU tests, not proven; the remaining trust base is listed under [What lossless means](#what-lossless-means).
+- Two proof modules record facts about kernels elpis no longer ships: `err_attn_finding` and `err_prefill_finding` prove that the pre-3030 / pre-3031 attention did not meet claim 3.
 
 ## 262K context
 
@@ -252,7 +280,9 @@ Kept lane runs. Compare within one protocol only.
 | #61, #62 | cs11 | v4 | 250 W | 109.65, 109.81 | 0.444, 0.444 |
 | #63 | cs12 | v4 | 250 W | 111.85 | 0.452 |
 | #67 | tree3s | v4 | 250 W | 122.33 | 0.495 |
-| **#68** | **tree3s** (decode stack of the live image) | v5: v4 tasks at 350 W, memory offset 0 | 350 W | **161.79** | **0.497** |
+| **#68** | **tree3s** | v5: v4 tasks at 350 W, memory offset 0 | 350 W | **161.79** | **0.497** |
+| #76 | p9501x4 | v5 | 350 W | 153.97 | not recorded |
+| #78 | p3031b (3030 + 3031; lossless as defined above) | v5 | 350 W | 158.74 | not recorded |
 
 Cold prefill (protocol `exl3-native-prefill-ttft-v1`, 350 W): geometric mean of prompt tokens / time to first token over 8K, 32K, 128K and 262K prompts.
 
@@ -261,7 +291,9 @@ Cold prefill (protocol `exl3-native-prefill-ttft-v1`, 350 W): geometric mean of 
 | #70 | tree3s | #68 | 977.9 | 25.8 / 435.0 s |
 | #71 | p3020 | + 3020 | 1,072.8 | 24.4 / 365.9 s |
 | #72 | p3020f | + 5111, 5112 | 1,087.8 | 24.1 / 362.5 s |
-| **#73** | **p3021p (live)** | + 3021c (int8 Q·Kᵀ in prefill; outputs change slightly, [quality checks](docs/benchmarks.md#8-segment-12-cold-prefill-exl3-native-prefill-ttft-v1-350-w-2026-09-29)) | **1,157.3** | **23.3 / 322.0 s** |
+| #73 | p3021p | + 3021c (int8 Q·Kᵀ in prefill; outputs change slightly, [quality checks](docs/benchmarks.md#8-segment-12-cold-prefill-exl3-native-prefill-ttft-v1-350-w-2026-09-29)) | 1,157.3 | 23.3 / 322.0 s |
+| #77 | p9502 | #76 + 9502, 5110h; no int8 ([benchmarks §9](docs/benchmarks.md#9-segment-14-the-precision-bar-exl3-native-prefill-ttft-v1-350-w-2026-09-30)) | 1,031.2 | 23.94 / 427.29 s |
+| **#78** | **p3031b** | + 3030, 3031 (lossless as defined above) | **1,014.7** (fresh #77 in the same session: 1,020.8) | **24.42 / 431.47 s** |
 
 Every change and every dropped attempt: [docs/benchmarks.md](docs/benchmarks.md).
 
@@ -289,6 +321,14 @@ curl -o gsm8k-test.jsonl https://raw.githubusercontent.com/openai/grade-school-m
 python3 -m bench.gsm8k_compare --api-key-file /path/to/api-key --data gsm8k-test.jsonl --out gsm8k.json
 ```
 
+## Prove
+
+```sh
+nix run .#bend -- PROOF.bend                     # every law, TypeScript checker (about 11 min)
+nix run .#bend-verdict -- PROOF.bend --verdict   # the same, rechecked by Bend's Lean-proven kernel (Lean 4.34.0 pinned; hours)
+python3 -B bend/err_gemm_diff.py                 # one of the bend/*_diff.py source links: model text vs patched source
+```
+
 ## Setup
 
 | | |
@@ -300,7 +340,7 @@ python3 -m bench.gsm8k_compare --api-key-file /path/to/api-key --data gsm8k-test
 | Under load, 250 W (#67) | 247.1 W mean; SM per-call mean 957-1,194 MHz (median 1,029); 67 °C median, 68 °C max; fan 71 % median, 77 % max (old curve) |
 | Host | Ryzen 7 5800X (8 cores / 16 threads), 125.7 GiB, NixOS 26.05, Linux 6.18.50 |
 | Runtime | rootless Docker 29.7.2, CDI, read-only root; Ubuntu 24.04 CUDA base; Python 3.13.10, PyTorch 2.10.0+cu130, CUDA 13.0.96, cuBLAS 13.1.0.3, Triton 3.6.0 |
-| Engine | ExLlamaV3 1.5.0 `355c6ee` (r0b0tlab `community`, native DFlash2) + 5 [`patches/exl3`](patches/exl3) + 36 [`patches/exl3-ext`](patches/exl3-ext), SHA256-pinned |
+| Engine | ExLlamaV3 1.5.0 `355c6ee` (r0b0tlab `community`, native DFlash2) + 5 [`patches/exl3`](patches/exl3) + 47 [`patches/exl3-ext`](patches/exl3-ext), SHA256-pinned |
 | Server | [`serve/exl3_server.py`](serve/exl3_server.py): authenticated OpenAI-compatible `/v1` chat/completions + tool calls, greedy, one sequence |
 | Target | [`r0b0tlab/Qwen3.8-27B-EXL3-4.00bpw`](https://huggingface.co/r0b0tlab/Qwen3.8-27B-EXL3-4.00bpw) @ `3f1771b8` (`Qwen/Qwen3.8-27B`): 48 Gated DeltaNet + 16 full-attention layers, hidden 5,120, vocab 248,320; 4.00 bpw, 6 bpw head; 16.5 GB |
 | Draft | [`r0b0tlab/Qwen3.8-27B-DFlash2-EXL3-4.00bpw`](https://huggingface.co/r0b0tlab/Qwen3.8-27B-DFlash2-EXL3-4.00bpw) @ `265b5240` (`incoai/Qwen3.8-27B-DFlash2`): 5 sliding-attention layers, block 8, reads target layers 5/19/33/47/61, top-16 selector; 1.25 GB |
@@ -310,8 +350,10 @@ python3 -m bench.gsm8k_compare --api-key-file /path/to/api-key --data gsm8k-test
 
 ```
 - Unqualified: 262K prompts run only in the prefill lane (one 262,000-token prompt per run); sustained 262K capacity, quality and speed are not qualified.
-- #76/#77 prefill (3022 v4) fails served-exact precision qualification in 5/16 cells.
-- Live p3021r still uses int8 Q·Kᵀ (3021c): outputs differ slightly from the fp16 route (KL inside the exact-numerics noise floor; broad suite equal except one I3 task that hit the token cap).
+- Per-input attention error is not always <= stock: the proof bounds the worst case. Measured on #78, prefill attention
+  is <= stock in mean, p99 and max in 29/32 cells (31/32 within one fp16 ulp); decode attention max error exceeds
+  stock in some cells, identically in the pre-3030 kernel.
+- Live serving (elpis-fast lineage, p3021r and its successors) uses int8 Q·Kᵀ (3021c) and makes no losslessness claim.
 - Greedy only, one sequence at a time.
 - Chat stream=true is buffered SSE: first event is not TTFT.
 - Exact logit ties can depend on max_tokens (cs12: token 39457 at 8192 vs 54185 at 256,

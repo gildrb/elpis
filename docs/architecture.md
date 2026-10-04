@@ -27,17 +27,25 @@ defines the weights. Record both with every run.
 
 ## Bend's role
 
-Bend states laws for decisions the serving path must get right and proves the
-production definitions against them (`LAWS.bend` → `PROOF.bend`). The current
-focus is EXL3 greedy speculative acceptance: the accepted-prefix and bonus-token
-decision for each DFlash2 block, proved in Bend and executed in the serving path,
-and, for the 8-row tree verify, the matching-path acceptance and the TreeDesc
-derivation (`bend/exl3_tree_accept.bend`) with tree speculation invariance
-(`bend/spec_inv_tree_laws.bend`). Both artifacts are built into one acceptor root
-by `bend/exl3_build.py` with the pinned Bend 2.0.34.
-A Bend proof covers the Bend definition; it does not certify
-the CUDA kernels, the Python server or measured speed. Those need their own
-evidence.
+Bend states laws for what the serving path must get right and proves them
+(`LAWS.bend` → `PROOF.bend`, checked with `bend PROOF.bend --verdict`, which
+rechecks every proof with Bend's Lean-proven kernel). Three groups:
+
+- Acceptance: the accepted-prefix and bonus-token decision per DFlash2 block and,
+  for the 8-row tree verify, the matching-path acceptance and the TreeDesc
+  derivation (`bend/exl3_accept.bend`, `bend/exl3_tree_accept.bend`). Both are
+  emitted to C unchanged and built into one acceptor root by `bend/exl3_build.py`
+  with the pinned Bend 2.0.34.
+- Speculation invariance: the served engine's output is the greedy decode of its
+  own row function for every drafter (`bend/rinv_laws.bend` over `spec_inv*`);
+  the row hypothesis is derived from the per-kernel laws, not assumed.
+- Error bounds: for every op elpis changed, its worst-case rounding-error bound
+  is no larger than stock ExLlamaV3's (`bend/err_*_laws.bend` over the vocabulary
+  `bend/err_bound.bend`).
+
+A Bend proof covers Bend models of the kernels; it does not certify the CUDA
+code, the Python server or measured speed. The `bend/*_diff.py` source links and
+GPU tests cover those; the README lists the remaining trust base.
 
 ## Invariants
 

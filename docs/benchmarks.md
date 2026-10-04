@@ -698,7 +698,7 @@ Declared 350 W, core 0, memory 0 (§3). Image `tree3s` (`sha256:ec9751b0…`), #
 
 ## 9. Segment 14: the precision bar (`exl3-native-prefill-ttft-v1`, 350 W, 2026-09-30)
 
-Target bar: no elpis kernel computes less precisely than the stock ExLlamaV3 355c6ee kernel it replaces. Each speedup must be bit-exact with stock or measured at least as accurate against an fp64 reference. **Current status: #76/#77 violate the bar; precision qualification withdrawn.** Speed and quality measurements below remain historical evidence. Suite and TTFT definition: §8.
+Target bar: no elpis kernel computes less precisely than the stock ExLlamaV3 355c6ee kernel it replaces. Each speedup must be bit-exact with stock or measured at least as accurate against an fp64 reference. **Current status: #76/#77 violate the bar; precision qualification withdrawn.** Speed and quality measurements below remain historical evidence. Suite and TTFT definition: §8. Superseded by §10: the bar is now a proven worst-case bound per op (Bend error-bound laws) plus measured error vs fp64; #78 (3030 + 3031) meets it.
 
 | Run | Image | Stack | Prefill tok/s (geomean) | TTFT 8K / 32K / 128K / 262K s | Texts |
 |---|---|---|---|---|---|
@@ -733,3 +733,97 @@ Target bar: no elpis kernel computes less precisely than the stock ExLlamaV3 355
 - `bend PROOF.bend` (Bend 2.0.34): ALL PROOFS CHECK.
 - #77 exactness (run 0081zs, one process, ABBA, `EXL3_PREFILL_NOSYNC` on vs off at 8244 / 32821 / 131122): prefill end state (KV pages, GDN recurrent and conv state, draft KV), checkpoint bytes, 32 ids, rounds and chunk schedule identical; TTFT ×0.986 / ×0.992 / ×0.993.
 - #77 memory (run 0081zr, merged schedule): 131122 min free 857 MiB, 262052 min free 537 MiB, both through the first verify round. 262136 (1025 pages, 2 GiB power-of-two staging scratch): 37 MiB free unmerged, out of memory merged; the ≤ 1024-page bound excludes it.
+
+## 10. Lossless: definition, draft and M=1 checks, proof status (2026-10-03)
+
+Definition (README, "What lossless means"): (1) the draft never changes the output; (2) so speculation adds zero error: the output is the greedy decode of elpis's own verify arithmetic, one token per round; (3) every decode op's worst-case rounding error bound is no larger than stock ExLlamaV3 355c6ee's (Bend error-bound laws). Stock is the yardstick, not the implementation: elpis keeps its own kernels.
+
+### Draft invariance and the M=1 arm, #77 (`p9502` `3cf6222f…`, 350 W, non-timing windows)
+
+| Run | Engine mode | Arms | Result |
+|---|---|---|---|
+| `run-m1-tree` | served tree verify | normal / capped / all-rejected | 45/45 token ids identical |
+| `run-m1-flat` | `EXL3_TREE=0` (chain generator) | normal / capped / all-rejected | 45/45 identical to the tree run's normal arm |
+| `run-m1-flat` | `EXL3_TREE=0` | m1: no draft, the generator's own M=1 kernel set | 11/15 identical; 4/15 diverge (table below) |
+
+- Harness: `ops/autoresearch/invariance.py` (perturbs the drafted ids inside the draft sampler, so tree records stay consistent) and `ops/autoresearch/inv_report.py`. m1 is reported with its divergence and logit margins; it does not gate. `run-m1-flat` was recorded while m1 was a required arm, so its own `pass` field is false.
+- Evidence: `/tmp/kernel-work/Lossless/inv/out/{run-m1-tree,run-m1-flat}/result.json`, report `report-m1-v2.json`, batch log `/tmp/kernel-work/Lossless/inv/batch-m1.log`.
+
+| Case | First divergent token | Tokens (spec / m1) | Top-2 logit margin, spec / m1 | First differing module |
+|---|---|---|---|---|
+| aime-think-4096 (and its repeat) | 376 | 43022 / 4272 | 0.047 / 0.047 | layer 0 `linear_attn`, max abs 0.00195 |
+| code-plain-1024 | 223 | 727 / 331 | 0.109 / 0.016 | layer 0 `linear_attn`, max abs 0.00220 |
+| prose-plain-2048 | 126 | 15463 / 10583 | 0.172 / 0.047 | layer 0 `linear_attn`, max abs 0.00073 |
+
+- At every divergence the two arms swap the same two tokens, and their logits differ by 1-11 fp16 ulps (logits 24-29: ulp 0.0156). Near-ties decided by rounding; no evidence of a quality difference.
+- The M=1 kernel set differs from the verify kernel set from the first projection on (identity map below), so equal ids are not expected.
+
+### Verify rows vs the M=1 decode, per op (run `m1map`, 42 samples: layers 0 / 1 / 3 / 10 / 35 / 60 / 63, rounds 0 and 3, prompts 1,024 / 8,192 / 32,768)
+
+| Op (tree verify vs M=1 on the same inputs) | Bit-identical rows | Max abs difference |
+|---|---|---|
+| Norm inputs and outputs, residual inputs | all | 0 |
+| GDN qkv / z / b·a projections | 0/192 | 0.070 |
+| GDN conv output and conv state | 0/192 | 0.25 |
+| GDN recurrent state, core output | 0/192 | 0.096 / 0.22 |
+| Attention q / k·v projections, gate | 0/144 | 0.023-0.070 |
+| Attention output, o-projection input | 0/144 | 1.15 |
+| Layer tail (o_proj + residual + norm + MLP) | 0/144 (attention), 0/192 (GDN) | 2.55 / 0.053 |
+
+- Checks passed: M=1 replay fidelity, verify replay fidelity, route proofs (kernel attribution of every launch), 42/42 samples.
+- Stock-switch payload (`m1map-stock`, `EXL3_TREE=0` + layer tail, m16, m16g, b·a k-split and CUDA verify attention off): verify rows at 8 rows still differ from M=1 (for example `lm_head`); the final norm is equal. Stock ExLlamaV3's own kernels are not row-count invariant either.
+- Evidence: `/tmp/kernel-work/Lossless/m1map/out/m1map-{map,stock}.json`, `batch.log`.
+
+### `bend --verdict` (Bend 2.0.34 + Lean 4.34.0 kernel), before this segment's fixes
+
+- `bend PROOF.bend`: ALL PROOFS CHECK. `bend PROOF.bend --verdict`: SOME PROOFS FAIL ("mismatch between the TypeScript implementation, and the formalized BendTT kernel").
+- Per module: 29 modules pass, including the chain acceptor (`exl3_accept_proof`), chain speculation invariance (`spec_inv_proof`) and the round model (`exl3_round_proof`). 11 fail as "mismatch": `gdn_fast`, `attn_rowinv`, `tail_m16_sched`, `mlp_m16_defer`, `m16_wsched_tables`, `m16_wsched`, `m16_diet`, `m16_diet2`, `gdn_replay_gather`, `attn_tree`, `gdn_tree`. The exported kernel files show the cause: definitions with `~` template parameters have no BendTT model (for example `rb_fold~rid`). The tree acceptor gate fails in the kernel only on `exl3_tree_accept_laws.derive_refinement: out of fuel` (kernel `FUEL` = 400,000,000 per check).
+
+### Error-bound laws (Bend; every gate passes `--verdict`)
+
+Vocabulary `bend/err_bound.bend`: a Path counts the rounding steps from one input term to one output by class (fp32 RN, fp32 tensor-core, fp16 RN, fp16 tensor-core, int8 activation, ex2, rcp, rsqrt). `dom_sigma` (proven): a dominated Path has a sum of per-class bounds no larger than its dominator, for every bound assignment in the class order (fp32 RN ≤ fp32 tensor-core; 128 × fp32 tensor-core ≤ fp16 RN ≤ fp16 tensor-core; 128 × fp16 tensor-core ≤ int8 activation, u = 1). With Higham's Lemma 3.1 that is a no-larger worst-case rounding-error bound. Stock = ExLlamaV3 355c6ee's non-speculative M=1 route, transcribed with file:line; source-link scripts `bend/err_*_diff.py` check the transcriptions.
+
+| Op (decode unless marked) | elpis vs stock | Note |
+|---|---|---|
+| Attention q / k / v / gate projections | m = 1 equal; m = 2..8 dominated | elpis fp16 runs ≤ 2 MMAs (fold-32); stock's one-token GEMM runs 160 |
+| GDN qkv / z projections | m = 1 equal; m = 2..8 dominated | stock runs 128 fp16 MMAs per run |
+| o_proj, out_proj, MLP gate / up / down | dominated | stock's one-token route quantizes activations to int8 (`exl3_gemv_int8_sq_kernel`) |
+| GDN b / a | dominated | same products, ≤ 30 fp32 steps per term vs 165 |
+| lm_head | equal | same kernel, same per-row order |
+| GDN conv, recurrence, gated norm | equal; routes across tokens dominated | same exact recurrence, same operations in the same order |
+| RMSNorm (input, final), residual adds, SiLU · up, dtypes | equal | |
+| Layer-tail post-attention RMSNorm | dominated | 19 fp32 steps + rsqrt vs 21 + rcp + rsqrt |
+| Attention pre (q / k norm, RoPE) | equal | `rope_kernel`'s 35 lines verbatim |
+| Attention core (3006 / 3012) | **not dominated** (proven counterexample at context 2) | fixed by ext 3030 |
+| Prefill GEMMs (3011 / 5112), GDN prefill conv (5111) | equal | |
+| Prefill attention (3022 v4) | **not dominated** for rows seeing 1-2 key tiles and for block tables ≥ 8,192 keys (proven counterexamples) | fixed by ext 3031 |
+
+### Attention fixes 3030 (decode) and 3031 (prefill)
+
+- 3030 (`attn_verify`): integer running max (rescales are exact powers of two), balanced-tree tile sums, per-tile fresh fp32 P·V accumulators joined by one `fma`, pairwise combine tree, stock's two-step tensor-core output rotation. Same tile partition (row invariance, tree = chain on the CHAIN descriptor). Law `err_attn_dec_laws.dec_dom`: dominated for every context L ≥ 1, every key and route.
+- 3031 (`pattn`, `pattn8`): depth-5 tree denominators (stock's `tl.sum` depth), online-softmax chains of E = (q_abs64 + 256) / 256 tiles (never longer than a stock split) combined with stock's weights, per-row combine plan. Law `err_pfix_laws.pfix_dom`: dominated for every row, prefix and stock split count 1..8; the plan is chunking-invariant.
+- Candidate image `p3031b` `sha256:6f597b13…` = #77 + 3030 + 3031 (plan `g6f597b13`, `/tmp/kernel-work/Lossless/gpuplan/plans/g6f597b13`).
+
+| Measured, 350 W | Result |
+|---|---|
+| Decode attention error vs fp64 (40 real cells: layers 0 / 5 / 10 / 15 × L 1 … 206,848, captured q and CQ3 K/V) | mean error 0.9998 × stock (geomean; worst cell 1.005); pre-3030 kernel 1.0008 ×. Max-error outliers above stock appear identically in the pre-3030 kernel |
+| Prefill attention error vs fp64 (32 cells) | mean error 0.890 × served stock (geomean; every cell ≤ stock in mean); pre-3031 kernel 0.897 × (one cell above). Strict mean / p99 / max ≤ stock: 29/32 cells (pre-3031: 21/32); 31/32 within one fp16 ulp |
+| Decode attention kernel time, one row (split + combine) | +10 % at L ≤ 65, +34 % at 1,281-2,048, +4-6 % at ≥ 32,768 vs the pre-3030 kernel; still faster than stock below 8K |
+| Prefill attention kernel time (pattn call) | 2,048 rows: +74 % at prefix 0 (0.73 ms), +7.6 % at 8K, +2.4 % at 32K, +1.7 % at 128K, +0.2 % at 256K |
+| Draft invariance on `p3031b` | 90/90 token-identical (tree and `EXL3_TREE=0`, normal / capped / all-rejected); m1 diverges in 4/15 long generations |
+| Native memory, 262,052-token cold prefill | min free 857 MiB on both images; verify / decode headroom 1,023 vs 1,083 MiB (3031 scratch) |
+| Decode round A/B (`decode_ab.py`, 256 tokens, windows R1 C1 C2 R2 C3 R3) | median ms per verify round at 1K / 8K / 32K: #78 25.75 / 26.40 / 28.60 vs #77 25.58 / 26.24 / 28.38 (+0.67 / +0.62 / +0.77 %; same-image window spread 1.5-2.0 %) |
+| Cold prefill suite (`exl3-native-prefill-ttft-v1`), #78 then a fresh #77 run | TTFT 8K / 32K / 128K / 262K: 5.60 / 24.42 / 148.75 / 431.47 s vs 5.55 / 24.31 / 147.78 / 429.02 s (+0.42-0.75 %); geomean 1,014.7 vs 1,020.8 tok/s |
+| Broad lane v5 (§2), #78 | AIME 2025 3/3 · MMLU-Pro 8/10 · I3 Logic 2/4 · LiveCodeBench 1/3 = 14/20 (#76: 13/20); 158.74 tok/s (#76: 153.97; texts differ) |
+
+- Evidence: plan `g6f597b13` (`run-all.log`, `run-rest.log`): `specs/{1-precision,2-invariance,3-memory}.json.log`, `dec/out/g6f597b13-adec.json`, `prefill/g6f597b13-pattn/gate.json`, `decab/out/report.json`, `serve/ttft-report.json`, `serve/broad-report.json`. Live serving was restored and authenticated after every window (guardian `baseline_restored_authenticated`).
+
+### ~rinv closed and `--verdict` fixes
+
+- `bend/rinv_laws.bend` (gate `bend/rinv_gate.bend`, `--verdict` 5,714 s): for the served engine's chain jobs (≤ 7 drafts per round) and tree jobs (every list of legal 8-row trees), with the engine's own commits, the committed state is the 1-row rounds' state of the committed stream (`commit` proven, not assumed), every round's verify ids are the served forward's, and the output is a prefix of the greedy decode by the 1-row row function, for every drafter.
+- Discharged as lemmas: `H_lmhead` (`served_o_head` from `lmhead_laws`), `H_grid` (`grid_pos`: S = max(1, SMs // kv_heads) ≥ 1, source-linked by `bend/rinv_grid_diff.py`), `H_sched` (`splitk_group`: the counter barrier sums exactly the group's contributors in ascending order for every arrival order and stale workspace), `commit` (`served_chain_commit`, `served_tree_commit`, via `rowinv_link_laws.commit_path`).
+- Trust base left outside Bend: `H_det` (deterministic kernels), `H_fp` (opaque arithmetic), `H_mma` (mma.m16n8k16 row-locality), `H_slots` / `H_rowloc` (row-local norm and argmax, identical slot code), `H_mem` (GPU memory model at the split-K barrier), `H_conform` (code matches the models; `bend/*_diff.py`), `H_deploy` (autotune records present, default environment).
+- `--verdict` fixes, laws unchanged in meaning: `~` template proof parameters removed where BendTT has no model (`attn_rowinv`); fuel-heavy closed evaluations split or made lazy (`gdn_fast`, `tail_m16_sched` and the m16 modules that import it, `gdn_tree`, `attn_tree`, `gdn_replay_gather`); `exl3_tree_derive_proof.bend` regenerated (`bend/exl3_tree_derive_gen.py`) with closed per-shape lemmas. `gdn_replay_gather_spec.all_S` evaluates the largest token count only; law `gather_all_S` proves it equal to the original `all_S_ref` for every n and S.
+- Acceptor pins: the regenerated derive proof is a recorded source of both acceptor identities, so `patches/exl3/exl3-patches.json` pins the new `identity.json` / `tree_identity.json`; both `.so` files and both tables are byte-identical to the previous build.
+- `nix run .#bend-verdict -- PROOF.bend --verdict` runs the full check with the pinned Lean 4.34.0 (`nix/lean4.nix`); `.#bend`'s store path, which the acceptor identity records, is unchanged.
+- Final gate on the integrated tree (Bend 2.0.34, Lean 4.34.0 kernel): `bend PROOF.bend --verdict` → ALL PROOFS CHECK, exit 0, 6,198 s; 58 law modules in `LAWS.bend`, 62 proof modules in `PROOF.bend` (`/tmp/kernel-work/Lossless/proof-verdict-final.log`). `bend PROOF.bend` (TypeScript checker only): ALL PROOFS CHECK, 630 s.
