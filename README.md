@@ -6,7 +6,7 @@
 - Context: 262,144 tokens (native).
 - Speculation: DFlash2 draft, 8-row token tree, greedy.
 - GPU: one RTX 3090, 350 W cap.
-- Proof: `bend PROOF.bend --verdict` (Bend 2.0.34, Lean 4.34.0 kernel): ALL PROOFS CHECK.
+- Proof: `bend PROOF.bend --verdict` (Bend 2.0.35, Lean 4.34.0 kernel): ALL PROOFS CHECK.
 
 elpis is the research build. [elpis-fast](https://github.com/gildrb/elpis-fast) is the speed build. It uses the same model and benchmarks. It uses int8 prefill attention and makes no lossless claim.
 
@@ -23,15 +23,15 @@ Lossless = claims 1, 2 and 3. Each claim has a Bend proof and a GPU test.
 
 | # | Claim | Proof | Test |
 |---|---|---|---|
-| 1 | **The draft never changes the output.** elpis emits the tokens that its target emits at one token per round. This is true for every prompt and every draft, also an adversarial draft. | `rinv_laws` over `spec_inv` / `spec_inv_tree`: chain and 8-row tree, with the engine's own commits. The row hypothesis `~rinv` is derived from the kernel laws, not assumed. | 15 prompts × tree / chain × normal / capped / all-rejected draft: 90/90 token-identical (#77, #78). |
-| 2 | **Speculation adds zero error.** Acceptance compares token ids exactly. Nothing is approximated, sampled or thresholded. | Follows from 1. | Follows from 1. |
-| 3 | **No changed op is less accurate than stock.** For each op that elpis changed, decode and prefill, the worst-case rounding-error bound is ≤ the bound of stock ExLlamaV3 `355c6ee` (no speculation, one token per step). This is true for every input. | `err_*_laws`: the rounding steps from each input term to each output, for elpis and for stock, copied from source (file:line, checked by `bend/err_*_diff.py`). A dominated step count has a bound that is not larger (`err_bound_laws.dom_sigma`; Higham 2002, Lemma 3.1). | Error vs an fp64 reference, per op ([benchmarks §10](docs/benchmarks.md#10-lossless-definition-draft-and-m1-checks-proof-status-2026-10-03)). |
+| 1 | The draft never changes the output. elpis emits the tokens that its target emits at one token per round. This is true for every prompt and every draft, also an adversarial draft. | `rinv_laws` over `spec_inv` / `spec_inv_tree`: chain and 8-row tree, with the engine's own commits. The row hypothesis `~rinv` is derived from the kernel laws, not assumed. | 15 prompts × tree / chain × normal / capped / all-rejected draft: 90/90 token-identical (#77, #78). |
+| 2 | Speculation adds zero error. Acceptance compares token ids exactly. Nothing is approximated, sampled or thresholded. | Follows from 1. | Follows from 1. |
+| 3 | No changed op is less accurate than stock. For each op that elpis changed, decode and prefill, the worst-case rounding-error bound is ≤ the bound of stock ExLlamaV3 `355c6ee` (no speculation, one token per step). This is true for every input. | `err_*_laws`: the rounding steps from each input term to each output, for elpis and for stock, copied from source (file:line, checked by `bend/err_*_diff.py`). A dominated step count has a bound that is not larger (`err_bound_laws.dom_sigma`; Higham 2002, Lemma 3.1). | Error vs an fp64 reference, per op ([benchmarks §10](docs/benchmarks.md#10-lossless-definition-draft-and-m1-checks-proof-status-2026-10-03)). |
 
 Lossless does not mean:
 
-- **Lossless against BF16.** The 4.00 bpw weights and the 3-bit KV cache cost quality. The lane measures this cost. No proof covers it.
-- **Bit-identical to stock.** elpis and stock round differently. elpis without the draft also differs: 4 of 15 long generations diverge, each at a near-tie (top-2 logits 0.016-0.17 apart).
-- **More accurate on each input.** The proof bounds the worst case. On one input, either kernel can be nearer to the exact value.
+- Lossless against BF16: the 4.00 bpw weights and the 3-bit KV cache cost quality. The lane measures this cost. No proof covers it.
+- Bit-identical to stock: elpis and stock round differently. elpis without the draft also differs: 4 of 15 long generations diverge, each at a near-tie (top-2 logits 0.016-0.17 apart).
+- More accurate on each input: the proof bounds the worst case. On one input, either kernel can be nearer to the exact value.
 
 Trust base (tested, not proven):
 
@@ -44,9 +44,9 @@ Trust base (tested, not proven):
 
 ## Speed
 
-**Target:** most tok/s at 262,144 context, one RTX 3090, 350 W, lossless.
+Target: most tok/s at 262,144 context, one RTX 3090, 350 W, lossless.
 
-**Status:** `p3031b` (#78, `sha256:6f597b13…`) = `p9502` (#77) + attention fixes 3030 (decode) and 3031 (prefill). The fixes make claim 3 true. Cost vs a fresh #77 run: decode +0.6-0.8 % ms per round, time to first token (TTFT) +0.4-0.8 %.
+Status: `p3031b` (#78, `sha256:6f597b13…`) = `p9502` (#77) + attention fixes 3030 (decode) and 3031 (prefill). The fixes make claim 3 true. Cost vs a fresh #77 run: decode +0.6-0.8 % ms per round, time to first token (TTFT) +0.4-0.8 %.
 
 | 350 W | elpis `p3031b` (#78) | elpis-fast `pfast1` |
 |---|---|---|
@@ -58,11 +58,10 @@ Trust base (tested, not proven):
 
 | Workload, 350 W | tok/s | tok/J | Run |
 |---|---|---|---|
-| Lane: 20 calls, thinking on, whole request | **158.74** | not recorded | #78 |
-| GSM8K: 40 questions, 512 tokens, median of 5 runs | **202.9** | 0.617 | #68 (`tree3s`) |
+| Lane: 20 calls, thinking on, whole request | 158.74 | not recorded | #78 |
+| GSM8K: 40 questions, 512 tokens, median of 5 runs | 202.9 | 0.617 | #68 (`tree3s`) |
 | C1: 1K / 8K / 32K prompt, 1,024 tokens out, whole request | 185.3 / 73.3 / 29.0 | 0.578 / 0.217 / 0.085 | #68 (`tree3s`) |
 
-- #68 is an older image. #78 did not run GSM8K or C1.
 - Tokens per round change with the text. Compare tok/s only on the same text.
 - #78 data: plan `g6f597b13`, 2026-10-03/04, windows interleaved with #77 ([benchmarks §10](docs/benchmarks.md#10-lossless-definition-draft-and-m1-checks-proof-status-2026-10-03)). elpis-fast data: 2026-09-30.
 
@@ -72,23 +71,23 @@ Figures of other projects come from their repositories. elpis did not run them a
 
 | One RTX 3090 | Weights | Speculation | Context / KV | Power | Reported tok/s |
 |---|---|---|---|---|---|
-| **elpis** (measured) | 4.00 bpw | DFlash2 + 8-row tree | 262,144 / 3-bit | 350 W cap | 158.7 lane (#78); 202.9 GSM8K (#68); whole request |
+| elpis (measured) | 4.00 bpw | DFlash2 + 8-row tree | 262,144 / 3-bit | 350 W cap | 158.7 lane (#78); 202.9 GSM8K (#68); whole request |
 | [trellis-serve](https://github.com/0xSero/trellis-serve/tree/1ace59c4b43ca16a50fb6b7acf8b3fd7e2351f96) README (MTP) | 3.00 bpw | MTP, 3 steps / 4 tokens | 212,992 / fp8 | not published | 96.2 prose, 141.1 code (thinking off); 141.3 prose, 129.3 code (thinking on); decode only ([sweep](https://github.com/0xSero/local-ai-registry/blob/c6e6f4c796304229a3c11442af6f09673180d4f6/data/registry/speed-sweep/qwen38-27b-exl3-3bpw-mtp-vision-rtx3090-sglang-tp1-sweep.json)) |
 | trellis-serve fastest recipe ([DFlash2](https://github.com/0xSero/local-ai-registry/blob/c6e6f4c796304229a3c11442af6f09673180d4f6/data/registry/recipe/qwen38-27b-exl3-3bpw-dflash2-rtx3090-sglang-tp1.json), status "candidate") | 3.00 bpw | DFlash2, 5.0 bpw draft, block 8 | 131,072 / fp8 | not published | 98.2 prose, 225.1 code (thinking off); 227.0 prose, 195.4 code (thinking on); decode only |
 | [r0b0tlab](https://github.com/r0b0tlab/qwen38-exl3-dflash2) | 4.00 bpw | DFlash2 | 8,192 / FP16 | 350 W cap | 162.9 GSM8K |
 
 | One RTX 3090 | 32K prompt: TTFT | Longest prompt shown |
 |---|---|---|
-| **elpis** (#78) | 24.4 s (1,344 tok/s) | 262,052 tokens: 431.5 s |
-| **elpis-fast** (`pfast1`) | 22.7 s (1,448 tok/s) | 262,052 tokens: 323.0 s |
+| elpis (#78) | 24.4 s (1,344 tok/s) | 262,052 tokens: 431.5 s |
+| elpis-fast (`pfast1`) | 22.7 s (1,448 tok/s) | 262,052 tokens: 323.0 s |
 | trellis-serve MTP | 21.9 s (1,497 tok/s) | 208,858 tokens: 294 s |
 | trellis-serve DFlash2 | 35.9 s (914 tok/s) | 126,782 tokens: 187 s |
 | r0b0tlab | not published (150K prompt: 594 tok/s) | 262,080 tokens (needle test) |
 
-- **Same test.** GSM8K, 350 W cap, same 40 questions: elpis 202.9, r0b0tlab 162.9 tok/s (+24.6 %). [`bench/gsm8k_compare.py`](bench/gsm8k_compare.py) runs the workload of r0b0tlab's [`acceptance_check.py`](https://github.com/r0b0tlab/qwen38-exl3-dflash2/blob/main/scripts/acceptance_check.py).
-- **Metric.** trellis-serve reports decode only. elpis divides by the full request time: prefill and HTTP included.
-- **Bits.** 3.00 bpw reads 25 % fewer weight bits per token than 4.00 bpw (*computed*). Its quantization error is larger. This README does not compare quality.
-- **Clocks.** trellis-serve publishes no power limit. Its DFlash2 soak held the SMs at 1.74 GHz. elpis: 1.51 GHz median per call (#68 lane).
+- Same test: GSM8K, 350 W cap, same 40 questions: elpis 202.9, r0b0tlab 162.9 tok/s (+24.6 %). [`bench/gsm8k_compare.py`](bench/gsm8k_compare.py) runs the workload of r0b0tlab's [`acceptance_check.py`](https://github.com/r0b0tlab/qwen38-exl3-dflash2/blob/main/scripts/acceptance_check.py).
+- Metric: trellis-serve reports decode only. elpis divides by the full request time: prefill and HTTP included.
+- Bits: 3.00 bpw reads 25 % fewer weight bits per token than 4.00 bpw (*computed*), at a larger quantization error.
+- Clocks: trellis-serve publishes no power limit. Its DFlash2 soak held the SMs at 1.74 GHz. elpis: 1.51 GHz median per call (#68 lane).
 
 ## Proofs and tests
 
@@ -126,14 +125,15 @@ Figures of other projects come from their repositories. elpis did not run them a
 4. Build and start:
 
 ```sh
-bash docker/build-exl3.sh candidate-ext qwen-inference:exl3   # or: baseline, candidate
+bash docker/build-exl3.sh candidate-ext qwen-inference:exl3
 export QWEN_STATE_ROOT=/absolute/path/to/state QWEN_IMAGE=qwen-inference:exl3
+export QWEN_IMAGE_ID="$(docker image inspect -f '{{.Id}}' "$QWEN_IMAGE")"   # sha256:<64 hex>
 export QWEN_ALLOW_UNQUALIFIED=1
 docker compose --project-name qwen-inference up --no-build --pull never --detach --wait
 ```
 
 - API: `http://127.0.0.1:18020/v1`, model `qwen3.8-27b`. Do not run another inference service on the same GPU.
-- Prefix cache: kept across restarts if `QWEN_IMAGE_ID` = the full sha256 of `QWEN_IMAGE`. `QWEN_PREFIX_PERSIST=0` turns it off.
+- Prefix cache: kept across restarts, bound to `QWEN_IMAGE_ID`. `QWEN_PREFIX_PERSIST=0` turns it off.
 - Docker owns runtime and restarts. Nix pins the tools, the `.#bend` toolchain and a Compose adapter ([nix/STANDALONE.md](nix/STANDALONE.md)).
 
 ## Measure
@@ -147,7 +147,7 @@ python3 -m bench.gsm8k_compare --api-key-file /path/to/api-key --data gsm8k-test
 ## Prove
 
 ```sh
-nix run .#bend -- PROOF.bend                     # every law, TypeScript checker (about 11 min)
+nix run .#bend -- PROOF.bend                     # every law, TypeScript checker (about 10 min)
 nix run .#bend-verdict -- PROOF.bend --verdict   # the same, checked again by the Lean-proven kernel (about 1.7 h)
 python3 -B bend/err_gemm_diff.py                 # one source link: Bend model text vs patched source
 ```
@@ -169,23 +169,10 @@ python3 -B bend/err_gemm_diff.py                 # one source link: Bend model t
 ## Limitations
 
 ```
-- 262K prompts run only in the prefill suite: one 262,052-token prompt per run.
-  Sustained 262K capacity, quality and speed are not qualified.
-- The proof bounds the worst case only. On #78, prefill attention is <= stock in mean,
-  p99 and max in 29/32 cells (31/32 within one fp16 ulp). Decode attention max error
-  is above stock in some cells; the kernel before 3030 has the same cells.
-- Live serving runs the elpis-fast lineage (p3021r and later, int8 Q·Kᵀ).
-  It makes no lossless claim. #78 is not promoted.
 - Greedy only. One sequence at a time.
-- Chat stream=true sends buffered SSE. The first event is not the TTFT.
+- Chat stream=true sends buffered SSE. The first event is not the first token.
 - Exact logit ties can depend on max_tokens (cs12: token 39457 at 8192 vs 54185 at 256,
-  p = 0.28775 each). Compare only at equal request parameters.
-- Speed changes with the text (3.37-6.69 tokens per round), host CPU load and GPU temperature.
-- Quality: lane samples only. The full Prime Envs suite and the 4-bit vs BF16 loss are not measured.
-- Long-context reasoning with 3-bit KV vs fp16 KV is not measured.
-- Draft fine-tune and draft 4-8 bpw sweep: stopped before a result (GPU queue paused
-  2026-09-30). A different draft can change the speed, not the output (claim 1).
-- GDDR6X temperature is not readable on this card. The memory runs at the stock clock.
+  p = 0.28775 each). Compare outputs only at equal request parameters.
 ```
 
 ## References

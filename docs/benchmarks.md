@@ -736,7 +736,7 @@ Target bar: no elpis kernel computes less precisely than the stock ExLlamaV3 355
 
 ## 10. Lossless: definition, draft and M=1 checks, proof status (2026-10-03)
 
-Definition (README, "What lossless means"): (1) the draft never changes the output; (2) so speculation adds zero error: the output is the greedy decode of elpis's own verify arithmetic, one token per round; (3) every decode op's worst-case rounding error bound is no larger than stock ExLlamaV3 355c6ee's (Bend error-bound laws). Stock is the yardstick, not the implementation: elpis keeps its own kernels.
+Definition (README, "Lossless"): (1) the draft never changes the output; (2) so speculation adds zero error: the output is the greedy decode of elpis's own verify arithmetic, one token per round; (3) every decode op's worst-case rounding error bound is no larger than stock ExLlamaV3 355c6ee's (Bend error-bound laws). Stock is the yardstick, not the implementation: elpis keeps its own kernels.
 
 ### Draft invariance and the M=1 arm, #77 (`p9502` `3cf6222f…`, 350 W, non-timing windows)
 
