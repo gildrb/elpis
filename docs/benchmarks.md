@@ -356,7 +356,7 @@ The largest remaining losses per step at short depth:
 - Bend gate green.
 - The patch's Bend differential against the shipped source where the module has one
   (`bend/*_diff.py`; 5101 is checked by its quoted source fragments instead).
-- Invariance: `ops/autoresearch/invariance.py run`. Target ids under the capped and
+- Invariance: `invariance.py run` (local operator harness). Target ids under the capped and
   all-wrong draft arms must equal the normal arm on all 15 parity cases, so the
   output is independent of the draft. Bit-exact candidates must also have ids
   identical to their base.
@@ -372,9 +372,9 @@ The largest remaining losses per step at short depth:
   - draft window > 2048 (8192: −28 % tokens per round);
   - L2 prefetch into inter-GEMM windows (within noise).
 
-`ops/autoresearch/` is a snapshot of the operator scripts used for this segment.
-They are run from `/tmp`: copy them back there, `invariance.py` to
-`/tmp/kernel-work/Invariance/` and `kernel_trace.py` to `/tmp/kernel-work/KernelTrace/`.
+The operator scripts used for this segment are local tools in `/tmp`, not part of the
+repository. `invariance.py` runs from `/tmp/kernel-work/Invariance/` and
+`kernel_trace.py` from `/tmp/kernel-work/KernelTrace/`.
 - `mkcand.py` and `gpu-window.sh` precreate and run guarded GPU windows around the
   retained guardian.
 - `build-one.sh` builds a candidate from the committed series plus extra patches.
@@ -746,7 +746,7 @@ Definition (README, "What lossless means"): (1) the draft never changes the outp
 | `run-m1-flat` | `EXL3_TREE=0` (chain generator) | normal / capped / all-rejected | 45/45 identical to the tree run's normal arm |
 | `run-m1-flat` | `EXL3_TREE=0` | m1: no draft, the generator's own M=1 kernel set | 11/15 identical; 4/15 diverge (table below) |
 
-- Harness: `ops/autoresearch/invariance.py` (perturbs the drafted ids inside the draft sampler, so tree records stay consistent) and `ops/autoresearch/inv_report.py`. m1 is reported with its divergence and logit margins; it does not gate. `run-m1-flat` was recorded while m1 was a required arm, so its own `pass` field is false.
+- Harness (local operator tools): `invariance.py` (perturbs the drafted ids inside the draft sampler, so tree records stay consistent) and `inv_report.py`. m1 is reported with its divergence and logit margins; it does not gate. `run-m1-flat` was recorded while m1 was a required arm, so its own `pass` field is false.
 - Evidence: `/tmp/kernel-work/Lossless/inv/out/{run-m1-tree,run-m1-flat}/result.json`, report `report-m1-v2.json`, batch log `/tmp/kernel-work/Lossless/inv/batch-m1.log`.
 
 | Case | First divergent token | Tokens (spec / m1) | Top-2 logit margin, spec / m1 | First differing module |

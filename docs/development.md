@@ -53,7 +53,7 @@ The CPU development environment does not install serving torch, EXL3 or
 transformers. Missing imports remain explicit environment blockers, not ignored
 rules. Validate authored runtime modules in their separately pinned image before
 claiming complete type coverage. Bend sources are checked with the pinned
-`.#bend` toolchain (see [AGENTS.md](../AGENTS.md)), not the Python gates;
+`.#bend` toolchain (see [README, Prove](../README.md#prove)), not the Python gates;
 `nix run .#bend-verdict -- PROOF.bend --verdict` rechecks them with Bend's
 Lean-proven kernel (same Bend, plus the pinned Lean 4.34.0 from `nix/lean4.nix`).
 

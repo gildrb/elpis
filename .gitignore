@@ -20,3 +20,8 @@ benchmark-runs/
 /eval/.cache/
 /eval/runs/
 /eval/outputs/
+
+# Private agent rules and local operator scripts stay out of the repository.
+/AGENTS.md
+/.omp/
+/ops/
