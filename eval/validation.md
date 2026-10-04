@@ -87,6 +87,38 @@ or matched recipe comparison.
   content except 35 uv HTTP-cache `.http` entries (fetch metadata).
   `sandbox --check` passes. Later lane runs record the new image ID.
 
+## 2026-10-04: hash-locked build tools
+
+- Before: `uv sync` built the editable Verifiers and Prime Envs packages in
+  isolated build environments. `build-constraint-dependencies` pinned hatchling,
+  hatch-vcs and setuptools-scm by version only. uv fetched them and their
+  dependencies without hashes. uv 0.12.1 has no hashed build-constraint form.
+- Now: `pyproject.toml` (and `direct/mrcr`, `direct/graphwalks`) lists the build
+  tools in a default `build` dependency group and sets `no-build-isolation`.
+  `uv.lock` records them with hashes (editables 0.6, hatchling 1.32.0, hatch-vcs
+  0.5.0, setuptools-scm 9.2.2, setuptools 84.0.0, packaging 26.3, pathspec 1.1.1,
+  pluggy 1.6.0, tomlkit 0.15.1, trove-classifiers 2026.6.1.19). Every locked
+  hash matches the PyPI JSON API. uv installs these first and then builds the
+  editables in the project environment, so no build fetches an unlocked file.
+- Verifiers has a dynamic version. `[[tool.uv.dependency-metadata]]` gives uv
+  its static metadata, so the lock does not need a build. uv does not compare it
+  with the build. `setup` and `direct/setup` now build the metadata with the locked
+  hatchling and fail on any difference (shown with a changed version and with a
+  removed requirement).
+- `uv lock --offline` changed `uv.lock` only by these additions, the
+  dependency-metadata entry and the Verifiers lock metadata. No runtime package
+  version changed. A new virtual environment synced offline with
+  `--locked`; uv reported "Prepared 9 packages without build isolation".
+- `setup --check`, `direct/setup --check`, `run tiny --dry-run` and
+  `direct/run smoke --dry-run` pass.
+- `pyproject.toml` and `uv.lock` are sandbox recipe inputs, so `sandbox --check`
+  failed after this change. `eval/scripts/sandbox` re-recorded the image as
+  `sha256:d6a4517c…`. Its RootFS layer list is identical to `sha256:5962c155…`;
+  neither file enters the image build context. `sandbox --check` passes.
+- `direct/setup` now runs uv with `--directory`: uv 0.12.1 reports the
+  dynamic-version lock as stale with `--project` from another directory. It also
+  sets `GIT_LFS_SKIP_SMUDGE=1` and uses the Nix `python3.12`.
+
 ## Failures found and fixed during integration
 
 A raw HF snapshot is not enough for a fresh offline repository-name lookup.

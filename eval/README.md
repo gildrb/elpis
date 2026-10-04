@@ -57,7 +57,7 @@ is part of its standard harness, not a repository-specific adapter.
 | Verifiers | `prime-envs.lock`: `https://github.com/PrimeIntellect-ai/verifiers`, `ef47b2e96284a00bdcfc1012b9624b0c41ee6a0e`, version `0.3.2.dev86` |
 | Environment packages | Editable packages from that exact Prime Envs checkout; versions in `pyproject.toml` and `uv.lock` |
 | Python/tools | Repository `flake.lock`; Python 3.12 for eval, uv 0.12.1; Python 3.13 remains the repository development interpreter |
-| Python dependencies | `eval/uv.lock`; separate native uv script locks in `runtime/` for the actual harness/scoring subprocesses |
+| Python dependencies | `eval/uv.lock`, including the build tools (`build` group); separate native uv script locks in `runtime/` for the actual harness/scoring subprocesses |
 | Task data | `datasets.lock`: HF commit, exact source files and hashes; MRCR GCS generation, size and SHA256 |
 | Sandbox | Digest-pinned base and uv images in `runtime/Dockerfile`; helper-image pins in `runtime/images.lock`; actual built image ID saved in each resolved Docker launch |
 
@@ -69,6 +69,10 @@ into Git. Existing wrong-revision or dirty checkouts fail instead of being reset
 The separate eval project is intentional: upstream's root uv lock does **not**
 include Verifiers or these environment packages. We lock their actual combined
 installation instead of relying on editable `pip install` resolution at run time.
+The editables build without isolation from the hash-locked `build` dependency
+group, so uv never fetches an unlocked build requirement. Verifiers' dynamic
+version comes from static `dependency-metadata`; `scripts/setup` fails if
+hatchling builds different metadata.
 
 The chosen Verifiers commit includes upstream's fix to reuse an installed uv.
 The earlier 0.3.1 release upgraded uv during each harness setup. Native runtime
