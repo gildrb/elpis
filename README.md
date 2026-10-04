@@ -119,14 +119,25 @@ Figures of other projects come from their repositories. elpis did not run them a
 
 ## Run
 
-1. Make a private `QWEN_STATE_ROOT` with `models/qwen38-27b-exl3/`, `models/dflash2-exl3/`, `cache/`, `prefix-cache/` (mode 0700), `api-key` and `qwen-inference-launch.lock` ([docs/docker.md](docs/docker.md)).
-2. Put the pinned weights (see [Setup](#setup)) in `models/`. The server does not start if one byte is different.
-3. Install Docker Compose and the NVIDIA Container Toolkit (CDI `nvidia.com/gpu=0`). Load the authenticated base image locally.
-4. Build and start:
+1. Make a private `QWEN_STATE_ROOT` with `models/`, `cache/`, `prefix-cache/` (mode 0700), `api-key` and `qwen-inference-launch.lock` ([docs/docker.md](docs/docker.md)).
+2. Install Docker with Compose and Buildx, the NVIDIA Container Toolkit (CDI `nvidia.com/gpu=0`) and Nix with flakes.
+3. Download the pinned weights and check every byte:
 
 ```sh
+export QWEN_STATE_ROOT=/absolute/path/to/state
+hf download r0b0tlab/Qwen3.8-27B-EXL3-4.00bpw --revision 3f1771b8c21f83cbb8e82169559ced9f38ca04e5 --local-dir "$QWEN_STATE_ROOT/models/qwen38-27b-exl3"
+hf download r0b0tlab/Qwen3.8-27B-DFlash2-EXL3-4.00bpw --revision 265b5240592907d2d55ff0dc4d5f66569692604d --local-dir "$QWEN_STATE_ROOT/models/dflash2-exl3"
+python3 -B prepare/verify-models.py --target "$QWEN_STATE_ROOT/models/qwen38-27b-exl3" --draft "$QWEN_STATE_ROOT/models/dflash2-exl3" --representation exl3
+```
+
+4. Build from source and start:
+
+```sh
+nix develop --no-write-lock-file -c true    # get the pinned Nix toolchain once
+bash docker/fetch-base.sh                   # the only network step: download and sha256-check every base input
+bash docker/build-base.sh                   # no network; tags qwen-elpis:exl3-base only if its content manifest matches the pin
 bash docker/build-exl3.sh candidate-ext qwen-inference:exl3
-export QWEN_STATE_ROOT=/absolute/path/to/state QWEN_IMAGE=qwen-inference:exl3
+export QWEN_IMAGE=qwen-inference:exl3
 export QWEN_IMAGE_ID="$(docker image inspect -f '{{.Id}}' "$QWEN_IMAGE")"   # sha256:<64 hex>
 export QWEN_ALLOW_UNQUALIFIED=1
 docker compose --project-name qwen-inference up --no-build --pull never --detach --wait
@@ -149,8 +160,11 @@ python3 -m bench.gsm8k_compare --api-key-file /path/to/api-key --data gsm8k-test
 ```sh
 nix run .#bend -- PROOF.bend                     # every law, TypeScript checker (about 10 min)
 nix run .#bend-verdict -- PROOF.bend --verdict   # the same, checked again by the Lean-proven kernel (about 1.7 h)
-python3 -B bend/err_gemm_diff.py                 # one source link: Bend model text vs patched source
+nix develop --no-write-lock-file -c python3 -I -B bend/engine_trees.py OUT                  # stock + patched ExLlamaV3 from the pinned tarball
+nix develop --no-write-lock-file -c python3 -I -B bend/err_gemm_diff.py --stock OUT/stock  # one source link: Bend model text vs patched source
 ```
+
+Every source link, its engine tree and its inputs: [docs/development.md](docs/development.md#source-links-bend_diffpy).
 
 ## Setup
 
@@ -182,3 +196,5 @@ python3 -B bend/err_gemm_diff.py                 # one source link: Bend model t
 - Deployment: [docs/docker.md](docs/docker.md)
 - Evaluator: [eval/README.md](eval/README.md)
 - All docs: [docs/README.md](docs/README.md)
+- Security reports: [SECURITY.md](SECURITY.md)
+- License: MIT ([LICENSE](LICENSE))
