@@ -179,6 +179,15 @@ a direct `type: object` with parameter schemas in its root `properties`,
 object (for example `required`) and declare no parameter schemas; a root `$ref` is
 rejected.
 
+The server matches tool-schema `pattern` and `patternProperties` with the `regex`
+module from the base image, not Python `re`. All matches for one response share a
+2-second budget. When the budget runs out, the request fails with HTTP 400
+`pattern_timeout`. A tool schema that contains both `unevaluatedProperties` and
+`patternProperties` is rejected. A client must send its request line and headers
+within 60 seconds (this includes keep-alive idle time) and its body within 300
+seconds; else the server closes the connection (HTTP 408 for a late body).
+Generation and response writes have no timeout.
+
 Chat `stream=true` is **buffered SSE**, marked
 `X-EXL3-Transport: buffered-sse`: generation finishes before content/reasoning/tool
 frames are sent. Optional usage and `[DONE]` complete the transport. It is not
