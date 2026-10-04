@@ -119,6 +119,45 @@ or matched recipe comparison.
   dynamic-version lock as stale with `--project` from another directory. It also
   sets `GIT_LFS_SKIP_SMUDGE=1` and uses the Nix `python3.12`.
 
+## 2026-10-04: Dependabot advisories
+
+- urllib3 2.7.0 -> 2.8.0 (GHSA-vxq7-64xx-v4gw, GHSA-8988-9cw3-xx77,
+  GHSA-gh4c-6fx4-qh6g) and PyJWT 2.14.0 -> 2.15.0 (GHSA-42vr-xj54-vc7v) in
+  `uv.lock`, `direct/graphwalks/uv.lock` and `direct/mrcr/uv.lock`. `uv lock
+  --upgrade-package urllib3==2.8.0 --upgrade-package pyjwt==2.15.0` (uv 0.12.1,
+  `nix develop`) changed only these two packages and their hashes. No
+  `pyproject.toml` changed. The `build` group is unchanged and stays hashed.
+- datasets stays 4.6.1 in `direct/`. GHSA-379c-qx7v-6h59 is fixed in 5.0.1, but
+  the pinned Verifiers 0.1.15.dev17 declares `datasets>=3.0.0,<4.7.0`.
+  `direct/setup --check` runs `uv pip check` and fails on that conflict. The
+  advisory is a path traversal through `file_name` metadata in folder-based
+  builders (imagefolder, audiofolder, videofolder). The direct runtime does not
+  use them:
+  - A search of the pinned Verifiers tree (`977e3fc4`, both `verifiers` and
+    `verifiers-graphwalks` checkouts), `graphwalks.py`, `mrcr_v2.py` and
+    `eval/direct/{run,setup,inspect_dataset.py,prepare_transport.py,configs}`
+    finds no `imagefolder`, `audiofolder`, `videofolder`, `FolderBasedBuilder`,
+    `file_name` or `save_to_disk`.
+  - The one `push_to_hub` is `verifiers/utils/save_utils.py:884`. It runs only if
+    `save_to_hf_hub` is true (`utils/eval_utils.py:1134`,
+    `envs/environment.py:1102`). All 11 `direct/configs/*/*.toml` set
+    `save_to_hf_hub = false` (line 11).
+  - GraphWalks: `graphwalks.py:188` calls `load_dataset("openai/graphwalks")`.
+    `run` links that name to the snapshot `f338bb26…`. It holds only `README.md`
+    and two parquet files, sha256 `54036036…` and `53787943…` in
+    `datasets.lock`. The smoke dry run recorded `builder_name: parquet`, 1150
+    rows.
+  - MRCR: `mrcr_v2.py` does not import `datasets`. It reads the two CSV files
+    with `csv.DictReader` (`mrcr_v2.py:113-114`). `datasets.lock` pins their GCS
+    generation, size and sha256 (`c6be39bc…`, `fe3b726c…`). `run` checks them
+    with `scripts/data --check` before it loads them. The download at
+    `mrcr_v2.py:99-102` runs only for a missing file.
+- `setup` and `direct/setup` (sync mode) installed the new versions. `setup
+  --check`, `direct/setup --check`, `run tiny --dry-run` and `direct/run smoke
+  --dry-run` pass.
+- `eval/scripts/sandbox` re-recorded the image as `sha256:93ac158c…`. Its RootFS
+  layer list is identical to `sha256:d6a4517c…`. `sandbox --check` passes.
+
 ## Failures found and fixed during integration
 
 A raw HF snapshot is not enough for a fresh offline repository-name lookup.
