@@ -17,7 +17,6 @@ normalized by Bend (unary Nat), so only its elpis route (= stock) is compared.
 
 import argparse
 import re
-import subprocess
 import sys
 from pathlib import Path
 
@@ -66,11 +65,12 @@ def bend_rows(bend: str) -> dict[Key, Row]:
         (stock class, elpis route, elpis class) per (op, m).
 
     """
-    out = subprocess.run(  # ruff: ignore[subprocess-without-shell-equals-true]  argv: pinned bend + repo PRECISION_TABLE.bend, no shell
+    out = source_link.run(
         [bend, str(HERE / "PRECISION_TABLE.bend")],
         capture_output=True,
         text=True,
         check=True,
+        cpu_heavy=False,
     ).stdout
     text = out.strip()
     if text.startswith('"'):

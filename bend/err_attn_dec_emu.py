@@ -68,7 +68,7 @@ if TYPE_CHECKING:
     Fl = npt.NDArray[np.float16] | npt.NDArray[np.float32] | npt.NDArray[np.float64]
 
 f16, f32, f64 = np.float16, np.float32, np.float64
-HD, G, PAGE = 256, 6, 256
+HD, G = 256, 6
 H_DIM = 32  # the Hadamard rotation size
 S_E = 20  # 82 SMs // 4 kv heads (E:bc_attn.py av_splits)
 SPLITS_CAP = 41  # stock: min(2 * 82 // 4, 128)

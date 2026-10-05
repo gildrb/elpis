@@ -26,6 +26,7 @@ paths, the stock hash check and the removal of the diagnostic prints changed.
 """
 
 import hashlib
+import importlib
 import sys
 import types
 from pathlib import Path
@@ -74,27 +75,46 @@ def asm_text(asm: object, key: str) -> str:
     return text
 
 
+class AttnArgs:
+    """Stand-in for exllamav3's AttnArgs; only used in annotations at import time."""
+
+
+def get_non_causal_span_arglist(_args: AttnArgs) -> list[dict[str, object]]:
+    """Stand-in for exllamav3's span splitter; the compiled kernels never call it.
+
+    Raises:
+        RuntimeError: Always.
+
+    """
+    msg = "get_non_causal_span_arglist is a stub"
+    raise RuntimeError(msg)
+
+
 def load_stock(stock: Path) -> types.ModuleType:
-    """Execute the pinned stock triton_paged.py without its package imports.
+    """Import the pinned stock triton_paged.py with stub parent packages.
 
     Returns:
         The module.
 
     """
-    path = stock / "modules/attention_fn/triton_paged.py"
-    data = path.read_bytes()
-    if hashlib.sha256(data).hexdigest() != STOCK_TRITON_PAGED:
+    attention_fn = stock / "modules/attention_fn"
+    path = attention_fn / "triton_paged.py"
+    if hashlib.sha256(path.read_bytes()).hexdigest() != STOCK_TRITON_PAGED:
         fail(f"{path} is not the stock 355c6ee file")
-    sys.modules.setdefault("exllamav3", types.ModuleType("exllamav3"))
-    old = "from .common import AttnArgs, get_non_causal_span_arglist"
-    src = data.decode("utf-8")
-    if src.count(old) != 1:
-        fail(f"{path}: the common import is not present exactly once")
-    src = src.replace(old, "AttnArgs = object\nget_non_causal_span_arglist = None")
-    mod = types.ModuleType("stock_tp")
-    mod.__file__ = str(path)
-    exec(compile(src, mod.__file__, "exec"), mod.__dict__)  # ruff: ignore[exec-builtin]  runs hash-pinned triton_paged.py so Triton JITs the real kernels (byte-identical PTX)
-    return mod
+    for name, directory in (
+        ("exllamav3", stock),
+        ("exllamav3.modules", stock / "modules"),
+        ("exllamav3.modules.attention_fn", attention_fn),
+    ):
+        package = types.ModuleType(name)
+        package.__path__ = [str(directory)]
+        sys.modules[name] = package
+    common = types.ModuleType("exllamav3.modules.attention_fn.common")
+    common.__dict__.update(
+        AttnArgs=AttnArgs, get_non_causal_span_arglist=get_non_causal_span_arglist
+    )
+    sys.modules[common.__name__] = common
+    return importlib.import_module("exllamav3.modules.attention_fn.triton_paged")
 
 
 def prefill(mod: types.ModuleType) -> tuple[str, str]:

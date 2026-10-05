@@ -27,10 +27,12 @@ from __future__ import annotations
 import argparse
 import re
 import shutil
-import subprocess
 import sys
 import tempfile
 from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import source_link
 
 REPO = Path(__file__).resolve().parent.parent
 SERIES = [REPO / "patches/exl3", REPO / "patches/exl3-ext"]
@@ -388,12 +390,13 @@ def build(stock: Path, out: Path) -> list[str]:
     errors: list[str] = []
     for d in SERIES:
         for p in series_patches(d):
-            r = subprocess.run(  # ruff: ignore[subprocess-without-shell-equals-true]  argv: patch from PATH applying a repo series patch, no shell
+            r = source_link.run(
                 [patch, "-p1", "-s", "-f", "--no-backup-if-mismatch", "-i", str(p)],
                 cwd=out,
                 capture_output=True,
                 text=True,
                 check=False,
+                cpu_heavy=False,
             )
             if r.returncode != 0:
                 errors.append(

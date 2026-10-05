@@ -48,12 +48,14 @@ import importlib.util
 import json
 import re
 import shutil
-import subprocess
 import sys
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 from typing import NoReturn
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import source_link
 
 REPO = Path(__file__).resolve().parent.parent
 WARP = 32
@@ -998,11 +1000,12 @@ def check_sass(so: Path, cuobjdump: str) -> None:
     norm_fn = (
         "_Z15rms_norm_kernelILi2Ef6__half13__nv_bfloat16fEvPKT0_PKT2_PT1_PT3_fiiffi"
     )
-    dump = subprocess.run(  # ruff: ignore[subprocess-without-shell-equals-true]  argv: cuobjdump (PATH or --cuobjdump) + fixed kernel symbol on the given .so, no shell
+    dump = source_link.run(
         [cuobjdump, "-sass", "-fun", norm_fn, str(so)],
         capture_output=True,
         text=True,
         check=True,
+        cpu_heavy=False,
     ).stdout
     sec = [
         ln for ln in sass_section(dump, norm_fn) if not ln.strip().startswith("/* 0x")
@@ -1018,11 +1021,12 @@ def check_sass(so: Path, cuobjdump: str) -> None:
         ):
             fail("rms_norm_kernel: rmf is not MUFU.RCP + FFMA + MUFU.RSQ")
     tail_fn = "_Z20exl3_tail_m16_kernelILi0ELi2EEvPK6__halfPfS3_15Exl3TailM16Args"
-    dump = subprocess.run(  # ruff: ignore[subprocess-without-shell-equals-true]  argv: cuobjdump (PATH or --cuobjdump) + fixed kernel symbol on the given .so, no shell
+    dump = source_link.run(
         [cuobjdump, "-sass", "-fun", tail_fn, str(so)],
         capture_output=True,
         text=True,
         check=True,
+        cpu_heavy=False,
     ).stdout
     ops = [
         re.sub(r"^\s*/\*[0-9a-f]+\*/\s*", "", ln).strip()
@@ -1082,7 +1086,9 @@ def parse_args(argv: list[str]) -> Args:
         elif flag == "--sass":
             so = Path(args.pop(0))
         elif flag == "--cuobjdump":
-            cuobjdump = args.pop(0)
+            # a bare name is looked up on PATH; a path is made absolute
+            given = args.pop(0)
+            cuobjdump = str(Path(given).absolute()) if "/" in given else given
         elif flag == "--m1map":
             m1map = Path(args.pop(0))
         else:

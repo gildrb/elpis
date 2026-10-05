@@ -47,7 +47,6 @@ import argparse
 import hashlib
 import re
 import shutil
-import subprocess
 import sys
 import tempfile
 from dataclasses import dataclass
@@ -581,7 +580,7 @@ def build_elpis(stock: Path, dst: Path, stop_before: str | None = STOP_BEFORE) -
                 break
             if sha(pdir / name) != digest:
                 fail(f"{series}/{name}: sha256 differs from the series")
-            r = subprocess.run(  # ruff: ignore[subprocess-without-shell-equals-true]  argv: patch from PATH applying a sha256-checked series patch, no shell
+            r = source_link.run(
                 [
                     patch,
                     "-p1",
@@ -595,6 +594,7 @@ def build_elpis(stock: Path, dst: Path, stop_before: str | None = STOP_BEFORE) -
                 capture_output=True,
                 text=True,
                 check=False,
+                cpu_heavy=False,
             )
             if r.returncode != 0:
                 fail(f"{series}/{name} does not apply: {r.stdout}{r.stderr}")
@@ -850,11 +850,12 @@ def disasm(flags: list[str], cubin: Path) -> str:
         The disassembly.
 
     """
-    return subprocess.run(  # ruff: ignore[subprocess-without-shell-equals-true]  argv: nvdisasm from PATH + fixed flags on a locally built cubin, no shell
+    return source_link.run(
         [tool("nvdisasm"), *flags, str(cubin)],
         capture_output=True,
         text=True,
         check=True,
+        cpu_heavy=False,
     ).stdout
 
 
@@ -1029,15 +1030,15 @@ def compile_cubin(
         nvcc's stderr when it failed, else None.
 
     """
-    r = subprocess.run(  # ruff: ignore[subprocess-without-shell-equals-true]  argv: nvcc from the nix shell compiling a repo kernel to a private cubin, no shell
-        source_link.locked([
+    r = source_link.run(
+        [
             *nvcc(includes),
             *flags,
             "-cubin",
             "-o",
             str(out),
             str(src),
-        ]),
+        ],
         capture_output=True,
         text=True,
         check=False,

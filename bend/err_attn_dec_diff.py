@@ -38,7 +38,6 @@ from __future__ import annotations
 import argparse
 import re
 import shutil
-import subprocess
 import sys
 import tempfile
 from pathlib import Path
@@ -1096,8 +1095,8 @@ def check_bend(td: Path) -> None:
     """
     f = td / "dec_eval.bend"
     f.write_text(bend_source())
-    out = subprocess.run(  # ruff: ignore[subprocess-without-shell-equals-true]  argv: pinned bend + generated .bend file in a private tempdir, no shell
-        source_link.locked([source_link.bend(), str(f)]),
+    out = source_link.run(
+        [source_link.bend(), str(f)],
         capture_output=True,
         text=True,
         timeout=1800,

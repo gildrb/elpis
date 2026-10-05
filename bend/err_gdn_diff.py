@@ -35,11 +35,13 @@ from __future__ import annotations
 import hashlib
 import re
 import shutil
-import subprocess
 import sys
 import tempfile
 from pathlib import Path
 from typing import NoReturn
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import source_link
 
 REPO = Path(__file__).resolve().parent.parent
 MUTATE_ARGC = 3
@@ -281,7 +283,7 @@ def build_patched(stock: Path, out: Path) -> None:
             patch = d / name
             if hashlib.sha256(patch.read_bytes()).hexdigest() != sha:
                 fail(f"{patch}: sha256 differs from the series")
-            r = subprocess.run(  # ruff: ignore[subprocess-without-shell-equals-true]  argv: patch from PATH applying a sha256-checked series patch, no shell
+            r = source_link.run(
                 [
                     patch_exe,
                     "-p1",
@@ -295,6 +297,7 @@ def build_patched(stock: Path, out: Path) -> None:
                 capture_output=True,
                 text=True,
                 check=False,
+                cpu_heavy=False,
             )
             if r.returncode:
                 fail(f"{name} does not apply: {r.stdout}{r.stderr}")
