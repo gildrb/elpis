@@ -1,35 +1,44 @@
 #!/usr/bin/env python3
-"""
-Finite source link of bend/err_elem.bend (rounding-error paths of the decode norms, residual adds,
-SiLU * up and the inter-kernel dtypes) to the stock ExLlamaV3 355c6ee package and to the elpis
-package (the stock package with patches/exl3/series and patches/exl3-ext/series applied by the
-repository's own applier, built here in a temporary directory).
+# Copyright (c) 2026 Gil Rodrigues
+"""Finite source link of bend/err_elem.bend to the stock and elpis packages.
+
+bend/err_elem.bend holds the rounding-error paths of the decode norms, residual adds,
+SiLU * up and the inter-kernel dtypes. The packages are stock ExLlamaV3 355c6ee and
+elpis (the stock package with patches/exl3/series and patches/exl3-ext/series applied
+by the repository's own applier, built here in a temporary directory).
 
 Checks, failing closed:
-  1. every "S:<file>:<lines>" / "E:<file>:<lines>" citation in bend/err_elem.bend is listed in
-     CITES below, and each CITES fragment occurs (whitespace-normalized) on the cited lines of the
-     cited tree;
-  2. the helpers both rms_norm_kernels use are token-identical in stock and elpis norm.cu
-     (sum_sq4, apply4, write_half4, reduce_dyn), the rmf expression is the same text, and the
-     elpis register branch accumulates columns t + i * blockDim.x, i < REG_COLS = 2, in order;
-  3. elpis exl3_mlp_silu_h2 / exl3_mlp_act_mul_h2 are stock _silu(half2) / the act_mul_kernel_h
-     ACT_SILU tail with names changed, and the operation lists stock_act_ops / elpis_act_ops in
-     bend/err_elem.bend are the intrinsic sequence of the respective source bodies;
-  4. the shape constants of bend/err_elem.bend (cols 1280, nthreads 1024, reduce_steps 10,
-     tail_extra bounds 8 / 32) follow from the sources (N0, NCH, NUM_THREADS, launch formula);
-  5. the m1map route records name the modeled kernels on the served routes (elpis verify:
-     rms_norm_kernel input / final norm, exl3_tail_m16_kernel tail; stock M = 1: rms_norm_kernel
-     norms, act_mul_kernel_h);
-  6. with --sass SO [--cuobjdump BIN]: the compiled rms_norm_kernel<RES_IN, float, half, bf16,
-     float> divides by MUFU.RCP + FFMA before MUFU.RSQ, and exl3_tail_m16_kernel<0, 2> loads the
-     constant 0x394ccccd (RN(1/5120)) into the FFMA before its MUFU.RSQ (hypothesis H_sass).
-Text evidence, not a proof. `--mutate NAME` applies a deliberate source mutation that must be rejected.
+  1. every "S:<file>:<lines>" / "E:<file>:<lines>" citation in bend/err_elem.bend is
+     listed in CITES below, and each CITES fragment occurs (whitespace-normalized) on
+     the cited lines of the cited tree;
+  2. the helpers both rms_norm_kernels use are token-identical in stock and elpis
+     norm.cu (sum_sq4, apply4, write_half4, reduce_dyn), the rmf expression is the same
+     text, and the elpis register branch accumulates columns t + i * blockDim.x, i <
+     REG_COLS = 2, in order;
+  3. elpis exl3_mlp_silu_h2 / exl3_mlp_act_mul_h2 are stock _silu(half2) / the
+     act_mul_kernel_h ACT_SILU tail with names changed, and the operation lists
+     stock_act_ops / elpis_act_ops in bend/err_elem.bend are the intrinsic sequence of
+     the respective source bodies;
+  4. the shape constants of bend/err_elem.bend (cols 1280, nthreads 1024, reduce_steps
+     10, tail_extra bounds 8 / 32) follow from the sources (N0, NCH, NUM_THREADS, launch
+     formula);
+  5. the m1map route records name the modeled kernels on the served routes (elpis
+     verify: rms_norm_kernel input / final norm, exl3_tail_m16_kernel tail; stock M = 1:
+     rms_norm_kernel norms, act_mul_kernel_h);
+  6. with --sass SO [--cuobjdump BIN]: the compiled rms_norm_kernel<RES_IN, float, half,
+     bf16, float> divides by MUFU.RCP + FFMA before MUFU.RSQ, and
+     exl3_tail_m16_kernel<0, 2> loads the constant 0x394ccccd (RN(1/5120)) into the FFMA
+     before its MUFU.RSQ (hypothesis H_sass).
+Text evidence, not a proof. `--mutate NAME` applies a deliberate source mutation that
+must be rejected.
 
-Usage: python3 bend/err_elem_diff.py [--mutate NAME] [--sass SO [--cuobjdump BIN]] [--m1map DIR] STOCK_PACKAGE_DIR
-  STOCK_PACKAGE_DIR: the stock exllamav3 package directory at 355c6ee (OUT/stock of bend/engine_trees.py).
-  DIR: the m1map output directory (m1map-map.json, m1map-stock.json): kernel maps that a GPU run of the
-    served engine records. The repository alone cannot make it. Without --m1map, check 5 does not run and
-    the script says so.
+Usage: python3 bend/err_elem_diff.py [--mutate NAME] [--sass SO [--cuobjdump BIN]]
+       [--m1map DIR] STOCK_PACKAGE_DIR
+  STOCK_PACKAGE_DIR: the stock exllamav3 package directory at 355c6ee (OUT/stock of
+    bend/engine_trees.py).
+  DIR: the m1map output directory (m1map-map.json, m1map-stock.json): kernel maps that a
+    GPU run of the served engine records. The repository alone cannot make it. Without
+    --m1map, check 5 does not run and the script says so.
   BIN: the cuobjdump executable; without --cuobjdump, the cuobjdump on PATH.
 """
 
@@ -42,9 +51,12 @@ import shutil
 import subprocess
 import sys
 import tempfile
+from dataclasses import dataclass
 from pathlib import Path
+from typing import NoReturn
 
 REPO = Path(__file__).resolve().parent.parent
+WARP = 32
 MODEL = REPO / "bend/err_elem.bend"
 
 NORM = "exllamav3_ext/norm.cu"
@@ -55,7 +67,8 @@ ACTCU = "exllamav3_ext/activation.cu"
 TRANS = "modules/transformer.py"
 QWEN = "architecture/qwen3_5.py"
 
-# (side, file, first line, last line, fragment): the fragment occurs on lines first..last.
+# (side, file, first line, last line, fragment): the fragment occurs on lines
+# first..last.
 CITES = [
     ("S", "ext.py", 92, 92, '"-lineinfo", "-O3", "--use_fast_math",'),
     ("E", "ext.py", 92, 92, '"-lineinfo", "-O3", "--use_fast_math",'),
@@ -79,7 +92,10 @@ CITES = [
         TRANS,
         182,
         182,
-        "y = self.mlp_norm.forward(y_resid, params, out_dtype = torch.half, residual_in = x)",
+        (
+            "y = self.mlp_norm.forward(y_resid, params, out_dtype = torch.half, "
+            "residual_in = x)"
+        ),
     ),
     (
         "S",
@@ -122,14 +138,20 @@ CITES = [
         TAIL,
         74,
         74,
-        "void exl3_tail_m16_kernel(const half* __restrict__ Ao, float* X, float* D, Exl3TailM16Args p)",
+        (
+            "void exl3_tail_m16_kernel(const half* __restrict__ Ao, float* "
+            "X, float* D, Exl3TailM16Args p)"
+        ),
     ),
     (
         "E",
         TRANS,
         233,
         233,
-        "y = self.attn_norm.forward(pending[1], params, out_dtype = torch.half, residual_in = x)",
+        (
+            "y = self.attn_norm.forward(pending[1], params, out_dtype = torch.half, "
+            "residual_in = x)"
+        ),
     ),
     (
         "E",
@@ -145,7 +167,10 @@ CITES = [
         TAIL,
         680,
         681,
-        "xo[0] = __halves2half2(__float2half_rn(x4.x), __float2half_rn(x4.y)); xo[1] = __halves2half2(__float2half_rn(x4.z), __float2half_rn(x4.w));",
+        (
+            "xo[0] = __halves2half2(__float2half_rn(x4.x), __float2half_rn(x4.y)); "
+            "xo[1] = __halves2half2(__float2half_rn(x4.z), __float2half_rn(x4.w));"
+        ),
     ),
     ("E", TAIL, 61, 62, "half* g; half* u;"),
     ("E", TAIL, 751, 751, "half2* ap = (half2*) (q.a + o);"),
@@ -154,7 +179,10 @@ CITES = [
         TAIL,
         819,
         819,
-        "had_ff_r_128_inner<false, true>(sl0, D + (size_t) r * N2 + col0, q.svh_d + col0, 0.088388347648f);",
+        (
+            "had_ff_r_128_inner<false, true>(sl0, D + (size_t) r * N2 + col0, "
+            "q.svh_d + col0, 0.088388347648f);"
+        ),
     ),
     ("E", QWEN, 463, 463, "out_dtype = torch.half,"),
     (
@@ -180,21 +208,30 @@ CITES = [
         NORM,
         101,
         108,
-        "lsum = fma(f4.x, f4.x, lsum); lsum = fma(f4.y, f4.y, lsum); lsum = fma(f4.z, f4.z, lsum); lsum = fma(f4.w, f4.w, lsum);",
+        (
+            "lsum = fma(f4.x, f4.x, lsum); lsum = fma(f4.y, f4.y, lsum); lsum "
+            "= fma(f4.z, f4.z, lsum); lsum = fma(f4.w, f4.w, lsum);"
+        ),
     ),
     (
         "S",
         NORM,
         103,
         106,
-        "lsum = fma(f4.x, f4.x, lsum); lsum = fma(f4.y, f4.y, lsum); lsum = fma(f4.z, f4.z, lsum); lsum = fma(f4.w, f4.w, lsum);",
+        (
+            "lsum = fma(f4.x, f4.x, lsum); lsum = fma(f4.y, f4.y, lsum); lsum "
+            "= fma(f4.z, f4.z, lsum); lsum = fma(f4.w, f4.w, lsum);"
+        ),
     ),
     (
         "E",
         NORM,
         119,
         122,
-        "lsum = fma(f4.x, f4.x, lsum); lsum = fma(f4.y, f4.y, lsum); lsum = fma(f4.z, f4.z, lsum); lsum = fma(f4.w, f4.w, lsum);",
+        (
+            "lsum = fma(f4.x, f4.x, lsum); lsum = fma(f4.y, f4.y, lsum); lsum "
+            "= fma(f4.z, f4.z, lsum); lsum = fma(f4.w, f4.w, lsum);"
+        ),
     ),
     (
         "S",
@@ -215,21 +252,34 @@ CITES = [
         NORM,
         313,
         321,
-        "for (int i = 0; i < REG_COLS; ++i) { int column = t + i * blockDim.x; if (column < columns) {",
+        (
+            "for (int i = 0; i < REG_COLS; ++i) { int column = t + i * blockDim.x; "
+            "if (column < columns) {"
+        ),
     ),
     (
         "S",
         NORM,
         140,
         151,
-        "for (int offset = 16; offset > 0; offset /= 2) sum += __shfl_xor_sync(0xffffffff, sum, offset); int num_warps = blockDim.x / 32; if (num_warps == 1) return sum;",
+        (
+            "for (int offset = 16; offset > 0; offset /= 2) "
+            "sum += __shfl_xor_sync(0xffffffff, "
+            "sum, offset); int num_warps = blockDim.x / 32; if (num_warps == "
+            "1) return sum;"
+        ),
     ),
     (
         "E",
         NORM,
         156,
         167,
-        "for (int offset = 16; offset > 0; offset /= 2) sum += __shfl_xor_sync(0xffffffff, sum, offset); int num_warps = blockDim.x / 32; if (num_warps == 1) return sum;",
+        (
+            "for (int offset = 16; offset > 0; offset /= 2) "
+            "sum += __shfl_xor_sync(0xffffffff, "
+            "sum, offset); int num_warps = blockDim.x / 32; if (num_warps == "
+            "1) return sum;"
+        ),
     ),
     (
         "S",
@@ -257,14 +307,20 @@ CITES = [
         NORM,
         112,
         115,
-        "x4.x = x4.x * w4.x * rmf; x4.y = x4.y * w4.y * rmf; x4.z = x4.z * w4.z * rmf; x4.w = x4.w * w4.w * rmf;",
+        (
+            "x4.x = x4.x * w4.x * rmf; x4.y = x4.y * w4.y * rmf; x4.z = x4.z "
+            "* w4.z * rmf; x4.w = x4.w * w4.w * rmf;"
+        ),
     ),
     (
         "E",
         NORM,
         128,
         131,
-        "x4.x = x4.x * w4.x * rmf; x4.y = x4.y * w4.y * rmf; x4.z = x4.z * w4.z * rmf; x4.w = x4.w * w4.w * rmf;",
+        (
+            "x4.x = x4.x * w4.x * rmf; x4.y = x4.y * w4.y * rmf; x4.z = x4.z "
+            "* w4.z * rmf; x4.w = x4.w * w4.w * rmf;"
+        ),
     ),
     ("E", NORM, 266, 266, "apply4(x4, w4, rmf);"),
     (
@@ -272,7 +328,10 @@ CITES = [
         TAIL,
         674,
         677,
-        "x4.x = x4.x * w4.x * rmf; x4.y = x4.y * w4.y * rmf; x4.z = x4.z * w4.z * rmf; x4.w = x4.w * w4.w * rmf;",
+        (
+            "x4.x = x4.x * w4.x * rmf; x4.y = x4.y * w4.y * rmf; x4.z = x4.z "
+            "* w4.z * rmf; x4.w = x4.w * w4.w * rmf;"
+        ),
     ),
     (
         "S",
@@ -293,14 +352,20 @@ CITES = [
         NORM,
         239,
         242,
-        "w4.x += constant_bias; w4.y += constant_bias; w4.z += constant_bias; w4.w += constant_bias;",
+        (
+            "w4.x += constant_bias; w4.y += constant_bias; w4.z += constant_bias; "
+            "w4.w += constant_bias;"
+        ),
     ),
     (
         "E",
         NORM,
         255,
         258,
-        "w4.x += constant_bias; w4.y += constant_bias; w4.z += constant_bias; w4.w += constant_bias;",
+        (
+            "w4.x += constant_bias; w4.y += constant_bias; w4.z += constant_bias; "
+            "w4.w += constant_bias;"
+        ),
     ),
     (
         "E",
@@ -315,7 +380,10 @@ CITES = [
         NORM,
         282,
         307,
-        "else { float sum = 0.0f; for (int column = t; column < columns; column += blockDim.x)",
+        (
+            "else { float sum = 0.0f; for (int column = t; column < columns; "
+            "column += blockDim.x)"
+        ),
     ),
     (
         "E",
@@ -329,7 +397,10 @@ CITES = [
         TAIL,
         616,
         620,
-        "float ss = 0.0f; ss = fma(y4.x, y4.x, ss); ss = fma(y4.y, y4.y, ss); ss = fma(y4.z, y4.z, ss); ss = fma(y4.w, y4.w, ss);",
+        (
+            "float ss = 0.0f; ss = fma(y4.x, y4.x, ss); ss = fma(y4.y, y4.y, "
+            "ss); ss = fma(y4.z, y4.z, ss); ss = fma(y4.w, y4.w, ss);"
+        ),
     ),
     (
         "E",
@@ -344,7 +415,10 @@ CITES = [
         TAIL,
         639,
         640,
-        "float sum = __ldcg(p.ssq + r * NCH + lane); if (lane + 32 < NCH) sum += __ldcg(p.ssq + r * NCH + lane + 32);",
+        (
+            "float sum = __ldcg(p.ssq + r * NCH + lane); if (lane + 32 < NCH) "
+            "sum += __ldcg(p.ssq + r * NCH + lane + 32);"
+        ),
     ),
     (
         "E",
@@ -358,7 +432,11 @@ CITES = [
         ACTK,
         22,
         31,
-        "half2 one = __float2half2_rn(1.0f); half2 neg_x = __hneg2(x); half2 e = h2exp(neg_x); half2 sum = __hadd2(one, e); half2 r = h2rcp(sum); half2 result = __hmul2(x, r);",
+        (
+            "half2 one = __float2half2_rn(1.0f); half2 neg_x = __hneg2(x); "
+            "half2 e = h2exp(neg_x); half2 sum = __hadd2(one, e); half2 r = "
+            "h2rcp(sum); half2 result = __hmul2(x, r);"
+        ),
     ),
     ("S", ACTK, 169, 185, "x2 = _silu(x2);"),
     ("S", ACTK, 169, 185, "((half2*) z)[idx] = __hmul2(x2, y2);"),
@@ -369,7 +447,10 @@ CITES = [
         TAIL,
         752,
         753,
-        "ap[0] = exl3_mlp_act_mul_h2(gp[0], up[0], q.act_limit); ap[1] = exl3_mlp_act_mul_h2(gp[1], up[1], q.act_limit);",
+        (
+            "ap[0] = exl3_mlp_act_mul_h2(gp[0], up[0], q.act_limit); ap[1] "
+            "= exl3_mlp_act_mul_h2(gp[1], up[1], q.act_limit);"
+        ),
     ),
 ]
 
@@ -383,8 +464,16 @@ MUTATIONS = {
     # elpis reduce_dyn: one butterfly level more
     "reduce_dyn": (
         NORM,
-        "    for (int offset = 16; offset > 0; offset /= 2) sum += __shfl_xor_sync(0xffffffff, sum, offset);\n    int num_warps",
-        "    for (int offset = 32; offset > 0; offset /= 2) sum += __shfl_xor_sync(0xffffffff, sum, offset);\n    int num_warps",
+        (
+            "    for (int offset = 16; offset > 0; offset /= 2) "
+            "sum += __shfl_xor_sync(0xffffffff, "
+            "sum, offset);\n    int num_warps"
+        ),
+        (
+            "    for (int offset = 32; offset > 0; offset /= 2) "
+            "sum += __shfl_xor_sync(0xffffffff, "
+            "sum, offset);\n    int num_warps"
+        ),
     ),
     # elpis silu: sigmoid multiplied before the reciprocal
     "silu_order": (
@@ -397,19 +486,57 @@ MUTATIONS = {
 }
 
 
-def fail(msg: str) -> None:
-    raise SystemExit(f"err_elem_diff: FAIL: {msg}")
+def fail(msg: str) -> NoReturn:
+    """Stop with an error.
+
+    Args:
+        msg: The failure description.
+
+    Raises:
+        SystemExit: Always.
+
+    """
+    text = f"err_elem_diff: FAIL: {msg}"
+    raise SystemExit(text)
+
+
+def say(msg: str) -> None:
+    """Print one progress line.
+
+    Args:
+        msg: The line, without its newline.
+
+    """
+    sys.stdout.write(f"{msg}\n")
 
 
 def flat(text: str) -> str:
+    """Drop // comments and collapse whitespace.
+
+    Args:
+        text: The source text.
+
+    Returns:
+        The flattened text.
+
+    """
     text = re.sub(r"//[^\n]*", "", text)
     return re.sub(r"\s+", " ", text).strip()
 
 
 def norm_lines(text: str) -> list[str]:
-    out = []
-    for line in text.split("\n"):
-        line = re.sub(r"//.*", "", line).strip()
+    """Normalize the lines of a source text, dropping comments and blank lines.
+
+    Args:
+        text: The source text.
+
+    Returns:
+        The non-empty normalized lines.
+
+    """
+    out: list[str] = []
+    for raw in text.split("\n"):
+        line = re.sub(r"//.*", "", raw).strip()
         line = re.sub(r"\s+", " ", line)
         if line:
             out.append(line)
@@ -417,6 +544,18 @@ def norm_lines(text: str) -> list[str]:
 
 
 def seg(text: str, start: str, end: str, what: str) -> str:
+    """Cut the segment from a unique start anchor to the next end anchor.
+
+    Args:
+        text: The source text.
+        start: The start anchor; must occur exactly once.
+        end: The end anchor (excluded).
+        what: The segment's name in errors.
+
+    Returns:
+        The segment.
+
+    """
     i = text.find(start)
     if i < 0 or text.find(start, i + 1) >= 0:
         fail(f"{what}: start anchor {start!r} must occur exactly once")
@@ -427,37 +566,65 @@ def seg(text: str, start: str, end: str, what: str) -> str:
 
 
 def build_elpis(stock: Path, work: Path) -> Path:
-    """The stock package with patches/exl3 and the pinned patches/exl3-ext series applied."""
+    """Apply patches/exl3 and the pinned patches/exl3-ext series to the stock package.
+
+    Args:
+        stock: The stock package directory.
+        work: The work directory.
+
+    Returns:
+        The patched package directory.
+
+    """
     sys.path.insert(0, str(REPO))
     spec = importlib.util.spec_from_file_location(
         "ext", REPO / "patches/exl3-ext/ext.py"
     )
+    if spec is None or spec.loader is None:
+        fail("patches/exl3-ext/ext.py cannot be loaded")
     ext = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(ext)
     manifest = ext.load()
     source = manifest["source"]
     if ext.tree_digest(stock / source["tree"]) != source["tree_sha256"]:
         fail(f"{stock}: extension sources differ from the pinned 355c6ee tree")
-    root = ext.engine_copy(stock, work / "elpis")
+    root: object = ext.engine_copy(stock, work / "elpis")
+    if not isinstance(root, Path):
+        fail("ext.engine_copy did not return a path")
     ext.apply_series(manifest, root)
     return root
 
 
 def citations(model: str) -> set[tuple[str, str, int]]:
-    out = set()
+    """Expand every S:/E: citation of the model to (side, file, line) triples.
+
+    Args:
+        model: The model text.
+
+    Returns:
+        The cited lines.
+
+    """
+    out: set[tuple[str, str, int]] = set()
     for m in re.finditer(r"\b([SE]):([\w./]+\.(?:cu|cuh|py|cpp|h)):([\d,\-]+)", model):
-        side, path = m.group(1), m.group(2)
-        for part in m.group(3).strip(",-").split(","):
+        side, path = str(m[1]), str(m[2])
+        for part in str(m[3]).strip(",-").split(","):
             if not part:
                 continue
             a, _, b = part.partition("-")
-            for n in range(int(a), int(b or a) + 1):
-                out.add((side, path, n))
+            out.update((side, path, n) for n in range(int(a), int(b or a) + 1))
     return out
 
 
 def check_cites(trees: dict[str, Path], model: str) -> None:
-    covered = set()
+    """Check every CITES fragment and the citation coverage (check 1).
+
+    Args:
+        trees: The stock (S) and elpis (E) trees.
+        model: The model text.
+
+    """
+    covered: set[tuple[str, str, int]] = set()
     for side, path, a, b, frag in CITES:
         lines = (trees[side] / path).read_text().split("\n")
         if b > len(lines):
@@ -465,18 +632,27 @@ def check_cites(trees: dict[str, Path], model: str) -> None:
         window = flat("\n".join(lines[a - 1 : b]))
         if flat(frag) not in window:
             fail(
-                f"{side}:{path}:{a}-{b}: {frag!r} not found (lines read: {window[:200]!r})"
+                f"{side}:{path}:{a}-{b}: {frag!r} not found (lines read: "
+                f"{window[:200]!r})"
             )
         covered |= {(side, path, n) for n in range(a, b + 1)}
     missing = sorted(c for c in citations(model) if c not in covered)
     if missing:
         fail(f"citations without a checked fragment: {missing[:10]}")
-    print(
-        f"err_elem_diff: {len(CITES)} cited fragments found; every citation of err_elem.bend covered"
+    say(
+        f"err_elem_diff: {len(CITES)} cited fragments found; every citation "
+        "of err_elem.bend covered"
     )
 
 
 def check_helpers(s: dict[str, str], e: dict[str, str]) -> None:
+    """Check the shared norm helpers and both accumulation orders (check 2).
+
+    Args:
+        s: The stock sources by path.
+        e: The elpis sources by path.
+
+    """
     for name, start, end in (
         (
             "sum_sq4",
@@ -508,8 +684,11 @@ def check_helpers(s: dict[str, str], e: dict[str, str]) -> None:
         )
     )
     want = (
-        "float sum = 0.0f; #pragma unroll for (int i = 0; i < REG_COLS; ++i) { int column = t + i * blockDim.x;"
-        " if (column < columns) { if constexpr (res_mode == RES_IN) add_resid_in(x4[i], r4[i], column);"
+        "float sum = 0.0f; #pragma unroll for (int i = 0; i < REG_COLS; "
+        "++i) { int column = t + i * blockDim.x;"
+        " if (column < columns) { if constexpr (res_mode == RES_IN) "
+        "add_resid_in(x4[i], "
+        "r4[i], column);"
         " sum = sum_sq4(sum, x4[i]); } } sum = reduce_dyn(sum, warp_id, lane_id);"
         " float rmf = rsqrtf(sum / (float) dim + epsilon) * constant_scale;"
     )
@@ -524,25 +703,40 @@ def check_helpers(s: dict[str, str], e: dict[str, str]) -> None:
         )
     )
     want = (
-        "float sum = 0.0f; for (int column = t; column < columns; column += blockDim.x) { float4 x4;"
-        " read_in(x4, x + row_off + 4 * column); if constexpr (res_mode == RES_IN) add_resid_in(x4, column);"
+        "float sum = 0.0f; for (int column = t; column < columns; column "
+        "+= blockDim.x) { float4 x4;"
+        " read_in(x4, x + row_off + 4 * column); if constexpr (res_mode "
+        "== RES_IN) add_resid_in(x4, column);"
         " sum = sum_sq4(sum, x4); } sum = reduce_dyn(sum, warp_id, lane_id);"
         " float rmf = rsqrtf(sum / (float) dim + epsilon) * constant_scale;"
     )
     if want not in strided:
         fail("stock strided branch: accumulation loop / rmf text changed")
-    print(
-        "err_elem_diff: sum_sq4 / apply4 / write_half4 / reduce_dyn identical; both accumulation orders as modeled"
+    say(
+        "err_elem_diff: sum_sq4 / apply4 / write_half4 / reduce_dyn identical; "
+        "both accumulation orders as modeled"
     )
 
 
 def intrinsic_ops(body: str) -> list[str]:
-    seq = []
+    """List the half2 intrinsics of a body as model operation names.
+
+    Args:
+        body: The source body.
+
+    Returns:
+        The operation names, in source order.
+
+    """
+    seq: list[str] = []
     for m in re.finditer(
-        r"__hneg2\(|h2exp\(|__hadd2\(one, e\)|h2rcp\(|__hmul2\(x, r\)|__hmul2\(x2, y2\)",
+        (
+            r"__hneg2\(|h2exp\(|__hadd2\(one, e\)|h2rcp\(|__hmul2\(x, r\)|__hmul2\(x2, "
+            r"y2\)"
+        ),
         body,
     ):
-        t = m.group(0)
+        t = m[0]
         seq.append(
             {
                 "__hneg2(": "HNeg",
@@ -557,13 +751,31 @@ def intrinsic_ops(body: str) -> list[str]:
 
 
 def bend_list(model: str, name: str) -> list[str]:
+    """Read a List<AOp> definition of the model.
+
+    Args:
+        model: The model text.
+        name: The definition name.
+
+    Returns:
+        The constructor names.
+
+    """
     m = re.search(rf"def {name}\(\) -> List<AOp>:\n  \[([^\]]*)\]", model)
     if not m:
         fail(f"err_elem.bend: {name} not found")
-    return [x.strip().removesuffix("{}") for x in m.group(1).split(",")]
+    return [x.strip().removesuffix("{}") for x in str(m[1]).split(",")]
 
 
 def check_act(s: dict[str, str], e: dict[str, str], model: str) -> None:
+    """Check the activation bodies and the model's operation lists (check 3).
+
+    Args:
+        s: The stock sources by path.
+        e: The elpis sources by path.
+        model: The model text.
+
+    """
     st_silu = norm_lines(
         seg(
             s[ACTK],
@@ -626,28 +838,66 @@ def check_act(s: dict[str, str], e: dict[str, str], model: str) -> None:
     ) + intrinsic_ops(el_body[el_body.index("    if (act_limit != 0.0f)") :])
     if bend_list(model, "stock_act_ops") != st_ops:
         fail(
-            f"stock_act_ops {bend_list(model, 'stock_act_ops')} != source sequence {st_ops}"
+            f"stock_act_ops {bend_list(model, 'stock_act_ops')} != source "
+            f"sequence {st_ops}"
         )
     if bend_list(model, "elpis_act_ops") != el_ops:
         fail(
-            f"elpis_act_ops {bend_list(model, 'elpis_act_ops')} != source sequence {el_ops}"
+            f"elpis_act_ops {bend_list(model, 'elpis_act_ops')} != source "
+            f"sequence {el_ops}"
         )
-    print(
-        f"err_elem_diff: activation bodies identical; operation lists = source sequences {st_ops}"
+    say(
+        "err_elem_diff: activation bodies identical; operation lists = "
+        f"source sequences {st_ops}"
     )
 
 
 def bend_const(model: str, name: str) -> int:
+    """Read a Nat constant of the model.
+
+    Args:
+        model: The model text.
+        name: The definition name.
+
+    Returns:
+        The constant.
+
+    """
     m = re.search(rf"def {name}\(\) -> Nat:\n  (\d+)n", model)
     if not m:
         fail(f"err_elem.bend: constant {name} not found")
-    return int(m.group(1))
+    return int(m[1])
+
+
+def sched_define(sched: str, name: str) -> int:
+    """Read an integer #define of the tail schedule header.
+
+    Args:
+        sched: The header text.
+        name: The macro name.
+
+    Returns:
+        The value.
+
+    """
+    m = re.search(rf"#define {name} (\d+)", sched)
+    if not m:
+        fail(f"exl3_tail_m16_sched.h: {name} not found")
+    return int(m[1])
 
 
 def check_shape(e: dict[str, str], s: dict[str, str], model: str) -> None:
+    """Check the model's shape constants against the sources (check 4).
+
+    Args:
+        e: The elpis sources by path.
+        s: The stock sources by path.
+        model: The model text.
+
+    """
     sched = e["exllamav3_ext/quant/exl3_tail_m16_sched.h"]
-    n0 = int(re.search(r"#define EXL3_TAIL_SCHED_N0 (\d+)", sched).group(1))
-    nch = int(re.search(r"#define EXL3_TAIL_SCHED_NCH (\d+)", sched).group(1))
+    n0 = sched_define(sched, "EXL3_TAIL_SCHED_N0")
+    nch = sched_define(sched, "EXL3_TAIL_SCHED_NCH")
     for side, t in (("stock", s), ("elpis", e)):
         if "#define NUM_THREADS 1024" not in t[NORM]:
             fail(f"{side} norm.cu: NUM_THREADS is not 1024")
@@ -658,7 +908,7 @@ def check_shape(e: dict[str, str], s: dict[str, str], model: str) -> None:
         fail(f"cols / nthreads in err_elem.bend != {cols} / {threads}")
     if bend_const(model, "reduce_steps") != 5 + (5 if warps > 1 else 0):
         fail("reduce_steps != reduce_dyn's adds at the served block size")
-    if nch * 128 != n0 or not (32 < nch <= 64):
+    if nch * 128 != n0 or not (WARP < nch <= 2 * WARP):
         fail(f"NCH {nch} does not fit the lane / lane + 32 reading of the tail")
     if f"Bool.or(Nat.is_lt(ch, {nch - 32}n), Nat.is_le(32n, ch))" not in model:
         fail(
@@ -669,12 +919,19 @@ def check_shape(e: dict[str, str], s: dict[str, str], model: str) -> None:
         not in model
     ):
         fail("tail_ssq: 4 - k fmas + 5 shuffles + chunk add + 5 shuffles changed")
-    print(
-        f"err_elem_diff: shape N0 = {n0} -> cols {cols}, threads {threads} ({warps} warps), NCH = {nch}"
+    say(
+        f"err_elem_diff: shape N0 = {n0} -> cols {cols}, threads {threads} "
+        f"({warps} warps), NCH = {nch}"
     )
 
 
 def check_routes(m1map: Path) -> None:
+    """Check the m1map route records (check 5).
+
+    Args:
+        m1map: The m1map output directory.
+
+    """
     mp = json.loads((m1map / "m1map-map.json").read_text())["kernel_map"]
     st = json.loads((m1map / "m1map-stock.json").read_text())["kernel_map"]
     want_v = {
@@ -703,13 +960,25 @@ def check_routes(m1map: Path) -> None:
     for key in ("T|gdn|mlp", "T|attn|mlp"):
         if "act_mul_kernel_h" not in st[key]["m1_stock"]:
             fail(f"stock M = 1 {key}: no act_mul_kernel_h")
-    print(
-        "err_elem_diff: m1map routes name the modeled kernels (elpis verify rows 8, stock M = 1)"
+    say(
+        "err_elem_diff: m1map routes name the modeled kernels (elpis verify "
+        "rows 8, stock M = 1)"
     )
 
 
 def sass_section(dump: str, fn: str) -> list[str]:
-    out, on = [], False
+    """Cut one function's section from a cuobjdump -sass dump.
+
+    Args:
+        dump: The dump text.
+        fn: The mangled function name.
+
+    Returns:
+        The section's lines.
+
+    """
+    out: list[str] = []
+    on = False
     for line in dump.splitlines():
         if "Function :" in line:
             on = line.strip().endswith(fn)
@@ -719,17 +988,26 @@ def sass_section(dump: str, fn: str) -> list[str]:
 
 
 def check_sass(so: Path, cuobjdump: str) -> None:
+    """Check the compiled rmf instruction sequences (check 6).
+
+    Args:
+        so: The built extension library.
+        cuobjdump: The cuobjdump executable.
+
+    """
     norm_fn = (
         "_Z15rms_norm_kernelILi2Ef6__half13__nv_bfloat16fEvPKT0_PKT2_PT1_PT3_fiiffi"
     )
-    dump = subprocess.run(
+    dump = subprocess.run(  # ruff: ignore[subprocess-without-shell-equals-true]  argv: cuobjdump (PATH or --cuobjdump) + fixed kernel symbol on the given .so, no shell
         [cuobjdump, "-sass", "-fun", norm_fn, str(so)],
         capture_output=True,
         text=True,
         check=True,
     ).stdout
-    sec = [l for l in sass_section(dump, norm_fn) if not l.strip().startswith("/* 0x")]
-    ops = [re.sub(r"^\s*/\*[0-9a-f]+\*/\s*", "", l).strip() for l in sec]
+    sec = [
+        ln for ln in sass_section(dump, norm_fn) if not ln.strip().startswith("/* 0x")
+    ]
+    ops = [re.sub(r"^\s*/\*[0-9a-f]+\*/\s*", "", ln).strip() for ln in sec]
     rsq = [i for i, o in enumerate(ops) if o.startswith("MUFU.RSQ")]
     if not rsq:
         fail("rms_norm_kernel: no MUFU.RSQ")
@@ -740,16 +1018,16 @@ def check_sass(so: Path, cuobjdump: str) -> None:
         ):
             fail("rms_norm_kernel: rmf is not MUFU.RCP + FFMA + MUFU.RSQ")
     tail_fn = "_Z20exl3_tail_m16_kernelILi0ELi2EEvPK6__halfPfS3_15Exl3TailM16Args"
-    dump = subprocess.run(
+    dump = subprocess.run(  # ruff: ignore[subprocess-without-shell-equals-true]  argv: cuobjdump (PATH or --cuobjdump) + fixed kernel symbol on the given .so, no shell
         [cuobjdump, "-sass", "-fun", tail_fn, str(so)],
         capture_output=True,
         text=True,
         check=True,
     ).stdout
     ops = [
-        re.sub(r"^\s*/\*[0-9a-f]+\*/\s*", "", l).strip()
-        for l in sass_section(dump, tail_fn)
-        if not l.strip().startswith("/* 0x")
+        re.sub(r"^\s*/\*[0-9a-f]+\*/\s*", "", ln).strip()
+        for ln in sass_section(dump, tail_fn)
+        if not ln.strip().startswith("/* 0x")
     ]
     rsq = [i for i, o in enumerate(ops) if o.startswith("MUFU.RSQ")]
     if len(rsq) != 1:
@@ -758,19 +1036,43 @@ def check_sass(so: Path, cuobjdump: str) -> None:
     mov = [o for o in win if re.match(r"MOV R\d+, 0x394ccccd", o)]
     if not mov:
         fail("exl3_tail_m16_kernel: no RN(1/5120) constant before MUFU.RSQ")
-    reg = re.match(r"MOV (R\d+),", mov[0]).group(1)
+    reg_m = re.match(r"MOV (R\d+),", mov[0])
+    if reg_m is None:
+        fail("exl3_tail_m16_kernel: the constant MOV has no register")
+    reg = reg_m[1]
     if not any(o.startswith("FFMA") and f", {reg}," in o for o in win):
         fail("exl3_tail_m16_kernel: the constant does not feed an FFMA before MUFU.RSQ")
     if any(o.startswith("MUFU.RCP") for o in win):
         fail("exl3_tail_m16_kernel: a MUFU.RCP feeds the tail rmf")
-    print(
-        f"err_elem_diff: SASS ({so.name}): norm rmf = MUFU.RCP + FFMA + MUFU.RSQ; tail rmf = FFMA by 0x394ccccd + MUFU.RSQ"
+    say(
+        f"err_elem_diff: SASS ({so.name}): norm rmf = MUFU.RCP + FFMA + "
+        "MUFU.RSQ; tail rmf = FFMA by 0x394ccccd + MUFU.RSQ"
     )
 
 
-def main(argv: list[str]) -> None:
+@dataclass(frozen=True)
+class Args:
+    """The parsed command line."""
+
+    stock: Path
+    mutate: str | None
+    sass: tuple[Path, str] | None
+    m1map: Path | None
+
+
+def parse_args(argv: list[str]) -> Args:
+    """Parse the command line; resolve cuobjdump for --sass.
+
+    Args:
+        argv: The command line.
+
+    Returns:
+        The parsed arguments.
+
+    """
     args = argv[1:]
-    mutate = so = None
+    mutate = None
+    so = None
     cuobjdump = None
     m1map = None
     while args and args[0].startswith("--"):
@@ -787,13 +1089,49 @@ def main(argv: list[str]) -> None:
             fail(f"unknown flag {flag}")
     if len(args) != 1:
         fail(
-            "usage: err_elem_diff.py [--mutate NAME] [--sass SO [--cuobjdump BIN]] [--m1map DIR] STOCK_PACKAGE_DIR"
+            "usage: err_elem_diff.py [--mutate NAME] [--sass SO [--cuobjdump "
+            "BIN]] [--m1map DIR] STOCK_PACKAGE_DIR"
         )
-    if so is not None and cuobjdump is None:
-        cuobjdump = shutil.which("cuobjdump")
+    sass = None
+    if so is not None:
         if cuobjdump is None:
-            fail("--sass needs cuobjdump: it is not on PATH and --cuobjdump is not given")
-    stock = Path(args[0])
+            cuobjdump = shutil.which("cuobjdump")
+        if cuobjdump is None:
+            fail(
+                "--sass needs cuobjdump: it is not on PATH and --cuobjdump is not given"
+            )
+        sass = (so, cuobjdump)
+    return Args(Path(args[0]), mutate, sass, m1map)
+
+
+def apply_mutation(elpis: Path, e: dict[str, str], mutate: str) -> None:
+    """Apply a deliberate source mutation to the elpis tree.
+
+    Args:
+        elpis: The elpis tree.
+        e: The elpis sources by path; updated in place.
+        mutate: The mutation name.
+
+    """
+    if mutate not in MUTATIONS:
+        fail(f"unknown mutation {mutate!r}")
+    path, old, new = MUTATIONS[mutate]
+    if e[path].count(old) != 1:
+        fail(f"mutation anchor occurs {e[path].count(old)} times")
+    e[path] = e[path].replace(old, new)
+    (elpis / path).write_text(e[path])
+    say(f"err_elem_diff: applied mutation {mutate}")
+
+
+def main(argv: list[str]) -> None:
+    """Run every check.
+
+    Args:
+        argv: The command line.
+
+    """
+    a = parse_args(argv)
+    stock = a.stock
     model = MODEL.read_text()
     with tempfile.TemporaryDirectory(prefix="err-elem-diff-") as tmp:
         elpis = build_elpis(stock, Path(tmp))
@@ -807,28 +1145,22 @@ def main(argv: list[str]) -> None:
         }
         s = {f: (stock / f).read_text() for f in files if (stock / f).exists()}
         e = {f: (elpis / f).read_text() for f in files}
-        if mutate is not None:
-            if mutate not in MUTATIONS:
-                fail(f"unknown mutation {mutate!r}")
-            path, old, new = MUTATIONS[mutate]
-            if e[path].count(old) != 1:
-                fail(f"mutation anchor occurs {e[path].count(old)} times")
-            e[path] = e[path].replace(old, new)
-            (elpis / path).write_text(e[path])
-            print(f"err_elem_diff: applied mutation {mutate}")
+        if a.mutate is not None:
+            apply_mutation(elpis, e, a.mutate)
         check_cites({"S": stock, "E": elpis}, model)
         check_helpers(s, e)
         check_act(s, e, model)
         check_shape(e, s, model)
-        if m1map is None:
-            print(
-                "err_elem_diff: m1map route check NOT RUN (no --m1map; the m1map dir is GPU-made and not in the repository)"
+        if a.m1map is None:
+            say(
+                "err_elem_diff: m1map route check NOT RUN (no --m1map; "
+                "the m1map dir is GPU-made and not in the repository)"
             )
         else:
-            check_routes(m1map)
-        if so is not None:
-            check_sass(so, cuobjdump)
-    print("err_elem_diff: OK")
+            check_routes(a.m1map)
+        if a.sass is not None:
+            check_sass(*a.sass)
+    say("err_elem_diff: OK")
 
 
 if __name__ == "__main__":

@@ -1,3 +1,4 @@
+# Copyright (c) 2026 Gil Rodrigues
 r"""Compile the stock prefill attention kernels to PTX for bend/err_prefill_diff.py.
 
 Usage (inside the engine image, which has Triton 3.6.0; no GPU and no network needed):
@@ -33,14 +34,44 @@ from typing import NoReturn
 import triton
 from triton.backends.compiler import GPUTarget
 from triton.compiler import ASTSource
+from triton.runtime.jit import JITFunction
 
 STOCK_TRITON_PAGED = "910379b663acb08711c3be207cd3e9ed96658527cc110a6ce39c793f997836d9"
 TARGET = GPUTarget("cuda", 86, 32)
+ARGC = 3
 
 
 def fail(message: str) -> NoReturn:
-    """Stop with an error."""
-    raise SystemExit(f"stock_prefill_ptx: FAIL: {message}")
+    """Stop with an error.
+
+    Args:
+        message: The failure description.
+
+    Raises:
+        SystemExit: Always.
+
+    """
+    text = f"stock_prefill_ptx: FAIL: {message}"
+    raise SystemExit(text)
+
+
+def asm_text(asm: object, key: str) -> str:
+    """Return one text artifact of a compiled kernel.
+
+    Args:
+        asm: The compiled kernel's asm mapping.
+        key: The artifact name (ptx, ttgir).
+
+    Returns:
+        The artifact text.
+
+    """
+    if not isinstance(asm, dict):
+        fail("the compiled kernel has no asm mapping")
+    text = asm.get(key)
+    if not isinstance(text, str):
+        fail(f"the compiled kernel has no {key} text")
+    return text
 
 
 def load_stock(stock: Path) -> types.ModuleType:
@@ -48,6 +79,7 @@ def load_stock(stock: Path) -> types.ModuleType:
 
     Returns:
         The module.
+
     """
     path = stock / "modules/attention_fn/triton_paged.py"
     data = path.read_bytes()
@@ -61,7 +93,7 @@ def load_stock(stock: Path) -> types.ModuleType:
     src = src.replace(old, "AttnArgs = object\nget_non_causal_span_arglist = None")
     mod = types.ModuleType("stock_tp")
     mod.__file__ = str(path)
-    exec(compile(src, mod.__file__, "exec"), mod.__dict__)  # noqa: S102  pinned stock source
+    exec(compile(src, mod.__file__, "exec"), mod.__dict__)  # ruff: ignore[exec-builtin]  runs hash-pinned triton_paged.py so Triton JITs the real kernels (byte-identical PTX)
     return mod
 
 
@@ -70,30 +102,33 @@ def prefill(mod: types.ModuleType) -> tuple[str, str]:
 
     Returns:
         (ptx, ttgir).
+
     """
-    fn = mod._paged_attn_prefill_kernel
+    fn: object = mod.__dict__.get("_paged_attn_prefill_kernel")
+    if not isinstance(fn, JITFunction):
+        fail("_paged_attn_prefill_kernel is not a Triton kernel")
     names = fn.arg_names
     scale = 1.0 / 16.0  # head_dim 256: softmax scale 1/sqrt(256)
-    const = dict(
-        IS_SPLIT=False,
-        NEW_KV=0,
-        QCK=0,
-        QCV=0,
-        n_q_heads=24,
-        n_kv_heads=4,
-        page_size=256,
-        head_dim=256,
-        HD_PAD=256,
-        scale=scale,
-        CAUSAL=True,
-        HAS_WINDOW_LEFT=False,
-        HAS_WINDOW_RIGHT=False,
-        SOFTCAP=0.0,
-        HAS_SINKS=False,
-        WIDE_INDEX=False,
-        BLOCK_M=64,
-        BLOCK_N=32,
-    )
+    const = {
+        "IS_SPLIT": False,
+        "NEW_KV": 0,
+        "QCK": 0,
+        "QCV": 0,
+        "n_q_heads": 24,
+        "n_kv_heads": 4,
+        "page_size": 256,
+        "head_dim": 256,
+        "HD_PAD": 256,
+        "scale": scale,
+        "CAUSAL": True,
+        "HAS_WINDOW_LEFT": False,
+        "HAS_WINDOW_RIGHT": False,
+        "SOFTCAP": 0.0,
+        "HAS_SINKS": False,
+        "WIDE_INDEX": False,
+        "BLOCK_M": 64,
+        "BLOCK_N": 32,
+    }
     ptrs = {
         "q": "*fp16",
         "k_cache": "*fp16",
@@ -131,7 +166,7 @@ def prefill(mod: types.ModuleType) -> tuple[str, str]:
             fail(f"unmapped arg {n}")
     src = ASTSource(fn, sig, constexprs={(names.index(k),): v for k, v in cx.items()})
     k = triton.compile(src, target=TARGET, options={"num_warps": 8, "num_stages": 2})
-    return k.asm["ptx"], k.asm["ttgir"]
+    return asm_text(k.asm, "ptx"), asm_text(k.asm, "ttgir")
 
 
 def combine(mod: types.ModuleType) -> str:
@@ -139,18 +174,21 @@ def combine(mod: types.ModuleType) -> str:
 
     Returns:
         The PTX.
+
     """
-    fn = mod._paged_attn_prefill_combine_kernel
+    fn: object = mod.__dict__.get("_paged_attn_prefill_combine_kernel")
+    if not isinstance(fn, JITFunction):
+        fail("_paged_attn_prefill_combine_kernel is not a Triton kernel")
     names = fn.arg_names
-    const = dict(
-        QCV=0,
-        HAS_SINKS=False,
-        n_q_heads=24,
-        head_dim=256,
-        HD_PAD=256,
-        WIDE_INDEX=False,
-        BLOCK_M=64,
-    )
+    const = {
+        "QCV": 0,
+        "HAS_SINKS": False,
+        "n_q_heads": 24,
+        "head_dim": 256,
+        "HD_PAD": 256,
+        "WIDE_INDEX": False,
+        "BLOCK_M": 64,
+    }
     types_ = {
         "partial_o": "*fp32",
         "partial_ml": "*fp32",
@@ -166,12 +204,12 @@ def combine(mod: types.ModuleType) -> str:
         target=TARGET,
         options={"num_warps": 8, "num_stages": 1},
     )
-    return k.asm["ptx"]
+    return asm_text(k.asm, "ptx")
 
 
 def main(argv: list[str]) -> None:
     """Write the three files into OUT_DIR."""
-    if len(argv) != 3:
+    if len(argv) != ARGC:
         fail(__doc__ or "usage: STOCK_PACKAGE_DIR OUT_DIR")
     stock, out = Path(argv[1]), Path(argv[2])
     if not out.is_dir() or any(out.iterdir()):

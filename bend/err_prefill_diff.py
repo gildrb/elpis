@@ -1,27 +1,34 @@
 #!/usr/bin/env python3
-"""
-Finite source link of bend/err_prefill.bend (prefill rounding-error paths) to the sources it transcribes.
+# Copyright (c) 2026 Gil Rodrigues
+"""Finite source link of bend/err_prefill.bend to the sources it transcribes.
+
+The model holds the prefill rounding-error paths.
 
 Checks, failing closed:
-  1. every cited "FILE:line" of the model holds the expected text (stock 355c6ee sources, the stock Triton
-     PTX / TTGIR of the served prefill and combine kernels, the elpis patches);
-  2. the counts the model's segments use: elpis sums a thread's 8 p sequentially (loops nt < 4, e < 2 around
-     one f_add) and quad-reduces twice at the end; stock's tl.sum is one pair add, two shuffle levels, a shared
-     cross-warp pass with two more shuffle levels (PTX); 16 QK and 2 PV MMA k-steps per tile in both;
-  3. ext 3022 patches pattn_kernel.cuh and pattn8_kernel.cuh with the same arithmetic lines (3020 is the
-     8-warp mapping of 3010's per-warp text, pattn8_sched_laws.bend);
-  4. the 5111 fused conv kernel keeps the stock output kernel's arithmetic lines in order and adds only the
-     in-kernel .to(tl.bfloat16) of the fp32 x;
-  5. no patch of patches/exl3-ext/series touches vendor/fla (the chunked delta rule) and 5111's
-     gated_delta_rule.py hunk adds no arithmetic (q / k / v plumbing only).
-Text evidence, not a proof. `--mutate NAME` corrupts one expectation, which must be rejected.
+  1. every cited "FILE:line" of the model holds the expected text (stock 355c6ee
+     sources, the stock Triton PTX / TTGIR of the served prefill and combine kernels,
+     the elpis patches);
+  2. the counts the model's segments use: elpis sums a thread's 8 p sequentially (loops
+     nt < 4, e < 2 around one f_add) and quad-reduces twice at the end; stock's tl.sum
+     is one pair add, two shuffle levels, a shared cross-warp pass with two more shuffle
+     levels (PTX); 16 QK and 2 PV MMA k-steps per tile in both;
+  3. ext 3022 patches pattn_kernel.cuh and pattn8_kernel.cuh with the same arithmetic
+     lines (3020 is the 8-warp mapping of 3010's per-warp text, pattn8_sched_laws.bend);
+  4. the 5111 fused conv kernel keeps the stock output kernel's arithmetic lines in
+     order and adds only the in-kernel .to(tl.bfloat16) of the fp32 x;
+  5. no patch of patches/exl3-ext/series touches vendor/fla (the chunked delta rule) and
+     5111's gated_delta_rule.py hunk adds no arithmetic (q / k / v plumbing only).
+Text evidence, not a proof. `--mutate NAME` corrupts one expectation, which must be
+rejected.
 
 Usage: python3 bend/err_prefill_diff.py [--mutate NAME] STOCK_DIR PTX_DIR
-  STOCK_DIR: the stock exllamav3 package directory at 355c6ee (OUT/stock of bend/engine_trees.py).
-  PTX_DIR: stock_prefill_sm86.ptx, stock_prefill_sm86.ttgir and stock_combine_sm86.ptx: the stock
-    _paged_attn_prefill_kernel (served constexprs, IS_SPLIT = False) and the split combine kernel of STOCK_DIR's
-    modules/attention_fn/triton_paged.py, compiled for sm_86 by Triton 3.6.0. Make it with
-    bend/gen/stock_prefill_ptx.py in the engine image (no GPU, no network; see its docstring).
+  STOCK_DIR: the stock exllamav3 package directory at 355c6ee (OUT/stock of
+             bend/engine_trees.py).
+  PTX_DIR: stock_prefill_sm86.ptx, stock_prefill_sm86.ttgir and stock_combine_sm86.ptx:
+    the stock _paged_attn_prefill_kernel (served constexprs, IS_SPLIT = False) and the
+    split combine kernel of STOCK_DIR's modules/attention_fn/triton_paged.py, compiled
+    for sm_86 by Triton 3.6.0. Make it with bend/gen/stock_prefill_ptx.py in the engine
+    image (no GPU, no network; see its docstring).
 """
 
 from __future__ import annotations
@@ -29,6 +36,7 @@ from __future__ import annotations
 import re
 import sys
 from pathlib import Path
+from typing import NoReturn
 
 WT = Path(__file__).resolve().parent.parent
 EXT = WT / "patches/exl3-ext"
@@ -85,12 +93,18 @@ CITES = [
     (
         "PTX",
         2800,
-        "mma.sync.aligned.m16n8k16.row.col.f32.f16.f16.f32 { %r2492, %r2493, %r2494, %r2495 }",
+        (
+            "mma.sync.aligned.m16n8k16.row.col.f32.f16.f16.f32 { %r2492, %r2493, "
+            "%r2494, %r2495 }"
+        ),
     ),
     (
         "PTX",
         2848,
-        "mma.sync.aligned.m16n8k16.row.col.f32.f16.f16.f32 { %r2492, %r2493, %r2494, %r2495 }",
+        (
+            "mma.sync.aligned.m16n8k16.row.col.f32.f16.f16.f32 { %r2492, %r2493, "
+            "%r2494, %r2495 }"
+        ),
     ),
     ("PTX", 4107, "mul.f32 \t%r1975, %r1456, 0f3DB8AA3B"),
     ("PTX", 4382, "sub.f32 \t%r2058"),
@@ -125,7 +139,10 @@ CITES = [
     (
         "P3022",
         239,
-        "float p = ex2(interior ? f_fma(x, scale_log2, f_neg(m_use)) : f_sub(x, m_use));",
+        (
+            "float p = ex2(interior ? f_fma(x, scale_log2, f_neg(m_use)) : "
+            "f_sub(x, m_use));"
+        ),
     ),
     ("P3022", 242, "+                    sum = f_add(sum, p);"),
     ("P3022", 245, "+            l[r] = f_fma(l[r], alpha[r], sum);"),
@@ -135,7 +152,10 @@ CITES = [
     (
         "P3022",
         271,
-        "o[0] = f_fma_pv(o[0], alpha[0], tp[0]); o[1] = f_fma_pv(o[1], alpha[0], tp[1]);",
+        (
+            "o[0] = f_fma_pv(o[0], alpha[0], tp[0]); o[1] = f_fma_pv(o[1], "
+            "alpha[0], tp[1]);"
+        ),
     ),
     (
         "P3022",
@@ -168,7 +188,10 @@ CITES = [
     (
         "P5111",
         39,
-        "bsz == 1 and seqlen > 256 and seqlen >= self.num_v_heads and not save_history and",
+        (
+            "bsz == 1 and seqlen > 256 and seqlen >= self.num_v_heads and not "
+            "save_history and"
+        ),
     ),
     ("P5111", 125, "acc = tl.zeros((BLOCK_D, BLOCK_S), dtype = tl.float32)"),
     ("P5111", 142, ").to(tl.bfloat16)"),
@@ -216,19 +239,58 @@ MUTATIONS = {
 }
 
 
-def fail(msg: str) -> None:
-    raise SystemExit(f"err_prefill_diff: FAIL: {msg}")
+def fail(msg: str) -> NoReturn:
+    """Stop with an error.
+
+    Args:
+        msg: The failure description.
+
+    Raises:
+        SystemExit: Always.
+
+    """
+    text = f"err_prefill_diff: FAIL: {msg}"
+    raise SystemExit(text)
+
+
+def say(msg: str) -> None:
+    """Print one progress line.
+
+    Args:
+        msg: The line, without its newline.
+
+    """
+    sys.stdout.write(f"{msg}\n")
 
 
 def lines_of(p: Path) -> list[str]:
+    """Read a required source file.
+
+    Args:
+        p: The file.
+
+    Returns:
+        Its lines.
+
+    """
     if not p.is_file():
         fail(f"missing source {p}")
-    return p.read_text().splitlines()
+    return p.read_text(encoding="utf-8").splitlines()
 
 
 def added(patch: list[str], file_marker: str) -> list[str]:
-    """'+' lines of the hunks of one file of a patch (file_marker in the +++ line)."""
-    out, on = [], False
+    """Collect the '+' lines of the hunks of one file of a patch.
+
+    Args:
+        patch: The patch lines.
+        file_marker: A substring of the file's +++ line.
+
+    Returns:
+        The added lines, stripped.
+
+    """
+    out: list[str] = []
+    on = False
     for ln in patch:
         if ln.startswith("+++ "):
             on = file_marker in ln
@@ -239,19 +301,218 @@ def added(patch: list[str], file_marker: str) -> list[str]:
 
 
 ARITH = re.compile(
-    r"\b(f_fma_pv|f_fma|f_add|f_sub|f_mul|f_max|f_div_full|ex2|mma_f32|pack_h2|is_zero|is_ninf)\("
+    r"\b(f_fma_pv|f_fma|f_add|f_sub|f_mul|f_max|f_div_full|ex2|mma_f32|pack_h2"
+    r"|is_zero|is_ninf)\("
 )
+ARGC = 2
+PTX_LOOP_MMAS = 96
+
+type Cite = tuple[str, int, str]
+
+
+def parse_args(argv: list[str]) -> tuple[str | None, Path, Path]:
+    """Parse [--mutate NAME] STOCK_DIR PTX_DIR.
+
+    Args:
+        argv: The command line.
+
+    Returns:
+        (mutation name or None, stock directory, PTX directory).
+
+    """
+    args = argv[1:]
+    mutate = None
+    if len(args) >= ARGC and args[0] == "--mutate":
+        mutate, args = args[1], args[2:]
+    if len(args) != ARGC:
+        fail("usage: err_prefill_diff.py [--mutate NAME] STOCK_DIR PTX_DIR")
+    return mutate, Path(args[0]), Path(args[1])
+
+
+def apply_mutation(mutate: str, cites: list[Cite], model_exp: list[str]) -> list[Cite]:
+    """Corrupt one expectation.
+
+    Args:
+        mutate: The mutation name.
+        cites: The citations.
+        model_exp: The model segments; mutated in place for MODEL mutations.
+
+    Returns:
+        The citations, mutated for source mutations.
+
+    """
+    if mutate not in MUTATIONS:
+        fail(f"unknown mutation {mutate!r}")
+    key, line, old, new = MUTATIONS[mutate]
+    if key == "MODEL":
+        model_exp[line] = model_exp[line].replace(old, new)
+    else:
+        cites = [
+            (k, n, new if (k, n, e) == (key, line, old) else e) for k, n, e in cites
+        ]
+    say(f"err_prefill_diff: applied mutation {mutate}")
+    return cites
+
+
+def check_cites(text: dict[str, list[str]], cites: list[Cite]) -> None:
+    """Check every cited line (check 1).
+
+    Args:
+        text: The source lines by file key.
+        cites: The citations.
+
+    """
+    for key, n, e in cites:
+        src = text[key]
+        if n < 1 or n > len(src) or e not in src[n - 1]:
+            got = src[n - 1].strip() if 1 <= n <= len(src) else "<none>"
+            fail(f"{key}:{n}: expected {e!r}, found {got!r}")
+    say(f"err_prefill_diff: {len(cites)} cited source lines hold the transcribed text")
+
+
+def check_counts(ptx: list[str], model: str, model_exp: list[str]) -> None:
+    """Check the counts the model's segments use (check 2).
+
+    Args:
+        ptx: The stock prefill PTX lines.
+        model: The model text.
+        model_exp: The model segments.
+
+    """
+    # stock loop-1 body (PTX 1252-2906): 64 QK + 32 PV MMAs (16 + 2 k-steps over
+    # 4 x 1 and 4 x 4 fragments of the warp), 8 pair adds feeding the tree, exactly
+    # one fp32 fma per row for l
+    body = ptx[1251:2906]
+    n_mma = sum(
+        "mma.sync.aligned.m16n8k16.row.col.f32.f16.f16.f32" in ln for ln in body
+    )
+    if n_mma != PTX_LOOP_MMAS:
+        fail(
+            f"PTX loop 1: {n_mma} f32 MMAs, want 96 (64 Q K^T: 16 k-steps "
+            "x 4 m-tiles; 32 P V: 2 k-steps x 16)"
+        )
+    # tl.sum(p) of the row slots a thread holds (PTX 2297-2440): 8 pair adds, 2
+    # shuffle-add levels for each of the 8 slots, then the cross-warp slot: 2 more
+    # shuffle-add levels -> depth 1 + 2 + 2 = 5 per p
+    red = ptx[2296:2440]
+    n_shfl = sum("shfl.sync.bfly.b32" in ln for ln in red)
+    n_add = sum(re.match(r"\s*add\.f32\s", ln) is not None for ln in red)
+    if (n_shfl, n_add) != (18, 26):
+        fail(f"PTX tl.sum region: {n_shfl} shuffles, {n_add} adds (want 18, 26)")
+    for m in model_exp:
+        if m not in model:
+            fail(f"err_prefill.bend: model segment missing: {m!r}")
+    say(
+        f"err_prefill_diff: {len(model_exp)} model segments present; PTX "
+        "loop has 96 fp32 MMAs"
+    )
+
+
+def check_3022(p22: list[str]) -> None:
+    """Check that 3022 adds identical arithmetic to both kernels (check 3).
+
+    Args:
+        p22: The 3022 patch lines.
+
+    """
+    a1 = [
+        ln for ln in added(p22, "b/exllamav3_ext/pattn_kernel.cuh") if ARITH.search(ln)
+    ]
+    a2 = [
+        ln for ln in added(p22, "b/exllamav3_ext/pattn8_kernel.cuh") if ARITH.search(ln)
+    ]
+    a1 = [ln for ln in a1 if not ln.startswith("__device__")]
+    if a1 != a2:
+        fail(
+            "3022 arithmetic differs between pattn_kernel.cuh and "
+            f"pattn8_kernel.cuh:\n{a1}\n{a2}"
+        )
+    say(
+        f"err_prefill_diff: 3022 adds the same {len(a1)} arithmetic lines "
+        "to pattn and pattn8"
+    )
+
+
+def check_conv(conv: list[str], p5111: list[str]) -> None:
+    """Check that the 5111 fused conv keeps the stock arithmetic (check 4).
+
+    Args:
+        conv: The stock conv1d.py lines.
+        p5111: The 5111 patch lines.
+
+    """
+    s0 = next(
+        i
+        for i, ln in enumerate(conv)
+        if "def _causal_conv1d_update_slotted_output_kernel(" in ln
+    )
+    s1 = next(
+        i for i in range(s0, len(conv)) if "acc = acc * tl.sigmoid(acc)" in conv[i]
+    )
+    stock_ar = [
+        ln.strip() for ln in conv[s0 : s1 + 1] if re.search(r"\bacc\b.*=|\bacc \+=", ln)
+    ]
+    f22 = added(p5111, "b/modules/gated_delta_net_fn/conv1d.py")
+    f0 = next(
+        i
+        for i, ln in enumerate(f22)
+        if ln.startswith("def _conv1d_prefill_qkv_output_kernel(")
+    )
+    f1 = next(i for i in range(f0, len(f22)) if "acc = acc * tl.sigmoid(acc)" in f22[i])
+    fused_ar = [ln for ln in f22[f0 : f1 + 1] if re.search(r"\bacc\b.*=|\bacc \+=", ln)]
+    if stock_ar != fused_ar:
+        fail(f"5111 conv arithmetic differs from stock:\n{stock_ar}\n{fused_ar}")
+    casts = [
+        ln
+        for ln in f22[f0 : f1 + 1]
+        if "tl.bfloat16" in ln or ("tl.float32" in ln and "acc" not in ln)
+    ]
+    if casts != [").to(tl.bfloat16)"]:
+        fail(f"5111 conv: unexpected casts {casts}")
+    say(
+        f"err_prefill_diff: 5111 conv keeps the stock {len(stock_ar)} accumulator "
+        "lines; one added bf16 cast"
+    )
+
+
+def check_rule(p5111: list[str]) -> None:
+    """Check that the chunked delta rule is untouched (check 5).
+
+    Args:
+        p5111: The 5111 patch lines.
+
+    """
+    series = [
+        ln.split()[-1]
+        for ln in (EXT / "series").read_text(encoding="utf-8").splitlines()
+        if ln.strip()
+    ]
+    for name in series:
+        for ln in lines_of(EXT / name):
+            if ln.startswith("+++ ") and "vendor/" in ln:
+                fail(f"{name} touches {ln}")
+    rule = added(p5111, "b/modules/gated_delta_net_fn/gated_delta_rule.py")
+    bad = [
+        ln
+        for ln in rule
+        if re.search(r"tl\.|exp|l2norm|float|bfloat16|\*|chunk_gated_delta_rule\(", ln)
+    ]
+    if bad:
+        fail(f"5111 gated_delta_rule.py adds arithmetic: {bad}")
+    say(
+        f"err_prefill_diff: {len(series)} series patches leave vendor/fla "
+        "untouched; 5111 rule hunk is plumbing"
+    )
 
 
 def main(argv: list[str]) -> None:
-    args = argv[1:]
-    mutate = None
-    if len(args) >= 2 and args[0] == "--mutate":
-        mutate, args = args[1], args[2:]
-    if len(args) != 2:
-        fail("usage: err_prefill_diff.py [--mutate NAME] STOCK_DIR PTX_DIR")
-    stock = Path(args[0])
-    ptx = Path(args[1])
+    """Run every check.
+
+    Args:
+        argv: The command line.
+
+    """
+    mutate, stock, ptx = parse_args(argv)
     files = {
         "TP": stock / "modules/attention_fn/triton_paged.py",
         "CONV": stock / "modules/gated_delta_net_fn/conv1d.py",
@@ -265,126 +526,17 @@ def main(argv: list[str]) -> None:
         "P5111": EXT / "5111-gdn-prefill-fuse-nom4096.patch",
     }
     text = {k: lines_of(p) for k, p in files.items()}
-    model = (WT / "bend/err_prefill.bend").read_text()
+    model = (WT / "bend/err_prefill.bend").read_text(encoding="utf-8")
     cites = list(CITES)
     model_exp = list(MODEL)
     if mutate is not None:
-        if mutate not in MUTATIONS:
-            fail(f"unknown mutation {mutate!r}")
-        key, line, old, new = MUTATIONS[mutate]
-        if key == "MODEL":
-            model_exp[line] = model_exp[line].replace(old, new)
-        else:
-            cites = [
-                (k, n, new if (k, n, e) == (key, line, old) else e) for k, n, e in cites
-            ]
-        print(f"err_prefill_diff: applied mutation {mutate}")
-
-    # 1. cited lines
-    for key, n, e in cites:
-        src = text[key]
-        if n < 1 or n > len(src) or e not in src[n - 1]:
-            got = src[n - 1].strip() if 1 <= n <= len(src) else "<none>"
-            fail(f"{key}:{n}: expected {e!r}, found {got!r}")
-    print(
-        f"err_prefill_diff: {len(cites)} cited source lines hold the transcribed text"
-    )
-
-    # 2. counts: stock loop-1 body (PTX 1252-2906): 64 QK + 32 PV MMAs (16 + 2 k-steps over 4 x 1 and 4 x 4
-    # fragments of the warp), 8 pair adds feeding the tree, exactly one fp32 fma per row for l
-    body = text["PTX"][1251:2906]
-    n_mma = sum(
-        "mma.sync.aligned.m16n8k16.row.col.f32.f16.f16.f32" in ln for ln in body
-    )
-    if n_mma != 96:
-        fail(
-            f"PTX loop 1: {n_mma} f32 MMAs, want 96 (64 Q K^T: 16 k-steps x 4 m-tiles; 32 P V: 2 k-steps x 16)"
-        )
-    # tl.sum(p) of the row slots a thread holds (PTX 2297-2440): 8 pair adds, 2 shuffle-add levels for each of the
-    # 8 slots, then the cross-warp slot: 2 more shuffle-add levels -> depth 1 + 2 + 2 = 5 per p
-    red = text["PTX"][2296:2440]
-    n_shfl = sum("shfl.sync.bfly.b32" in ln for ln in red)
-    n_add = sum(re.match(r"\s*add\.f32\s", ln) is not None for ln in red)
-    if (n_shfl, n_add) != (18, 26):
-        fail(f"PTX tl.sum region: {n_shfl} shuffles, {n_add} adds (want 18, 26)")
-    for m in model_exp:
-        if m not in model:
-            fail(f"err_prefill.bend: model segment missing: {m!r}")
-    print(
-        f"err_prefill_diff: {len(model_exp)} model segments present; PTX loop has 96 fp32 MMAs"
-    )
-
-    # 3. 3022: identical arithmetic in pattn_kernel.cuh and pattn8_kernel.cuh
-    p22 = text["P3022"]
-    a1 = [
-        ln for ln in added(p22, "b/exllamav3_ext/pattn_kernel.cuh") if ARITH.search(ln)
-    ]
-    a2 = [
-        ln for ln in added(p22, "b/exllamav3_ext/pattn8_kernel.cuh") if ARITH.search(ln)
-    ]
-    a1 = [ln for ln in a1 if not ln.startswith("__device__")]
-    if a1 != a2:
-        fail(
-            f"3022 arithmetic differs between pattn_kernel.cuh and pattn8_kernel.cuh:\n{a1}\n{a2}"
-        )
-    print(
-        f"err_prefill_diff: 3022 adds the same {len(a1)} arithmetic lines to pattn and pattn8"
-    )
-
-    # 4. 5111 fused conv keeps the stock output kernel's arithmetic lines in order
-    conv = text["CONV"]
-    s0 = next(
-        i
-        for i, ln in enumerate(conv)
-        if "def _causal_conv1d_update_slotted_output_kernel(" in ln
-    )
-    s1 = next(
-        i for i in range(s0, len(conv)) if "acc = acc * tl.sigmoid(acc)" in conv[i]
-    )
-    stock_ar = [
-        ln.strip() for ln in conv[s0 : s1 + 1] if re.search(r"\bacc\b.*=|\bacc \+=", ln)
-    ]
-    f22 = added(text["P5111"], "b/modules/gated_delta_net_fn/conv1d.py")
-    f0 = next(
-        i
-        for i, ln in enumerate(f22)
-        if ln.startswith("def _conv1d_prefill_qkv_output_kernel(")
-    )
-    f1 = next(i for i in range(f0, len(f22)) if "acc = acc * tl.sigmoid(acc)" in f22[i])
-    fused_ar = [ln for ln in f22[f0 : f1 + 1] if re.search(r"\bacc\b.*=|\bacc \+=", ln)]
-    if stock_ar != fused_ar:
-        fail(f"5111 conv arithmetic differs from stock:\n{stock_ar}\n{fused_ar}")
-    casts = [
-        ln
-        for ln in f22[f0 : f1 + 1]
-        if "tl.bfloat16" in ln or "tl.float32" in ln and "acc" not in ln
-    ]
-    if casts != [").to(tl.bfloat16)"]:
-        fail(f"5111 conv: unexpected casts {casts}")
-    print(
-        f"err_prefill_diff: 5111 conv keeps the stock {len(stock_ar)} accumulator lines; one added bf16 cast"
-    )
-
-    # 5. chunked delta rule untouched
-    series = [
-        ln.split()[-1] for ln in (EXT / "series").read_text().splitlines() if ln.strip()
-    ]
-    for name in series:
-        for ln in lines_of(EXT / name):
-            if ln.startswith("+++ ") and "vendor/" in ln:
-                fail(f"{name} touches {ln}")
-    rule = added(text["P5111"], "b/modules/gated_delta_net_fn/gated_delta_rule.py")
-    bad = [
-        ln
-        for ln in rule
-        if re.search(r"tl\.|exp|l2norm|float|bfloat16|\*|chunk_gated_delta_rule\(", ln)
-    ]
-    if bad:
-        fail(f"5111 gated_delta_rule.py adds arithmetic: {bad}")
-    print(
-        f"err_prefill_diff: {len(series)} series patches leave vendor/fla untouched; 5111 rule hunk is plumbing"
-    )
-    print("err_prefill_diff: OK")
+        cites = apply_mutation(mutate, cites, model_exp)
+    check_cites(text, cites)
+    check_counts(text["PTX"], model, model_exp)
+    check_3022(text["P3022"])
+    check_conv(text["CONV"], text["P5111"])
+    check_rule(text["P5111"])
+    say("err_prefill_diff: OK")
 
 
 if __name__ == "__main__":

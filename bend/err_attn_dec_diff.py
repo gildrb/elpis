@@ -1,27 +1,36 @@
 #!/usr/bin/env python3
-"""
-Source link of bend/err_attn_dec.bend (decode / verify attention after ext 3030 against stock 355c6ee) to
-the kernels it models, and scans of its laws.
+# Copyright (c) 2026 Gil Rodrigues
+"""Source link of bend/err_attn_dec.bend to the kernels it models, and its law scans.
 
-  1. Fragments: every source line the model cites (E3: stock + patches/exl3/series + patches/exl3-ext/series,
-     which ends with 3030; S: stock 355c6ee) holds the quoted text at the quoted line.
-  2. Compiled code (H_sass3030): a compile of E3:exllamav3_ext/attn_verify.cu (nvcc, sm_86, -O3
-     --use_fast_math) shows the instruction counts per source line the model counts.
-  3. Replay: a transcription of the 3030 kernels' index arithmetic (tile loop, fresh-C P V groups, the
-     6-level tile tree, the binary-counter combine) gives, per key, the own / fold / tree / depth counts;
-     they equal the model's closed forms (e_own, e_fold, e_tsum = tdepth(6, ..), e_depth = tdepth(9, ..))
-     for every key of every scanned L, and stay within e_OE, e_n0, e_TE, e_D.
-  4. Bend evaluation: the Bend definitions evaluated at sample L and keys equal the Python mirror.
-  5. Domination scan: every 3030 route (replayed counts, the replayed denominator maximum) is dominated at
-     x = 128 by a stock route (bend/err_attn_diff.py's transcription of the stock kernels), for L = 1..4400
-     and sampled L up to 2^20; e_OE <= own0 + laterk0 and e_rt <= s_rt (law dec_totals) for L = 1..2^20.
+The model: decode / verify attention after ext 3030 against stock 355c6ee.
 
-Usage: python3 -I -B err_attn_dec_diff.py --stock DIR [--elpis DIR] [--no-compiled | --cuda-include DIR...] [--no-bend]
-                                           [--mutate NAME]
-  --stock: the stock exllamav3 package directory at 355c6ee (OUT/stock of bend/engine_trees.py).
-  --cuda-include: an nvcc include directory (repeat it as necessary), as in bend/err_attn_diff.py. The compiled
-  checks use nvcc and nvdisasm from PATH; the Bend evaluation uses the `bend` on PATH (bend/source_link.py).
-Exit 0 = every check passed. --mutate perturbs one quoted 3030 line; the run must FAIL.
+  1. Fragments: every source line the model cites (E3: stock + patches/exl3/series +
+     patches/exl3-ext/series, which ends with 3030; S: stock 355c6ee) holds the
+     quoted text at the quoted line.
+  2. Compiled code (H_sass3030): a compile of E3:exllamav3_ext/attn_verify.cu (nvcc,
+     sm_86, -O3 --use_fast_math) shows the instruction counts per source line the
+     model counts.
+  3. Replay: a transcription of the 3030 kernels' index arithmetic (tile loop,
+     fresh-C P V groups, the 6-level tile tree, the binary-counter combine) gives,
+     per key, the own / fold / tree / depth counts; they equal the model's closed
+     forms (e_own, e_fold, e_tsum = tdepth(6, ..), e_depth = tdepth(9, ..)) for every
+     key of every scanned L, and stay within e_OE, e_n0, e_TE, e_D.
+  4. Bend evaluation: the Bend definitions evaluated at sample L and keys equal the
+     Python mirror.
+  5. Domination scan: every 3030 route (replayed counts, the replayed denominator
+     maximum) is dominated at x = 128 by a stock route (bend/err_attn_diff.py's
+     transcription of the stock kernels), for L = 1..4400 and sampled L up to 2^20;
+     e_OE <= own0 + laterk0 and e_rt <= s_rt (law dec_totals) for L = 1..2^20.
+
+Usage: python3 -I -B err_attn_dec_diff.py --stock DIR [--elpis DIR]
+           [--no-compiled | --cuda-include DIR...] [--no-bend] [--mutate NAME]
+  --stock: the stock exllamav3 package directory at 355c6ee (OUT/stock of
+  bend/engine_trees.py).
+  --cuda-include: an nvcc include directory (repeat it as necessary), as in
+  bend/err_attn_diff.py. The compiled checks use nvcc and nvdisasm from PATH; the
+  Bend evaluation uses the `bend` on PATH (bend/source_link.py).
+Exit 0 = every check passed. --mutate perturbs one quoted 3030 line; the run must
+FAIL.
 """
 
 from __future__ import annotations
@@ -34,12 +43,12 @@ import sys
 import tempfile
 from pathlib import Path
 
-HERE = Path(__file__).resolve().parent
-sys.path.insert(0, str(HERE))
-import err_attn_diff as D  # noqa: E402  stock transcription, tree builder, dom, compiled-code helpers
-import source_link  # noqa: E402
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import err_attn_diff as ead  # stock transcription, tree builder, dom, compiled code
+import source_link
 
-check, fail, cdiv = D.check, D.fail, D.cdiv
+HERE = Path(__file__).resolve().parent
+fail, cdiv = ead.fail, ead.cdiv
 S_E = 20
 
 FRAGS = [
@@ -48,7 +57,10 @@ FRAGS = [
         "E",
         "exllamav3_ext/attn_verify.cu",
         112,
-        "__device__ __forceinline__ void mma16816_z(float* c, const uint32_t* a, uint32_t b0, uint32_t b1)",
+        (
+            "__device__ __forceinline__ void mma16816_z(float* c, const uint32_t* "
+            "a, uint32_t b0, uint32_t b1)"
+        ),
     ),
     ("E", "exllamav3_ext/attn_verify.cu", 115, "{%10,%10,%10,%10};"),
     (
@@ -81,7 +93,10 @@ FRAGS = [
         "E",
         "exllamav3_ext/attn_verify.cu",
         481,
-        "alpha[s] = m[s] == NEG_INF ? 0.f : (m_new == m[s] ? 1.f : pow2i(m[s] - m_use));",
+        (
+            "alpha[s] = m[s] == NEG_INF ? 0.f : (m_new == m[s] ? 1.f : pow2i(m[s] "
+            "- m_use));"
+        ),
     ),
     (
         "E",
@@ -105,7 +120,10 @@ FRAGS = [
         "E",
         "exllamav3_ext/attn_verify.cu",
         485,
-        "*reinterpret_cast<uint32_t*>(ps + r * PSTR + warp * 8 + 2 * t) = pack_h2(p0, p1);",
+        (
+            "*reinterpret_cast<uint32_t*>(ps + r * PSTR + warp * 8 + 2 * t) = "
+            "pack_h2(p0, p1);"
+        ),
     ),
     ("E", "exllamav3_ext/attn_verify.cu", 486, "float ssum = p0 + p1;"),
     (
@@ -124,13 +142,19 @@ FRAGS = [
         "E",
         "exllamav3_ext/attn_verify.cu",
         501,
-        "float tsum = ((red_sum[r] + red_sum[AV_ROWS + r]) + (red_sum[2 * AV_ROWS + r] + red_sum[3 * AV_ROWS + r]))",
+        (
+            "float tsum = ((red_sum[r] + red_sum[AV_ROWS + r]) + (red_sum[2 * "
+            "AV_ROWS + r] + red_sum[3 * AV_ROWS + r]))"
+        ),
     ),
     (
         "E",
         "exllamav3_ext/attn_verify.cu",
         502,
-        "+ ((red_sum[4 * AV_ROWS + r] + red_sum[5 * AV_ROWS + r]) + (red_sum[6 * AV_ROWS + r] + red_sum[7 * AV_ROWS + r]));",
+        (
+            "+ ((red_sum[4 * AV_ROWS + r] + red_sum[5 * AV_ROWS + r]) + (red_sum[6 "
+            "* AV_ROWS + r] + red_sum[7 * AV_ROWS + r]));"
+        ),
     ),
     (
         "E",
@@ -166,7 +190,10 @@ FRAGS = [
         "E",
         "exllamav3_ext/attn_verify.cu",
         548,
-        "acc[i][j][3] = fmaf(pv[i][j][3], cs[2 * i + 1], acc[i][j][3] * alpha[2 * i + 1]);",
+        (
+            "acc[i][j][3] = fmaf(pv[i][j][3], cs[2 * i + 1], acc[i][j][3] * alpha[2 "
+            "* i + 1]);"
+        ),
     ),
     # ---- 3030 combine ----
     (
@@ -219,7 +246,8 @@ FRAGS = [
         440,
         "av_splits = max(1, _get_sm_count(dev) // kvh)",
     ),
-    # ---- stock (quoted by the model; bend/err_attn_diff.py checks the rest of the stock lines) ----
+    # ---- stock (quoted by the model; bend/err_attn_diff.py checks the rest of the
+    # stock lines) ----
     (
         "S",
         "modules/attention_fn/triton_paged.py",
@@ -298,224 +326,454 @@ MUTATIONS = {
 }
 
 
-def check_frags(trees: dict):
-    for side, rel, line, text in FRAGS:
-        lines = (trees[side] / rel).read_text().splitlines()
+def check_frags(trees: ead.Trees) -> None:
+    """Check that every quoted line holds its text.
+
+    Args:
+        trees: the source trees by tag.
+
+    """
+    for tag, rel, line, text in FRAGS:
+        lines = (trees[tag] / rel).read_text().splitlines()
         got = lines[line - 1].strip() if line <= len(lines) else "EOF"
-        check(
-            line <= len(lines) and text in lines[line - 1],
-            f"{side}:{rel}:{line} does not hold {text!r} (holds {got!r})",
-        )
-    print(f"fragments: {len(FRAGS)} quoted lines hold their text")
+        if not (line <= len(lines) and text in lines[line - 1]):
+            fail(f"{tag}:{rel}:{line} does not hold {text!r} (holds {got!r})")
+    sys.stdout.write(f"fragments: {len(FRAGS)} quoted lines hold their text\n")
 
 
-# ---------------------------------------------------------------------------------------------
+# ---------------------------------------------------------------------------------
 # 2. Compiled code
 
+# A count condition: ((source line, opcode), ...) summed, "eq" or "ge", the count.
+Cond = tuple[tuple[tuple[int, str], ...], str, int]
 
-def check_compiled(elpis: Path, td: Path, includes: list):
+HMMA = "HMMA.16816.F32"
+# per split kernel: (conditions, message)
+SPLIT_FACTS: tuple[tuple[tuple[Cond, ...], str], ...] = (
+    ((((((475, "FRND"),), "eq", 6)),), "floorf -> 6 FRND per tile"),
+    (
+        ((((141, "MUFU.EX2"),), "eq", 18),),
+        "18 MUFU.EX2 per tile (12 p + 6 cs), none for alpha",
+    ),
+    ((((((481, "MUFU.EX2"),), "eq", 0)),), "alpha without ex2"),
+    (
+        ((((501, "FADD"), (502, "FADD")), "eq", 42),),
+        "7 FADD per row slot in the warp tree",
+    ),
+    ((((((503, "FFMA"),), "eq", 6)),), "l = one FFMA per row slot"),
+    (
+        ((((117, HMMA),), "eq", 12), (((536, HMMA),), "eq", 36)),
+        "P V = 12 zero-C + 36 accumulating HMMA",
+    ),
+    (
+        ((tuple((ln, "FFMA") for ln in range(545, 549)), "eq", 48),),
+        "48 fold FFMA",
+    ),
+)
+COMBINE_FACTS: tuple[tuple[tuple[Cond, ...], str], ...] = (
+    ((((((141, "MUFU.EX2"),), "eq", 0)),), "combine: no ex2 for the weights"),
+    (
+        ((((670, "FMUL"),), "ge", 1), (((671, "FMUL"),), "ge", 1)),
+        "combine: v w, l w FMUL",
+    ),
+    (
+        ((((679, "FADD"),), "ge", 9), (((696, "FADD"),), "ge", 9)),
+        "combine: tree FADD",
+    ),
+    (
+        ((((699, "MUFU.RCP"),), "eq", 1), (((699, "FMUL"),), "eq", 1)),
+        "combine: acc / lsum = RCP + FMUL",
+    ),
+    (
+        ((((117, HMMA),), "eq", 4), (((732, HMMA),), "eq", 4)),
+        "combine: rotation 4 + 4 HMMA",
+    ),
+)
+OLD_ROT_LINE = 637  # the pre-3030 32-FFMA back-rotation
+
+
+def holds(rows: ead.Rows, conds: tuple[Cond, ...]) -> bool:
+    """Tell whether every count condition holds.
+
+    Args:
+        rows: (source line, instruction) pairs.
+        conds: the conditions.
+
+    Returns:
+        True when all hold.
+
+    """
+    for at, cmp, n in conds:
+        total = sum(len(ead.ops_at(rows, line, op)) for line, op in at)
+        if not (total == n if cmp == "eq" else total >= n):
+            return False
+    return True
+
+
+def check_compiled(elpis: Path, td: Path, includes: list[Path]) -> None:
+    """Compile the 3030 attn_verify.cu and check its SASS.
+
+    Args:
+        elpis: the elpis package directory.
+        td: a scratch directory.
+        includes: the nvcc include directories.
+
+    """
     cub = td / "av3030.cubin"
-    r = subprocess.run(
-        source_link.locked(
-            [
-                *D.nvcc(includes),
-                "-arch=sm_86",
-                "-O3",
-                "--use_fast_math",
-                "-lineinfo",
-                "-cubin",
-                "-o",
-                str(cub),
-                str(elpis / "exllamav3_ext/attn_verify.cu"),
-            ]
-        ),
-        capture_output=True,
-        text=True,
+    err = ead.compile_cubin(
+        includes,
+        ["-arch=sm_86", "-O3", "--use_fast_math", "-lineinfo"],
+        cub,
+        elpis / "exllamav3_ext/attn_verify.cu",
     )
-    check(r.returncode == 0, f"nvcc failed: {r.stderr[-2000:]}")
-    sass = subprocess.run(
-        ["nvdisasm", "-gi", "-c", str(cub)], capture_output=True, text=True, check=True
-    ).stdout
+    if err is not None:
+        fail(f"nvcc failed: {err[-2000:]}")
+    sass = ead.disasm(["-gi", "-c"], cub)
     fns = re.split(r"\n\s*\.section\s+\.text\.", sass)
     fn = {f.split(",", 1)[0]: f for f in fns[1:]}
-
-    def count(rows, line, op):
-        return sum(
-            1
-            for ln, i in rows
-            if ln == line and re.search(rf"(^|\s){re.escape(op)}", i)
-        )
-
     for name in ("attn_verify_split_k3v3", "attn_verify_split_k3v3_tree"):
-        sp = D.sass_by_line(fn[name], "attn_verify.cu")
-        check(count(sp, 475, "FRND") == 6, f"{name}: floorf -> 6 FRND per tile")
-        check(
-            count(sp, 141, "MUFU.EX2") == 18,
-            f"{name}: 18 MUFU.EX2 per tile (12 p + 6 cs), none for alpha",
-        )
-        check(count(sp, 481, "MUFU.EX2") == 0, f"{name}: alpha without ex2")
-        check(
-            count(sp, 501, "FADD") + count(sp, 502, "FADD") == 42,
-            f"{name}: 7 FADD per row slot in the warp tree",
-        )
-        check(count(sp, 503, "FFMA") == 6, f"{name}: l = one FFMA per row slot")
-        check(
-            count(sp, 117, "HMMA.16816.F32") == 12
-            and count(sp, 536, "HMMA.16816.F32") == 36,
-            f"{name}: P V = 12 zero-C + 36 accumulating HMMA",
-        )
-        check(
-            sum(count(sp, ln, "FFMA") for ln in range(545, 549)) == 48,
-            f"{name}: 48 fold FFMA",
-        )
-    cg = D.sass_by_line(fn["attn_verify_combine_gate"], "attn_verify.cu")
-    check(count(cg, 141, "MUFU.EX2") == 0, "combine: no ex2 for the weights")
-    check(
-        count(cg, 670, "FMUL") >= 1 and count(cg, 671, "FMUL") >= 1,
-        "combine: v w, l w FMUL",
-    )
-    check(
-        count(cg, 679, "FADD") >= 9 and count(cg, 696, "FADD") >= 9,
-        "combine: tree FADD",
-    )
-    check(
-        count(cg, 699, "MUFU.RCP") == 1 and count(cg, 699, "FMUL") == 1,
-        "combine: acc / lsum = RCP + FMUL",
-    )
-    check(
-        count(cg, 117, "HMMA.16816.F32") == 4 and count(cg, 732, "HMMA.16816.F32") == 4,
-        "combine: rotation 4 + 4 HMMA",
-    )
-    check(
-        not any(ln == 637 and "FFMA" in i for ln, i in cg),
-        "combine: no FFMA rotation chain",
-    )
-    print(
-        "3030 compiled (nvcc sm_86 -O3 --use_fast_math): FRND, ex2 for p and cs only, warp tree, fold FFMA, "
-        "zero-C P V HMMA, exact-weight combine tree, two-step HMMA rotation"
+        sp = ead.sass_by_line(fn[name], "attn_verify.cu")
+        for conds, msg in SPLIT_FACTS:
+            if not holds(sp, conds):
+                fail(f"{name}: {msg}")
+    cg = ead.sass_by_line(fn["attn_verify_combine_gate"], "attn_verify.cu")
+    for conds, msg in COMBINE_FACTS:
+        if not holds(cg, conds):
+            fail(msg)
+    if any(ln == OLD_ROT_LINE and "FFMA" in i for ln, i in cg):
+        fail("combine: no FFMA rotation chain")
+    sys.stdout.write(
+        "3030 compiled (nvcc sm_86 -O3 --use_fast_math): FRND, ex2 for p "
+        "and cs only, warp tree, fold FFMA, "
+        "zero-C P V HMMA, exact-weight combine tree, two-step HMMA rotation\n"
     )
 
 
-# ---------------------------------------------------------------------------------------------
+# ---------------------------------------------------------------------------------
 # 3. Model mirror (the Bend definitions) and kernel replay
 
 
-def bit(b):
-    return 1 if b else 0
+def half(x: int) -> int:
+    """Halve rounding down.
 
+    Args:
+        x: the number.
 
-def half(x):
+    Returns:
+        x // 2.
+
+    """
     return x // 2
 
 
-def halfup(n):
+def halfup(n: int) -> int:
+    """Halve rounding up.
+
+    Args:
+        n: the number.
+
+    Returns:
+        (n + 1) // 2.
+
+    """
     return (n + 1) // 2
 
 
-def flip(x):
+def flip(x: int) -> int:
+    """Flip the lowest bit.
+
+    Args:
+        x: the number.
+
+    Returns:
+        x ^ 1.
+
+    """
     return x ^ 1
 
 
-def tdepth(K, x, n):
+def tdepth(levels: int, x: int, n: int) -> int:
+    """Count the adds leaf x takes in a levels-deep pairwise tree of n live leaves.
+
+    Args:
+        levels: the tree depth.
+        x: the leaf.
+        n: the live leaves.
+
+    Returns:
+        The adds.
+
+    """
     c = 0
-    for _ in range(K):
-        c += bit(flip(x) < n)
+    for _ in range(levels):
+        c += int(flip(x) < n)
         x, n = half(x), halfup(n)
     return c
 
 
-def tbound(K, n):
+def tbound(levels: int, n: int) -> int:
+    """Bound tdepth over the leaves.
+
+    Args:
+        levels: the tree depth.
+        n: the live leaves.
+
+    Returns:
+        The bound.
+
+    """
     c = 0
-    for _ in range(K):
-        c += bit(1 < n)
+    for _ in range(levels):
+        c += int(n > 1)
         n = halfup(n)
     return c
 
 
-def m_T(L):
-    return cdiv(L, 64)
+def m_t(n_keys: int) -> int:
+    """Count the 64-key tiles (Bend m_T).
+
+    Args:
+        n_keys: the row length L.
+
+    Returns:
+        The tiles.
+
+    """
+    return cdiv(n_keys, 64)
 
 
-def m_nsl(L):
-    return min(m_T(L), S_E)
+def m_nsl(n_keys: int) -> int:
+    """Count the live split slots.
+
+    Args:
+        n_keys: the row length L.
+
+    Returns:
+        The slots.
+
+    """
+    return min(m_t(n_keys), S_E)
 
 
-def m_nt(L, x, q):
-    return min(64, max(0, L - 64 * (x + 20 * q)))
+def m_nt(n_keys: int, x: int, q: int) -> int:
+    """Count the live keys of slot x's q-th tile.
+
+    Args:
+        n_keys: the row length L.
+        x: the slot.
+        q: the tile of the slot.
+
+    Returns:
+        The keys.
+
+    """
+    return min(64, max(0, n_keys - 64 * (x + 20 * q)))
 
 
-def m_own(L, x, q, g):
-    nt = m_nt(L, x, q)
+def m_own(n_keys: int, x: int, q: int, g: int) -> int:
+    """Mirror e_own.
+
+    Args:
+        n_keys: the row length L.
+        x: the slot.
+        q: the tile of the slot.
+        g: the k16 group.
+
+    Returns:
+        The t32 steps of the key's P V.
+
+    """
+    nt = m_nt(n_keys, x, q)
     lg = cdiv(nt, 16)
-    return bit(0 < g or 16 * g + 2 <= nt) + max(0, max(0, lg - g) - 1)
+    return int(g > 0 or 16 * g + 2 <= nt) + max(0, max(0, lg - g) - 1)
 
 
-def m_later(L, x, q):
-    return max(0, max(0, cdiv(max(0, m_T(L) - x), S_E) - 1) - q)
+def m_later(n_keys: int, x: int, q: int) -> int:
+    """Count the tiles of slot x after its q-th.
+
+    Args:
+        n_keys: the row length L.
+        x: the slot.
+        q: the tile of the slot.
+
+    Returns:
+        The later tiles.
+
+    """
+    return max(0, max(0, cdiv(max(0, m_t(n_keys) - x), S_E) - 1) - q)
 
 
-def m_fold(L, x, q):
-    return 1 + m_later(L, x, q)
+def m_fold(n_keys: int, x: int, q: int) -> int:
+    """Mirror e_fold.
+
+    Args:
+        n_keys: the row length L.
+        x: the slot.
+        q: the tile of the slot.
+
+    Returns:
+        The fold roundings.
+
+    """
+    return 1 + m_later(n_keys, x, q)
 
 
-def m_depth(L, x):
-    return tdepth(9, x, m_nsl(L))
+def m_depth(n_keys: int, x: int) -> int:
+    """Mirror e_depth.
+
+    Args:
+        n_keys: the row length L.
+        x: the slot.
+
+    Returns:
+        The combine-tree adds.
+
+    """
+    return tdepth(9, x, m_nsl(n_keys))
 
 
-def m_tsum(L, x, q, g, r):
-    return tdepth(6, 16 * g + r, m_nt(L, x, q))
+def m_tsum(n_keys: int, x: int, q: int, g: int, r: int) -> int:
+    """Mirror e_tsum.
+
+    Args:
+        n_keys: the row length L.
+        x: the slot.
+        q: the tile of the slot.
+        g: the k16 group.
+        r: the key in the group.
+
+    Returns:
+        The tile-tree adds.
+
+    """
+    return tdepth(6, 16 * g + r, m_nt(n_keys, x, q))
 
 
-def m_n0(L):
-    return cdiv(m_T(L), S_E)
+def m_n0(n_keys: int) -> int:
+    """Mirror e_n0.
+
+    Args:
+        n_keys: the row length L.
+
+    Returns:
+        The tiles of slot 0.
+
+    """
+    return cdiv(m_t(n_keys), S_E)
 
 
-def m_D(L):
-    return tbound(9, m_nsl(L))
+def m_d(n_keys: int) -> int:
+    """Mirror e_D.
+
+    Args:
+        n_keys: the row length L.
+
+    Returns:
+        The combine-tree bound.
+
+    """
+    return tbound(9, m_nsl(n_keys))
 
 
-def m_TE(L):
-    return tbound(6, L)
+def m_te(n_keys: int) -> int:
+    """Mirror e_TE.
+
+    Args:
+        n_keys: the row length L.
+
+    Returns:
+        The tile-tree bound.
+
+    """
+    return tbound(6, n_keys)
 
 
-def m_OE(L):
-    return max(0, min(4, cdiv(L, 16)) - bit(L == 1))
+def m_oe(n_keys: int) -> int:
+    """Mirror e_OE.
+
+    Args:
+        n_keys: the row length L.
+
+    Returns:
+        The own-steps bound.
+
+    """
+    return max(0, min(4, cdiv(n_keys, 16)) - int(n_keys == 1))
 
 
-def m_dr(L):
-    return 2 + m_TE(L) + m_n0(L) + m_D(L)
+def m_dr(n_keys: int) -> int:
+    """Mirror e_dr.
+
+    Args:
+        n_keys: the row length L.
+
+    Returns:
+        The denominator's r32 bound.
+
+    """
+    return 2 + m_te(n_keys) + m_n0(n_keys) + m_d(n_keys)
 
 
-def s_geo(L):
-    B = cdiv(cdiv(L, 256), 16) * 16 * 256 + 1
-    ns = max(1, min(41, cdiv(B, 128)))
-    sl = cdiv(cdiv(B, ns), 32) * 32
-    nlive = cdiv(L, sl)
-    ls0 = min(L, sl)
-    gt = cdiv(min(L, 32), 16)
-    own0 = bit(1 < L) + max(0, gt - 1)
+def s_geo(n_keys: int) -> dict[str, int]:
+    """Mirror the stock geometry of key 0.
+
+    Args:
+        n_keys: the row length L.
+
+    Returns:
+        sl, nlive, own0, laterk0, later0, after0 and dr0.
+
+    """
+    bound = cdiv(cdiv(n_keys, 256), 16) * 16 * 256 + 1
+    ns = max(1, min(41, cdiv(bound, 128)))
+    sl = cdiv(cdiv(bound, ns), 32) * 32
+    nlive = cdiv(n_keys, sl)
+    ls0 = min(n_keys, sl)
+    gt = cdiv(min(n_keys, 32), 16)
+    own0 = int(n_keys > 1) + max(0, gt - 1)
     laterk0 = max(0, cdiv(ls0, 16) - gt)
     later0 = max(0, cdiv(ls0, 32) - 1)
     after0 = max(0, nlive - 1)
-    ts0 = bit(1 < L) + bit(4 < L) + bit(2 < L) + bit(16 < L) + bit(8 < L)
+    ts0 = sum(n_keys > off for off in STOCK_XORS)
     dr0 = 2 + ts0 + later0 + 1 + after0
-    return dict(
-        sl=sl,
-        nlive=nlive,
-        own0=own0,
-        laterk0=laterk0,
-        later0=later0,
-        after0=after0,
-        dr0=dr0,
-    )
+    return {
+        "sl": sl,
+        "nlive": nlive,
+        "own0": own0,
+        "laterk0": laterk0,
+        "later0": later0,
+        "after0": after0,
+        "dr0": dr0,
+    }
 
 
-def m_rt(L):
-    return (m_OE(L) + 16) + ((m_n0(L) + m_D(L)) + m_dr(L))
+STOCK_XORS = (1, 4, 2, 16, 8)  # tl.sum's xor offsets over the 32-key tile
 
 
-def s_rt(L):
-    s = s_geo(L)
+def m_rt(n_keys: int) -> int:
+    """Mirror e_rt.
+
+    Args:
+        n_keys: the row length L.
+
+    Returns:
+        The 3030 route total.
+
+    """
+    return (m_oe(n_keys) + 16) + ((m_n0(n_keys) + m_d(n_keys)) + m_dr(n_keys))
+
+
+def s_rt(n_keys: int) -> int:
+    """Mirror s_rt.
+
+    Args:
+        n_keys: the row length L.
+
+    Returns:
+        The stock route total.
+
+    """
+    s = s_geo(n_keys)
     return (s["own0"] + s["laterk0"] + 16) + (
         (s["later0"] + 1 + s["after0"]) + s["dr0"]
     )
@@ -523,47 +781,86 @@ def s_rt(L):
 
 # ---- kernel replay (index arithmetic of E3:attn_verify.cu, H_zero applied) ----
 
+MIN_SUMMED = 2  # a k16 step with two live products rounds
 
-def r_own(L, j):
-    """t32 steps of key j's P V: fresh accumulator per tile, k16 groups kk = 0..3 in order"""
+
+def r_own(n_keys: int, j: int) -> int:
+    """Count the t32 steps of key j's P V.
+
+    Fresh accumulator per tile, k16 groups kk = 0..3 in order.
+
+    Args:
+        n_keys: the row length L.
+        j: the key.
+
+    Returns:
+        The steps.
+
+    """
     t0 = (j // 64) * 64
-    live = [k for k in range(4) if t0 + 16 * k < L]
+    live = [k for k in range(4) if t0 + 16 * k < n_keys]
     g = (j - t0) // 16
-    in_group = min(16, L - (t0 + 16 * g))
-    c = int(
-        g > 0 or in_group >= 2
-    )  # the C before step g holds a live product, or the step sums >= 2
+    in_group = min(16, n_keys - (t0 + 16 * g))
+    # the C before step g holds a live product, or the step sums >= 2
+    c = int(g > 0 or in_group >= MIN_SUMMED)
     return c + sum(1 for k in live if k > g)
 
 
-def r_fold(L, j):
-    T = cdiv(L, 64)
+def r_fold(n_keys: int, j: int) -> int:
+    """Count the fold roundings of key j's tile.
+
+    Args:
+        n_keys: the row length L.
+        j: the key.
+
+    Returns:
+        The roundings.
+
+    """
+    n_tiles = cdiv(n_keys, 64)
     i = j // 64
     x, q = i % S_E, i // S_E
-    return 1 + sum(1 for qq in range(q + 1, T) if x + S_E * qq < T)
+    return 1 + sum(1 for qq in range(q + 1, n_tiles) if x + S_E * qq < n_tiles)
 
 
-def r_tsum(L, j):
-    """adds key j's p takes in the tile sum: p0 + p1, lane xor 1, xor 2 (8 keys per warp), then the
-    pairwise warp tree ((w0 + w1) + (w2 + w3)) + ((w4 + w5) + (w6 + w7))"""
+def r_tsum(n_keys: int, j: int) -> int:
+    """Count the adds key j's p takes in the tile sum.
+
+    p0 + p1, lane xor 1, xor 2 (8 keys per warp), then the pairwise warp tree
+    ((w0 + w1) + (w2 + w3)) + ((w4 + w5) + (w6 + w7)).
+
+    Args:
+        n_keys: the row length L.
+        j: the key.
+
+    Returns:
+        The adds.
+
+    """
     t0 = (j // 64) * 64
-    n = min(64, L - t0)
+    n = min(64, n_keys - t0)
     u = j - t0
-
-    def nonempty(a, b):
-        return a < n and a < b
-
     c = 0
     for size in (1, 2, 4, 8, 16, 32):
         blk = (u // size) * size
         partner = blk ^ size
-        c += nonempty(partner, partner + size)
+        c += partner < n and partner < partner + size
     return c
 
 
-def r_depth(nsl, x):
-    """adds slot x's term takes in the binary-counter merge of slots 0 .. nsl - 1 (all merged)"""
-    stack = {}
+def r_depth(nsl: int, x: int) -> int:
+    """Count the adds slot x's term takes in the binary-counter merge.
+
+    The merge of slots 0 .. nsl - 1 (all merged).
+
+    Args:
+        nsl: the live slots.
+        x: the slot.
+
+    Returns:
+        The adds.
+
+    """
     n = 0
     mine = None  # level whose block holds x, or 'acc'
     adds = 0
@@ -592,78 +889,105 @@ def r_depth(nsl, x):
     return adds
 
 
-def keys_of(L):
-    T = cdiv(L, 64)
-    ks = set(range(min(L, 128))) | set(range(max(0, L - 70), L))
+DENSE_TILES = 1200  # up to this many tiles, three keys of every tile
+
+
+def keys_of(n_keys: int) -> list[int]:
+    """Pick the keys the replay examines.
+
+    Args:
+        n_keys: the row length L.
+
+    Returns:
+        The keys, sorted.
+
+    """
+    n_tiles = cdiv(n_keys, 64)
+    ks = set(range(min(n_keys, 128))) | set(range(max(0, n_keys - 70), n_keys))
     ks |= (
-        {64 * t + o for t in range(T) for o in (0, 17, 63) if 64 * t + o < L}
-        if T <= 1200
+        {64 * t + o for t in range(n_tiles) for o in (0, 17, 63) if 64 * t + o < n_keys}
+        if n_tiles <= DENSE_TILES
         else set()
     )
     ks |= {
         64 * t + o
-        for t in range(0, T, max(1, T // 600))
+        for t in range(0, n_tiles, max(1, n_tiles // 600))
         for o in (0, 33)
-        if 64 * t + o < L
+        if 64 * t + o < n_keys
     }
     return sorted(ks)
 
 
-def coords(j):
+def coords(j: int) -> tuple[int, int, int, int]:
+    """Place key j: slot, tile of the slot, k16 group, key in the group.
+
+    Args:
+        j: the key.
+
+    Returns:
+        x, q, g, r.
+
+    """
     i = j // 64
     return i % S_E, i // S_E, (j - 64 * i) // 16, (j - 64 * i) % 16
 
 
-def check_replay():
-    Ls = sorted(
-        set(
-            list(range(1, 2100))
-            + [
-                4095,
-                4096,
-                4097,
-                8191,
-                8192,
-                8193,
-                24576,
-                24577,
-                65536,
-                131072,
-                262144,
-                270336,
-            ]
-        )
-    )
+REPLAY_LENGTHS = sorted({
+    *range(1, 2100),
+    4095,
+    4096,
+    4097,
+    8191,
+    8192,
+    8193,
+    24576,
+    24577,
+    65536,
+    131072,
+    262144,
+    270336,
+})
+
+
+def check_replay() -> None:
+    """Check the kernel replay against the model mirror and its bounds."""
     nk = 0
-    for L in Ls:
-        nsl = m_nsl(L)
-        for j in keys_of(L):
+    for n_keys in REPLAY_LENGTHS:
+        nsl = m_nsl(n_keys)
+        for j in keys_of(n_keys):
             x, q, g, r = coords(j)
-            got = (r_own(L, j), r_fold(L, j), r_tsum(L, j), r_depth(nsl, x))
+            got = (
+                r_own(n_keys, j),
+                r_fold(n_keys, j),
+                r_tsum(n_keys, j),
+                r_depth(nsl, x),
+            )
             want = (
-                m_own(L, x, q, g),
-                m_fold(L, x, q),
-                m_tsum(L, x, q, g, r),
-                m_depth(L, x),
+                m_own(n_keys, x, q, g),
+                m_fold(n_keys, x, q),
+                m_tsum(n_keys, x, q, g, r),
+                m_depth(n_keys, x),
             )
-            check(
-                got == want,
-                f"L={L} key {j}: replay (own, fold, tsum, depth) {got} != model {want}",
-            )
-            check(
-                got[0] <= m_OE(L)
-                and got[1] <= m_n0(L)
-                and got[2] <= m_TE(L)
-                and got[3] <= m_D(L),
-                f"L={L} key {j}: counts {got} exceed the bounds",
-            )
+            if got != want:
+                fail(
+                    f"L={n_keys} key {j}: replay (own, fold, tsum, depth) {got} "
+                    f"!= model {want}"
+                )
+            if not (
+                got[0] <= m_oe(n_keys)
+                and got[1] <= m_n0(n_keys)
+                and got[2] <= m_te(n_keys)
+                and got[3] <= m_d(n_keys)
+            ):
+                fail(f"L={n_keys} key {j}: counts {got} exceed the bounds")
             nk += 1
-    print(
-        f"replay: {nk} (L, key) pairs: own / fold / tile tree / combine tree equal the model and stay within the bounds"
+    sys.stdout.write(
+        f"replay: {nk} (L, key) pairs: own / fold / tile tree / combine tree "
+        "equal the model and stay within the bounds\n"
     )
 
 
-# ---------------------------------------------------------------------------------------------
+# ---------------------------------------------------------------------------------
 # 4. Bend evaluation of the model at sample points
 
 SAMPLE_L = [
@@ -685,155 +1009,211 @@ SAMPLE_L = [
     8192,
     24577,
 ]
+SAMPLE_KEYS = (
+    (2, 1),
+    (65, 64),
+    (65, 3),
+    (500, 130),
+    (1281, 1280),
+    (1281, 17),
+    (4097, 4096),
+    (8192, 2600),
+)
 
 
-def check_bend(td: Path):
-    rows = []
-    for L in SAMPLE_L:
-        rows.append(
-            f"Dec.e_OE({L}n), Dec.e_n0({L}n), Dec.e_D({L}n), Dec.e_TE({L}n), Dec.e_dr({L}n), Dec.e_rt({L}n), "
-            f"Dec.s_own0({L}n), Dec.s_laterk0({L}n), Dec.s_later0({L}n), Dec.s_after0({L}n), Dec.s_dr0({L}n), Dec.s_rt({L}n)"
-        )
+def bend_source() -> str:
+    """Write the Bend program that evaluates the model at the sample points.
+
+    Returns:
+        The program.
+
+    """
+    rows = [
+        f"Dec.e_OE({n}n), Dec.e_n0({n}n), Dec.e_D({n}n), Dec.e_TE({n}n), "
+        f"Dec.e_dr({n}n), Dec.e_rt({n}n), "
+        f"Dec.s_own0({n}n), Dec.s_laterk0({n}n), Dec.s_later0({n}n), "
+        f"Dec.s_after0({n}n), "
+        f"Dec.s_dr0({n}n), Dec.s_rt({n}n)"
+        for n in SAMPLE_L
+    ]
     keyrows = []
-    for L, j in (
-        (2, 1),
-        (65, 64),
-        (65, 3),
-        (500, 130),
-        (1281, 1280),
-        (1281, 17),
-        (4097, 4096),
-        (8192, 2600),
-    ):
+    for n, j in SAMPLE_KEYS:
         x, q, g, r = coords(j)
         keyrows.append(
-            f"Dec.e_own({L}n, {x}n, {q}n, {g}n), Dec.e_fold({L}n, {x}n, {q}n), Dec.e_depth({L}n, {x}n), "
-            f"Dec.e_tsum({L}n, {x}n, {q}n, {g}n, {r}n)"
+            f"Dec.e_own({n}n, {x}n, {q}n, {g}n), Dec.e_fold({n}n, {x}n, {q}n), "
+            f"Dec.e_depth({n}n, {x}n), "
+            f"Dec.e_tsum({n}n, {x}n, {q}n, {g}n, {r}n)"
         )
-    src = (
+    return (
         "import Base\nimport " + str(HERE / "err_attn_dec.bend") + " as Dec\n\n"
         "def main() -> List<&2, List<&2, Nat>>:\n  ["
-        + ",\n   ".join(f"[{x}]" for x in rows + keyrows)
+        + ",\n   ".join(f"[{x}]" for x in [*rows, *keyrows])
         + "]\n"
     )
-    f = td / "dec_eval.bend"
-    f.write_text(src)
-    out = subprocess.run(
-        source_link.locked([source_link.bend(), str(f)]),
-        capture_output=True,
-        text=True,
-        timeout=1800,
-    )
-    check(
-        out.returncode == 0,
-        f"bend evaluation failed: {out.stdout[-1500:]}{out.stderr[-1500:]}",
-    )
-    got = [
-        [int(v) for v in re.findall(r"(\d+)n", row)]
-        for row in re.findall(r"\[([^\[\]]*)\]", out.stdout)
-    ]
+
+
+def mirror_values() -> list[list[int]]:
+    """Evaluate the Python mirror at the sample points.
+
+    Returns:
+        The rows the Bend program prints.
+
+    """
     want = []
-    for L in SAMPLE_L:
-        s = s_geo(L)
+    for n in SAMPLE_L:
+        s = s_geo(n)
         want.append([
-            m_OE(L),
-            m_n0(L),
-            m_D(L),
-            m_TE(L),
-            m_dr(L),
-            m_rt(L),
+            m_oe(n),
+            m_n0(n),
+            m_d(n),
+            m_te(n),
+            m_dr(n),
+            m_rt(n),
             s["own0"],
             s["laterk0"],
             s["later0"],
             s["after0"],
             s["dr0"],
-            s_rt(L),
+            s_rt(n),
         ])
-    for L, j in (
-        (2, 1),
-        (65, 64),
-        (65, 3),
-        (500, 130),
-        (1281, 1280),
-        (1281, 17),
-        (4097, 4096),
-        (8192, 2600),
-    ):
+    for n, j in SAMPLE_KEYS:
         x, q, g, r = coords(j)
         want.append([
-            m_own(L, x, q, g),
-            m_fold(L, x, q),
-            m_depth(L, x),
-            m_tsum(L, x, q, g, r),
+            m_own(n, x, q, g),
+            m_fold(n, x, q),
+            m_depth(n, x),
+            m_tsum(n, x, q, g, r),
         ])
-    check(got == want, f"Bend evaluation {got} != Python mirror {want}")
-    print(
-        f"bend evaluation: {len(SAMPLE_L)} sample L and 8 sample keys equal the Python mirror"
+    return want
+
+
+def check_bend(td: Path) -> None:
+    """Evaluate the Bend model at the sample points and compare with the mirror.
+
+    Args:
+        td: a scratch directory.
+
+    """
+    f = td / "dec_eval.bend"
+    f.write_text(bend_source())
+    out = subprocess.run(  # ruff: ignore[subprocess-without-shell-equals-true]  argv: pinned bend + generated .bend file in a private tempdir, no shell
+        source_link.locked([source_link.bend(), str(f)]),
+        capture_output=True,
+        text=True,
+        timeout=1800,
+        check=False,
+    )
+    if out.returncode != 0:
+        fail(f"bend evaluation failed: {out.stdout[-1500:]}{out.stderr[-1500:]}")
+    got = [
+        [int(v) for v in re.findall(r"(\d+)n", row)]
+        for row in re.findall(r"\[([^\[\]]*)\]", out.stdout)
+    ]
+    want = mirror_values()
+    if got != want:
+        fail(f"Bend evaluation {got} != Python mirror {want}")
+    sys.stdout.write(
+        f"bend evaluation: {len(SAMPLE_L)} sample L and 8 sample keys equal "
+        "the Python mirror\n"
     )
 
 
-# ---------------------------------------------------------------------------------------------
+# ---------------------------------------------------------------------------------
 # 5. Domination scan
 
 
-def elpis_routes(L):
-    keys = keys_of(L)
-    nsl = m_nsl(L)
+def elpis_routes(n_keys: int) -> ead.Routes:
+    """Build every 3030 rounding route at one L from the replay.
+
+    Args:
+        n_keys: the row length L.
+
+    Returns:
+        The routes.
+
+    """
+    keys = keys_of(n_keys)
+    nsl = m_nsl(n_keys)
     den = 2 + max(
-        r_tsum(L, j) + r_fold(L, j) + r_depth(nsl, coords(j)[0]) for j in keys
+        r_tsum(n_keys, j) + r_fold(n_keys, j) + r_depth(nsl, coords(j)[0]) for j in keys
     )
-    den = max(den, 2 + max(r_fold(L, j) + r_depth(nsl, coords(j)[0]) for j in keys))
-    check(den <= m_dr(L), f"L={L}: replayed denominator {den} > e_dr {m_dr(L)}")
-    dpath = D.add(D.P(t32=2, r16=1), D.P(r32=den, t32=16, ex2=1))
-    tail = D.add(dpath, D.P(rcp=1, r32=1), D.P(r16=3, t32=2))
-    xs = D.P(r32=2, ex2=1)
-    out = {}
+    den = max(
+        den,
+        2 + max(r_fold(n_keys, j) + r_depth(nsl, coords(j)[0]) for j in keys),
+    )
+    if not (den <= m_dr(n_keys)):
+        fail(f"L={n_keys}: replayed denominator {den} > e_dr {m_dr(n_keys)}")
+    vec, add = ead.vec, ead.add
+    dpath = add(vec(t32=2, r16=1), vec(r32=den, t32=16, ex2=1))
+    tail = add(dpath, vec(rcp=1, r32=1), vec(r16=3, t32=2))
+    xs = vec(r32=2, ex2=1)
+    out: ead.Routes = {}
     for j in keys:
         x = coords(j)[0]
-        ch = D.P(t32=r_own(L, j), r32=r_fold(L, j) + r_depth(nsl, x))
-        out[("DQ", j)] = D.add(D.P(t32=18, r16=1), xs, D.P(r16=1), ch, tail)
-        out[("DK", j)] = D.add(D.P(r32=1, r16=1), D.P(t32=16), xs, D.P(r16=1), ch, tail)
-        out[("DV", j)] = D.add(D.P(r32=1, r16=1), ch, tail)
-        out[("DC", j)] = D.add(
-            D.P(t32=18, r16=1), xs, D.P(r32=r_fold(L, j) + r_depth(nsl, x)), tail
+        ch = vec(t32=r_own(n_keys, j), r32=r_fold(n_keys, j) + r_depth(nsl, x))
+        out["DQ", j] = add(vec(t32=18, r16=1), xs, vec(r16=1), ch, tail)
+        out["DK", j] = add(vec(r32=1, r16=1), vec(t32=16), xs, vec(r16=1), ch, tail)
+        out["DV", j] = add(vec(r32=1, r16=1), ch, tail)
+        out["DC", j] = add(
+            vec(t32=18, r16=1),
+            xs,
+            vec(r32=r_fold(n_keys, j) + r_depth(nsl, x)),
+            tail,
         )
-    out[("DG",)] = D.P(r32=1, ex2=1, r16=4, rcp=1)
+    out["DG",] = vec(r32=1, ex2=1, r16=4, rcp=1)
     return out
 
 
-def scan():
-    Ls = sorted(
-        set(
-            list(range(1, 4401))
-            + list(range(4401, 1 << 20, 4999))
-            + [8192, 24576, 262144, 270336, 1 << 20]
-        )
-    )
+SCAN_LENGTHS = sorted({
+    *range(1, 4401),
+    *range(4401, 1 << 20, 4999),
+    8192,
+    24576,
+    262144,
+    270336,
+    1 << 20,
+})
+
+
+def scan() -> None:
+    """Scan L: every 3030 route dominated, and the route totals ordered."""
     bad = 0
-    for L in Ls:
-        S, _, _ = D.routes(L, "s", [0])
-        cand = list(S.values())
-        for k, e in elpis_routes(L).items():
-            if not any(D.dom(128, e, s) for s in cand):
+    for n_keys in SCAN_LENGTHS:
+        s_routes, _, _ = ead.routes(n_keys, "s", [0])
+        cand = list(s_routes.values())
+        for k, e in elpis_routes(n_keys).items():
+            if not any(ead.dom(128, e, s) for s in cand):
                 bad += 1
-                print(f"  NOT DOMINATED: L={L} {k} {e}")
-    check(bad == 0, f"{bad} routes not dominated")
-    worst = min((s_rt(L) - m_rt(L), L) for L in range(1, (1 << 20) + 1))
-    check(worst[0] >= 0, f"e_rt > s_rt at L = {worst[1]}")
-    check(
-        all(m_OE(L) <= s_geo(L)["own0"] + s_geo(L)["laterk0"] for L in range(1, 70000)),
-        "e_OE > own0 + laterk0",
+                sys.stdout.write(f"  NOT DOMINATED: L={n_keys} {k} {e}\n")
+    if bad != 0:
+        fail(f"{bad} routes not dominated")
+    worst = min((s_rt(n) - m_rt(n), n) for n in range(1, (1 << 20) + 1))
+    if not (worst[0] >= 0):
+        fail(f"e_rt > s_rt at L = {worst[1]}")
+    if not (
+        all(m_oe(n) <= s_geo(n)["own0"] + s_geo(n)["laterk0"] for n in range(1, 70000))
+    ):
+        fail("e_OE > own0 + laterk0")
+    sys.stdout.write(
+        f"scan: every 3030 route dominated at x = 128 for {len(SCAN_LENGTHS)} L "
+        "(1..4400 dense, sampled to 2^20); "
+        f"e_rt <= s_rt for L = 1..2^20 (min slack {worst[0]} at L = {worst[1]})\n"
     )
-    print(
-        f"scan: every 3030 route dominated at x = 128 for {len(Ls)} L (1..4400 dense, sampled to 2^20); "
-        f"e_rt <= s_rt for L = 1..2^20 (min slack {worst[0]} at L = {worst[1]})"
-    )
 
 
-# ---------------------------------------------------------------------------------------------
+# ---------------------------------------------------------------------------------
 
 
-def main(argv: list) -> int:
+def main(argv: list[str]) -> int:
+    """Run every check.
+
+    Args:
+        argv: the command line.
+
+    Returns:
+        The exit status.
+
+    """
     ap = argparse.ArgumentParser()
     ap.add_argument("--stock", type=Path, required=True)
     ap.add_argument("--elpis", type=Path)
@@ -844,9 +1224,8 @@ def main(argv: list) -> int:
     a = ap.parse_args(argv[1:])
     with tempfile.TemporaryDirectory() as td:
         tdp = Path(td)
-        elpis = a.elpis or D.build_elpis(
-            a.stock, tdp, stop_before=None
-        )  # the full series, 3030 included
+        # the full series, 3030 included
+        elpis = a.elpis or ead.build_elpis(a.stock, tdp, stop_before=None)
         if a.mutate:
             rel, line, old, new = MUTATIONS[a.mutate]
             if a.elpis:
@@ -854,10 +1233,8 @@ def main(argv: list) -> int:
                 shutil.copytree(elpis, dst, symlinks=True)
                 elpis = dst
             lines = (elpis / rel).read_text().split("\n")
-            check(
-                lines[line - 1].count(old) == 1,
-                f"mutation {a.mutate}: anchor not on line {line}",
-            )
+            if lines[line - 1].count(old) != 1:
+                fail(f"mutation {a.mutate}: anchor not on line {line}")
             lines[line - 1] = lines[line - 1].replace(old, new)
             (elpis / rel).write_text("\n".join(lines))
         check_frags({"S": a.stock, "E": elpis})
@@ -867,7 +1244,7 @@ def main(argv: list) -> int:
         if not a.no_bend:
             check_bend(tdp)
         scan()
-    print("err_attn_dec_diff: PASS")
+    sys.stdout.write("err_attn_dec_diff: PASS\n")
     return 0
 
 

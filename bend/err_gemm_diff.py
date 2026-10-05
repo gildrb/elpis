@@ -1,21 +1,25 @@
 #!/usr/bin/env python3
-"""
-Source-link check of bend/err_gemm.bend (rounding-step Paths of the served decode GEMMs).
+# Copyright (c) 2026 Gil Rodrigues
+"""Source-link check of bend/err_gemm.bend.
 
-The Bend model transcribes, per leaf, the rounding steps of stock ExLlamaV3 355c6ee (STOCK) and of
-the elpis extension series applied to it (patches/exl3/series, then patches/exl3-ext/series, in
-order). This script
-  1. builds the elpis tree in a temporary directory (copy of STOCK, `patch -p1` of every series
-     patch, failing on any rejected hunk);
-  2. checks that the series leaves the shared numerics files byte-identical (hadamard_inner.cuh,
-     codebook.cuh, exl3_dq.cuh, exl3_gemm_inner.cuh, exl3_gemm_kernel.cuh, exl3_gemv_int8*), the
-     model's "same code on both sides" premise;
-  3. checks every source fragment the model transcribes (whitespace-normalised, verbatim) in STOCK
-     and in the elpis tree.
+The model holds the rounding-step Paths of the served decode GEMMs.
+
+The Bend model transcribes, per leaf, the rounding steps of stock ExLlamaV3 355c6ee
+(STOCK) and of the elpis extension series applied to it (patches/exl3/series, then
+patches/exl3-ext/series, in order). This script
+  1. builds the elpis tree in a temporary directory (copy of STOCK, `patch -p1` of every
+     series patch, failing on any rejected hunk);
+  2. checks that the series leaves the shared numerics files byte-identical
+     (hadamard_inner.cuh, codebook.cuh, exl3_dq.cuh, exl3_gemm_inner.cuh,
+     exl3_gemm_kernel.cuh, exl3_gemv_int8*), the model's "same code on both sides"
+     premise;
+  3. checks every source fragment the model transcribes (whitespace-normalised,
+     verbatim) in STOCK and in the elpis tree.
 Exit status 0 iff every check passes.
 
 Usage: python3 -B bend/err_gemm_diff.py --stock STOCK
-  STOCK: the stock exllamav3 package directory at 355c6ee (OUT/stock of bend/engine_trees.py).
+  STOCK: the stock exllamav3 package directory at 355c6ee (OUT/stock of
+         bend/engine_trees.py).
 """
 
 from __future__ import annotations
@@ -98,7 +102,10 @@ STOCK_FRAGMENTS = [
     ),
     (
         "exllamav3_ext/quant/exl3_gemm_inner.cuh",
-        "dq_dispatch<bits, cb>(shb, lane_id << 3, frag_b[buf][n2], frag_b[buf][n2 + 1]);",
+        (
+            "dq_dispatch<bits, cb>(shb, lane_id << 3, frag_b[buf][n2], frag_b[buf][n2 "
+            "+ 1]);"
+        ),
         "stock decode",
     ),
     (
@@ -128,7 +135,10 @@ STOCK_FRAGMENTS = [
     ),
     (
         "exllamav3_ext/quant/exl3_gemm_inner.cuh",
-        "if (slice2_k == tiles_k - 1 || slice2_iters == 1) { reduce(); slice2_k0 = slice2_k + 1; }",
+        (
+            "if (slice2_k == tiles_k - 1 || slice2_iters == 1) { reduce(); "
+            "slice2_k0 = slice2_k + 1; }"
+        ),
         "one run per column piece",
     ),
     (
@@ -138,7 +148,10 @@ STOCK_FRAGMENTS = [
     ),
     (
         "exllamav3_ext/quant/exl3_gemm_kernel.cuh",
-        "<bits, c_fp32, cb, TILESIZE_M, TILESIZE_K, TILESIZE_N, SH_STAGES, FRAG_STAGES, false>",
+        (
+            "<bits, c_fp32, cb, TILESIZE_M, TILESIZE_K, TILESIZE_N, SH_STAGES, "
+            "FRAG_STAGES, false>"
+        ),
         "mgemm: no shmem output had",
     ),
     (
@@ -148,7 +161,10 @@ STOCK_FRAGMENTS = [
     ),
     (
         "exllamav3_ext/quant/exl3_gemv_int8_kernel.cuh",
-        "had_hf_r_128_inner<true, false>(Ar + (kb0 << 4) + (sp << 7), sh_ah + (sp << 7), suh + (kb0 << 4) + (sp << 7), 0.088388347648f);",
+        (
+            "had_hf_r_128_inner<true, false>(Ar + (kb0 << 4) + (sp << 7), sh_ah "
+            "+ (sp << 7), suh + (kb0 << 4) + (sp << 7), 0.088388347648f);"
+        ),
         "int8 input had",
     ),
     ("exllamav3_ext/quant/exl3_gemv_int8_kernel.cuh", "float rq = 1.0f / q_s;", "rcp"),
@@ -213,7 +229,10 @@ ELPIS_FRAGMENTS = [
     ),
     (
         "exllamav3_ext/quant/exl3_gemm_m16g_kernel.cuh",
-        "if (row < size_m) __stcg(slot + row * GW + t * 16 + (c >> 1) * 8, acc[t][mt][c]);",
+        (
+            "if (row < size_m) __stcg(slot + row * GW + t * 16 + (c >> 1) * "
+            "8, acc[t][mt][c]);"
+        ),
         "exact fp32 slot store",
     ),
     (
@@ -263,7 +282,10 @@ ELPIS_FRAGMENTS = [
     ),
     (
         "exllamav3_ext/quant/exl3_tail_m16_kernel.cuh",
-        "had_hf_r_128_inner<true, false>(xn, q.xh_g + (size_t) r * K1 + col0, q.suh_g + col0, 0.088388347648f);",
+        (
+            "had_hf_r_128_inner<true, false>(xn, q.xh_g + (size_t) r * K1 + "
+            "col0, q.suh_g + col0, 0.088388347648f);"
+        ),
         "gate input had",
     ),
     (
@@ -278,7 +300,10 @@ ELPIS_FRAGMENTS = [
     ),
     (
         "exllamav3_ext/quant/exl3_tail_m16_kernel.cuh",
-        "had_ff_r_128_inner<false, true>(sl0, D + (size_t) r * N2 + col0, q.svh_d + col0, 0.088388347648f);",
+        (
+            "had_ff_r_128_inner<false, true>(sl0, D + (size_t) r * N2 + col0, "
+            "q.svh_d + col0, 0.088388347648f);"
+        ),
         "down had_ff",
     ),
     (
@@ -301,10 +326,28 @@ ELPIS_FRAGMENTS = [
 
 
 def norm(text: str) -> str:
+    """Collapse whitespace runs to single spaces.
+
+    Args:
+        text: The source text.
+
+    Returns:
+        The normalized text.
+
+    """
     return re.sub(r"\s+", " ", text)
 
 
 def series_patches(d: Path) -> list[Path]:
+    """List the patches of a series directory, in order.
+
+    Args:
+        d: The series directory.
+
+    Returns:
+        The patch paths.
+
+    """
     return [
         d / line.split()[1]
         for line in (d / "series").read_text().splitlines()
@@ -312,16 +355,45 @@ def series_patches(d: Path) -> list[Path]:
     ]
 
 
+def patch_tool() -> str:
+    """Resolve `patch` on PATH.
+
+    Returns:
+        The executable path.
+
+    Raises:
+        FileNotFoundError: `patch` is not on PATH.
+
+    """
+    found = shutil.which("patch")
+    if found is None:
+        msg = "patch is not on PATH"
+        raise FileNotFoundError(msg)
+    return found
+
+
 def build(stock: Path, out: Path) -> list[str]:
+    """Copy STOCK to out and apply every series patch.
+
+    Args:
+        stock: The stock package directory.
+        out: The new elpis tree.
+
+    Returns:
+        One message per failed patch.
+
+    """
     shutil.copytree(stock, out)
-    errors = []
+    patch = patch_tool()
+    errors: list[str] = []
     for d in SERIES:
         for p in series_patches(d):
-            r = subprocess.run(
-                ["patch", "-p1", "-s", "-f", "--no-backup-if-mismatch", "-i", str(p)],
+            r = subprocess.run(  # ruff: ignore[subprocess-without-shell-equals-true]  argv: patch from PATH applying a repo series patch, no shell
+                [patch, "-p1", "-s", "-f", "--no-backup-if-mismatch", "-i", str(p)],
                 cwd=out,
                 capture_output=True,
                 text=True,
+                check=False,
             )
             if r.returncode != 0:
                 errors.append(
@@ -330,34 +402,55 @@ def build(stock: Path, out: Path) -> list[str]:
     return errors
 
 
-def check(tree: Path, frags, label: str) -> int:
+def check(tree: Path, frags: list[tuple[str, str, str]], label: str) -> int:
+    """Print whether each fragment occurs in its file.
+
+    Args:
+        tree: The package tree.
+        frags: (file, fragment, description) triples.
+        label: The tree's name in the output.
+
+    Returns:
+        The number of missing fragments.
+
+    """
     bad = 0
     for rel, frag, what in frags:
         f = tree / rel
         ok = f.is_file() and norm(frag) in norm(f.read_text())
-        print(f"{'IDENTICAL' if ok else 'MISSING  '} {label} {rel}: {what}")
+        sys.stdout.write(
+            f"{'IDENTICAL' if ok else 'MISSING  '} {label} {rel}: {what}\n"
+        )
         bad += not ok
     return bad
 
 
 def main() -> int:
+    """Run every check.
+
+    Returns:
+        The exit status: 0 iff every check passes.
+
+    """
     ap = argparse.ArgumentParser()
     ap.add_argument("--stock", required=True)
-    a = ap.parse_args()
-    stock = Path(a.stock)
+    stock_arg: object = ap.parse_args().stock
+    if not isinstance(stock_arg, str):
+        ap.error("--stock: expected a path")
+    stock = Path(stock_arg)
     bad = 0
     with tempfile.TemporaryDirectory() as tmp:
         tree = Path(tmp) / "elpis"
         for e in build(stock, tree):
-            print(e)
+            sys.stdout.write(f"{e}\n")
             bad += 1
         for rel in SHARED:
             same = (stock / rel).read_bytes() == (tree / rel).read_bytes()
-            print(f"{'IDENTICAL' if same else 'CHANGED  '} shared {rel}")
+            sys.stdout.write(f"{'IDENTICAL' if same else 'CHANGED  '} shared {rel}\n")
             bad += not same
         bad += check(stock, STOCK_FRAGMENTS, "stock")
         bad += check(tree, ELPIS_FRAGMENTS, "elpis")
-    print(f"{bad} failure(s)")
+    sys.stdout.write(f"{bad} failure(s)\n")
     return 1 if bad else 0
 
 
