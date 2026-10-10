@@ -860,19 +860,22 @@ class History:
                 "next message"
             )
             raise APIError(msg)
-        if role not in {"system", "user", "assistant"}:
-            msg = "Supported message roles: system, user, assistant, tool"
+        if role not in {"system", "developer", "user", "assistant"}:
+            msg = "Supported message roles: system, developer, user, assistant, tool"
             raise APIError(msg)
         allowed = {"role", "content"}
         if role == "assistant":
             allowed |= {"tool_calls", "reasoning_content"}
         only_fields(message, allowed, "message")
-        if role == "system" and index != 0:
-            msg = "System message must be first"
+        # OpenAI "developer" messages are system instructions for reasoning models.
+        if role in {"system", "developer"} and index != 0:
+            msg = "System or developer message must be first"
             raise APIError(msg)
         if role == "user":
             self.user_found = True
         normalized = dict(message)
+        if role == "developer":
+            normalized["role"] = "system"
         normalized["content"] = text_content(
             message.get("content"), "message.content", nullable=role == "assistant"
         )
@@ -1222,6 +1225,8 @@ def parse_chat(body: dict[str, JSON]) -> Chat:
     parallel = boolean_value(
         body.get("parallel_tool_calls", True), "parallel_tool_calls"
     )
+    # OpenAI response storage: nothing is stored here, so either value is honoured.
+    _ = boolean_value(body.get("store", False), "store")
     messages = parse_messages(body.get("messages"))
     template_kwargs, thinking = parse_template_kwargs(body)
     instructions = choice_instructions(
@@ -2599,6 +2604,7 @@ CHAT_FIELDS = COMMON_FIELDS | {
     "chat_template_kwargs",
     "reasoning_effort",
     "max_completion_tokens",
+    "store",
 }
 
 

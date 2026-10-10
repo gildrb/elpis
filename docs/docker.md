@@ -165,6 +165,9 @@ The authenticated API supports chat and raw text completions. Generation is
 time. Input tokens plus the requested output budget must fit 262144. Request
 bodies are bounded at 32 MiB. Unsupported fields and invalid option types are
 rejected, not silently ignored. This is not a claim of complete OpenAI API parity.
+A first `developer` message is treated as the system message, and boolean `store`
+is accepted (nothing is stored), so stock OpenAI clients (pi, prime-agent, eukhe)
+work without compatibility flags.
 
 Chat tools use the authenticated model's native template and native XML-like
 function-call syntax. Responses expose OpenAI-style `tool_calls`, including JSON
