@@ -221,18 +221,21 @@ reasoning and final content remain separate channels.
 
 ## Current persistent live deployment
 
-The current authenticated promotion is `qwen-exl3-serving-12` (2026-10-10), container
-`d7826c4b604a0c9d84dee74c1184c5f00dfb0c4a1ded1b9a9113bec242a71a57`, image
-`sha256:cad5583694e7e35735d27facc97f9ee5274c25388b7fb0bf9e21f3d4f42f94f6`
-(`qwen-inference:exl3-cand-tier1`): the `pfast5` `candidate-ext` engine
-(`docs/benchmarks.md` §11) with the server and launcher of commit 3b6b46b (streaming
-SSE, cancel on disconnect, 8 GiB host page tier; §12). Startup log:
-`host page tier 8 GiB: 1783 pages of 4816896 bytes` (456K tokens). The canonical tag
+The current authenticated promotion is `qwen-exl3-serving-15` (2026-10-11), container
+`3ad5eb72ea6db0b844bf60f9d3e0d877f8856e5bf76b12391913f174df1f9629`, image
+`sha256:165881baed70f3bc0e333b9c47d988acdc2edb20872927de1fa3f8f8a83070ad`
+(`qwen-inference:exl3-cand-tier2`): the `pfast5` `candidate-ext` engine
+(`docs/benchmarks.md` §11) with the server and launcher of commit 251c328 (streaming
+SSE, cancel on disconnect, 8 GiB host page tier, OpenAI `developer` role and `store`;
+§12). Host page tier: 1783 pages of 4816896 bytes (456K tokens). The canonical tag
 `qwen-inference:exl3` names this image; `qwen-inference:exl3-previous` is the
-serving-11 image `serve-fix1` (`sha256:35957772…`, same engine, server 2ae8d35, no tier).
+serving-12 image `tier1` (`sha256:cad55836…`, same engine, server 3b6b46b).
+serving-13 and serving-14 were promotion attempts rolled back by the guardian: the
+server passed, the Hermes interactive check failed because the live Hermes profile ran
+its own memory housekeeping in the same turn; the check now finds the requested call.
 The persistent configuration is
-`/mnt/ssd/storage/ai/qwen3.8-27b/exl3-serving-12/compose.json` (Compose project
-`elpis-exl3-serving-12`, network `elpis_default`), alongside unchanged copies of
+`/mnt/ssd/storage/ai/qwen3.8-27b/exl3-serving-15/compose.json` (Compose project
+`elpis-exl3-serving-15`, network `elpis_default`), alongside unchanged copies of
 `launch-gate.py`, `recovery.py` and `operate.py` and its promoted `cutover-window-1/`.
 It sequentially reuses `/mnt/ssd/storage/ai/qwen3.8-27b/exl3-serving-1/cache`; preserve
 the old state. Promotions are made by
@@ -242,9 +245,9 @@ rollback. It pins the adapter to `git show <commit>:serve/exl3_server.py`, check
 `base-manifest-sha256` label against `docker/base/engine-manifest.json`, runs CPU smokes
 adapted to this server, verifies the mise Hermes CLI through its stream-json events,
 and replays a captured Autolith request. `PROMOTE_QUIET=<script>` replaces the
-quiet-host wait (promotion measures no speed). serving-11 (`serve-fix1`) and serving-10
-(container `7b98d3dc…`, image `sha256:bc21628f…`, p3021r server hotfix) are retained
-for rollback.
+quiet-host wait (promotion measures no speed). serving-12 (`tier1`), serving-11
+(`serve-fix1`) and serving-10 (container `7b98d3dc…`, image `sha256:bc21628f…`, p3021r
+server hotfix) are retained for rollback.
 The previous `qwen-exl3-serving-9` (container
 `b930391224e8806e925fdd128c34446c52673959ae3451388870b249d48b121a`, image p3021r,
 Compose project `elpis-exl3-serving-9`), `qwen-exl3-serving-8` (container

@@ -891,7 +891,9 @@ The engine's `CPUPageCache` (off by default) keeps evicted K/V pages (target and
 
 Same 44-turn soak (all OK, recall 12/12): turn 41, after the 192K recall branch, 36.5 s to first token with 192,256 cached (197 s without the tier). Turn texts from 41 on differ from the run without the tier: there, turn 41 was a cold prefill, here a cache hit (cold prefill and cache hits are different arithmetic paths; the tier itself copies bytes). Evidence: `/tmp/kernel-work/AR/soak/runs/tier1.metrics{,.thrash.json,.json}`.
 
-Live since 2026-10-10 20:04: `qwen-exl3-serving-12`, image `tier1` (server 3b6b46b), same promotion checks all PASS; startup `host page tier 8 GiB: 1783 pages of 4816896 bytes` (456K tokens); container memory 21.3 / 48 GiB. serving-11 kept for rollback.
+Live 2026-10-10 20:04 - 2026-10-11: `qwen-exl3-serving-12`, image `tier1` (server 3b6b46b), same promotion checks all PASS; startup `host page tier 8 GiB: 1783 pages of 4816896 bytes` (456K tokens); container memory 21.3 / 48 GiB.
+
+Live since 2026-10-11: `qwen-exl3-serving-15`, image `tier2` (server 251c328: also accepts the OpenAI `developer` role as system and boolean `store`; eukhe's memory compactor had failed with HTTP 400 on both, 7,437 retries in one session). Same promotion checks all PASS. pi, prime-agent and eukhe each answered a test prompt through their `elpis-fast` provider.
 
 ## 13. Draft fine-tune `ag1` (not shipped)
 
