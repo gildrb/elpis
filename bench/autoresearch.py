@@ -57,8 +57,9 @@ RECOVERY_HEADROOM_SECONDS = 120
 TERMINATION_SECONDS = 20
 LEASE = Path("/run/user/1000/qwen-packed64-docker-gpu0-maintenance.lock")
 LAUNCH_LOCK = Path("/mnt/ssd/storage/ai/qwen3.8-27b/qwen-inference-launch.lock")
+# btrfs assigns st_dev at mount; f_fsid derives from the on-disk UUID.
 LAUNCH_IDENTITY = {
-    "dev": 52,
+    "fsid": 12776500185484265746,
     "ino": 23726634,
     "uid": 1000,
     "mode": 0o600,
@@ -366,6 +367,8 @@ def _lease_identity(settings: Settings, state: dict[str, object]) -> dict[str, i
     """
     _, lease_identity = private_read(LEASE)
     _, launch_identity = private_read(LAUNCH_LOCK)
+    del launch_identity["dev"]
+    launch_identity["fsid"] = os.statvfs(LAUNCH_LOCK).f_fsid
     _, mutex_identity = private_read(settings.maintenance / "operation.lock")
     if not (
         lease_identity == state.get("lease_identity")
