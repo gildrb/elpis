@@ -158,6 +158,29 @@ or matched recipe comparison.
 - `eval/scripts/sandbox` re-recorded the image as `sha256:93ac158c…`. Its RootFS
   layer list is identical to `sha256:d6a4517c…`. `sandbox --check` passes.
 
+## 2026-10-13: Dependabot advisories
+
+- multidict 6.8.0 -> 6.9.1 (GHSA-54p9-h82j-f925, reference leak in
+  items-view union and subtraction) in `uv.lock`, `direct/graphwalks/uv.lock` and
+  `direct/mrcr/uv.lock`. `uv lock --upgrade-package multidict==6.9.1` (uv
+  0.12.1) changed only multidict and its hashes. No `pyproject.toml` changed.
+- fsspec stays 2026.2.0 in `direct/`. GHSA-27vj-qcqg-25rc is fixed in
+  2026.6.0, but datasets 4.6.1 declares `fsspec[http]<=2026.2.0` and the pinned
+  Verifiers 0.1.15.dev17 declares `datasets<4.7.0`. The advisory is Jinja2
+  template injection in `ReferenceFileSystem` (protocol `reference`, Kerchunk
+  JSON). The direct runtime does not open it:
+  - A search of `direct/.sources` (both Verifiers checkouts, Prime Envs),
+    `direct/{mrcr,graphwalks,run,configs,inspect_dataset.py,prepare_transport.py}`
+    and the installed packages of both direct environments finds
+    `ReferenceFileSystem` and `reference://` only in fsspec itself
+    (`registry.py`, `implementations/reference.py`).
+  - GraphWalks loads a local parquet snapshot; MRCR reads two CSV files with
+    `csv.DictReader`. Both are hash-pinned in `datasets.lock`.
+- `setup`, `direct/setup` (sync mode), `setup --check`, `direct/setup --check`,
+  `data --check all`, `run tiny --dry-run` and `direct/run smoke --dry-run`
+  pass. `scripts/sandbox` re-recorded the image as `sha256:2ff2ed54…`;
+  `sandbox --check` passes.
+
 ## Failures found and fixed during integration
 
 A raw HF snapshot is not enough for a fresh offline repository-name lookup.
