@@ -58,8 +58,8 @@ TERMINATION_SECONDS = 20
 LEASE = Path("/run/user/1000/qwen-packed64-docker-gpu0-maintenance.lock")
 LAUNCH_LOCK = Path("/mnt/ssd/storage/ai/qwen3.8-27b/qwen-inference-launch.lock")
 LAUNCH_IDENTITY = {
-    "dev": 66305,
-    "ino": 23726380,
+    "dev": 52,
+    "ino": 23726634,
     "uid": 1000,
     "mode": 0o600,
     "nlink": 1,
