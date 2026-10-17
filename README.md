@@ -11,7 +11,7 @@
 - Proof: `bend PROOF.bend` (Bend 2.0.35): ALL PROOFS CHECK. `--verdict` (Lean 4.34.0 kernel): every proof module.
 - Speed (`pfast5`, 350 W): prefill 1,220.7 tok/s, decode 125.7 tok/s (geomeans); 262K TTFT 299.53 s; decode 25.44 ms per verify round at 1K, 45.59 ms at 262K ([Speed](#speed)).
 - Quality: keep a speedup only if the text is unchanged or it passes a quality gate (`Int8Gate`, `DecGate`) ([What fast means](#what-fast-means)).
-- Served live: `qwen-exl3-serving-15`, image `tier2` (`pfast5` engine, server 251c328) ([docs/docker.md](docs/docker.md#current-persistent-live-deployment)). Harnesses: OMP `qwen-local`, eukhe / pi / prime-agent `elpis-fast`, Hermes `custom:local`, all `qwen3.8-27b` at `127.0.0.1:18020`.
+- Served live: image `tier2` (`pfast5` engine, server 251c328) ([docs/docker.md](docs/docker.md#current-persistent-live-deployment)). Harnesses: OMP `qwen-local`, eukhe / pi / prime-agent `elpis-fast`, Hermes `custom:local`, all `qwen3.8-27b` at `127.0.0.1:18020`.
 - Long sessions: real SSE streaming; cancel on disconnect or a stalled reader; no HTTP 502 for model tool output; 8 GiB host-RAM page tier for evicted prefix pages: 16 s, not 80 s, for a 94K prefix pushed out by another client; 36 s, not 197 s, at 193K ([benchmarks §12](docs/benchmarks.md#12-long-agent-sessions-2026-10-10)).
 - Draft fine-tune `ag1`: +5.45 % / +6.63 % tokens per round on agent tool-call / SWE prompts, +1.45 % pooled, texts identical; not shipped ([benchmarks §13](docs/benchmarks.md#13-draft-fine-tune-ag1-not-shipped)).
 - Status: finished, no further optimization planned.

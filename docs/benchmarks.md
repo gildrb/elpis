@@ -338,7 +338,7 @@ Part of the primary gain from #48 on is a shorter long call, not faster steps. T
 step-time traces below are text-independent.
 
 Verify-step time from the CUPTI kernel traces
-(`evidence/kernel-trace-N/trace.log`, unprofiled median). The floor is the
+(unprofiled median). The floor is the
 Bend-proven byte count of one round (`bend/roofline.bend`, 9002's smaller draft
 head subtracted) at 875.6 GB/s:
 
@@ -376,8 +376,6 @@ The largest remaining losses per step at short depth:
   - L2 prefetch into inter-GEMM windows (within noise).
 
 `ops/autoresearch/` is a snapshot of the operator scripts used for this segment.
-They are run from `/tmp`: copy them back there, `invariance.py` to
-`/tmp/kernel-work/Invariance/` and `kernel_trace.py` to `/tmp/kernel-work/KernelTrace/`.
 - `mkcand.py` and `gpu-window.sh` precreate and run guarded GPU windows around the
   retained guardian.
 - `build-one.sh` builds a candidate from the committed series plus extra patches.
@@ -388,7 +386,7 @@ They are run from `/tmp`: copy them back there, `invariance.py` to
 Launch every script that owns a GPU window through `detach.sh`. A caller that is
 killed mid-window leaves the guardian dead, and its library then refuses recovery.
 In that case restore by hand, as the guardian would: stop the candidate, start
-container `b5e51bc1…`, and require an authenticated `GET /v1/models` of 200.
+the retained rollback container, and require an authenticated `GET /v1/models` of 200.
 
 ## 5. Segment 5: broad lane (protocol `exl3-native-broad-c1-request-v2`, 350 W)
 
@@ -629,7 +627,7 @@ refreshes the draft cache from the path rows. `EXL3_TREE` and the test hook `EXL
 0 or 1. Unset, the tree is on wherever it is supported (single-sequence DFlash2 with the int4 head, window 7, GDN target),
 otherwise off; `EXL3_TREE=1` on an unsupported configuration refuses to start.
 
-Verification (tree3 image, 250 W / mem −1500, 2026-09-27; `/tmp/gpu-queue/done/0070a-tree3-rungs.out`):
+Verification (tree3 image, 250 W / mem −1500, 2026-09-27):
 - per slice, bitwise GPU differentials:
   - 9008: builder mode 0 equals the greedy walk on 14,301 rounds;
   - 3012: all 5040 tree shapes, every row equal to the chain kernel on the row's path; CHAIN equals cs12;
@@ -715,7 +713,6 @@ elpis's target remains never less precise than stock ExLlamaV3; **#76/#77 violat
 | Historical 3024 gate, approximate Q + exact K | Passed 16/16 exact-reference cells, strict mean/p99/max ≤ stock; mean error 0.425–0.921× stock, median 0.689. **Unqualified, not kept; later stratified failure below. No bit-exactness or speed-gain claim.** |
 | Historical #77 speed, not precision-qualified | 1031.2 tok/s geomean; TTFT 8K / 32K / 128K / 262K: 5.50 / 23.94 / 146.25 / 427.29 s; measured numbers unchanged. |
 
-- Gate evidence: `/tmp/gpu-queue/done/0081zu-acc3.out`, `/tmp/kernel-work/Int8Attn/x24/acc3/out/acc3.json`.
 - 3024 expanded gate: 28 distinct sampled + 4 all-row cells pass strict mean/p99/max; per-head statistics also pass. Active K/V crosscheck is within the derived fp64 bound; staging provenance passed (0081zz).
 - 3024 stratified failure: row-mod-4=0, L0/prefix 0 max error 0.00294231 vs stock 0.00286052 (+2.86 %) at q_len 2048 and 4096. **Unqualified, not kept** despite aggregate passes; native capacity, quality and TTFT remain pending.
 - Diagnostic 0081zz1 locates one fp16 store step at row 900 / head 9 / dimension 124. A CPU emulation of the kernels' running-max softmax reproduces the measured outputs bit for bit at all 16 diagnosed coordinates: the cause is fp16 rounding of P. A P-residual candidate (3027) is in development.
@@ -826,7 +823,7 @@ Suite `bash autoresearch.sh`: build the checkout's `candidate-ext` image, then o
 
 - Mean KL vs the exact kernel, 8K / 32K / 128K / 262K: `qk8` 1.21 / 1.35 / 1.31 / 1.42 × 10⁻³; floors 1.05-1.11 / 1.28-1.37 / 1.16 / 1.42-1.53 × 10⁻³.
 - Strict P1-P3 (not decisive): FAIL or UNRESOLVED at some depths for every arm.
-- Evidence: `/tmp/kernel-work/DecGate/out-d2`, rule sha256 `363ba300…`.
+- Rule sha256 `363ba300…`.
 
 ### Not kept
 
@@ -840,7 +837,7 @@ Suite `bash autoresearch.sh`: build the checkout's `candidate-ext` image, then o
 | int8 P·V in prefill attention (`3023-prefill-pattn8i-int8pv`, 3021f's V-scale rule on the 3022 kernel; `EXL3_PATTN_INT8_PV`) | numerics | prefill 1,235.5 tok/s (TTFT 5.54 / 21.78 / 112.40 / 292.02 s): +1.2 %; texts 0/4 equal; law `pattn8i_pv` proven; not gated (gain too small for a numerics change) |
 | 8192-row prefill merge (`9506-prefill-m8192`, staging ≤ 640 pages; GDN delta rule sliced to 2048 rows for exactness) | exact | 4/4 texts; TTFT 5.56 / 21.95 / 113.04 / 299.35 s: flat (128K −1.1 %); law `prefill_m8192` proven |
 
-R3 tag r3 (2026-10-06): calibration arm int8 Q·Kᵀ (= `pfast5` prefill) PASS (strict P unresolved); `pfast5` image vs gate image identity on 3 documents: bit-identical. Gate fix for r3: `run_job` constructs `Job` + `ArgmaxSampler` (the served `Server` no longer exposes `job_type` / `sampler_type`). Evidence: `/tmp/kernel-work/Int8Gate/verdict3-r3.txt`.
+R3 tag r3 (2026-10-06): calibration arm int8 Q·Kᵀ (= `pfast5` prefill) PASS (strict P unresolved); `pfast5` image vs gate image identity on 3 documents: bit-identical. Gate fix for r3: `run_job` constructs `Job` + `ArgmaxSampler` (the served `Server` no longer exposes `job_type` / `sampler_type`).
 
 ## 12. Long agent sessions (2026-10-10)
 
@@ -873,9 +870,7 @@ Soak (image `serve-fix1`, `sha256:35957772…`, serve window, 350 W): one script
 
 Limit found: one 270K-token cache for all clients. A request with another prefix (other tools, other system prompt) at 133K-192K evicts the session's pages. The next session turn then re-prefills: 197 s at 193K (turn 41). Separate clients on one endpoint each pay this cost when they alternate.
 
-Evidence: `/tmp/kernel-work/AR/soak/runs/fix1.metrics{,.json,.window}`.
-
-Live 2026-10-10 19:21-20:04: `qwen-exl3-serving-11`, image `serve-fix1` (`pfast5` engine + server 2ae8d35), previous `serving-10` (`p3021r`) kept for rollback (`qwen-inference:exl3-previous`). Promotion checks: endpoint, live tool round trip, Hermes gateway and interactive tool turns, OMP read turn, Autolith 55-tool request. Live stream: first byte 2 ms; 191 tokens in 0.91 s. Replaced by serving-12 (below).
+Promoted image `serve-fix1` (`pfast5` engine + server 2ae8d35). Promotion checks: endpoint, live tool round trip, Hermes gateway and interactive tool turns, OMP read turn, Autolith 55-tool request. Live stream: first byte 2 ms; 191 tokens in 0.91 s.
 
 ### Host-RAM page tier (`--cpu-cache-gib 8`, image `tier1`, `sha256:cad55836…`)
 
@@ -889,15 +884,15 @@ The engine's `CPUPageCache` (off by default) keeps evicted K/V pages (target and
 | A prefix, other question | 2.4 s | 92,160 | |
 | B again | 1.9 s | 185,088 | = B |
 
-Same 44-turn soak (all OK, recall 12/12): turn 41, after the 192K recall branch, 36.5 s to first token with 192,256 cached (197 s without the tier). Turn texts from 41 on differ from the run without the tier: there, turn 41 was a cold prefill, here a cache hit (cold prefill and cache hits are different arithmetic paths; the tier itself copies bytes). Evidence: `/tmp/kernel-work/AR/soak/runs/tier1.metrics{,.thrash.json,.json}`.
+Same 44-turn soak (all OK, recall 12/12): turn 41, after the 192K recall branch, 36.5 s to first token with 192,256 cached (197 s without the tier). Turn texts from 41 on differ from the run without the tier: there, turn 41 was a cold prefill, here a cache hit (cold prefill and cache hits are different arithmetic paths; the tier itself copies bytes).
 
-Live 2026-10-10 20:04 - 2026-10-11: `qwen-exl3-serving-12`, image `tier1` (server 3b6b46b), same promotion checks all PASS; startup `host page tier 8 GiB: 1783 pages of 4816896 bytes` (456K tokens); container memory 21.3 / 48 GiB.
+Promoted image `tier1` (server 3b6b46b), same promotion checks all PASS; startup `host page tier 8 GiB: 1783 pages of 4816896 bytes` (456K tokens); container memory 21.3 / 48 GiB.
 
-Live since 2026-10-11: `qwen-exl3-serving-15`, image `tier2` (server 251c328: also accepts the OpenAI `developer` role as system and boolean `store`; eukhe's memory compactor had failed with HTTP 400 on both, 7,437 retries in one session). Same promotion checks all PASS. pi, prime-agent and eukhe each answered a test prompt through their `elpis-fast` provider.
+Image `tier2` (server 251c328) also accepts the OpenAI `developer` role as system and boolean `store` (eukhe's memory compactor had failed with HTTP 400 on both, 7,437 retries in one session). Same promotion checks all PASS. pi, prime-agent and eukhe each answered a test prompt through their `elpis-fast` provider.
 
 ## 13. Draft fine-tune `ag1` (not shipped)
 
-Agent-tuned DFlash2 draft. Candidate: `/mnt/ssd/storage/ai/qwen3.8-27b/draft-tune/exl3/agent-ag1/cand-norm`, sha256 `aa8c684e944f1758ff60463bd25d7ed894f64e19f7401141f547bcc90133d809` (checkpoint step 913). 236 held-out prompts; texts 236/236 identical to the shipped draft (greedy; the draft never changes the output).
+Agent-tuned DFlash2 draft. Candidate sha256 `aa8c684e944f1758ff60463bd25d7ed894f64e19f7401141f547bcc90133d809` (checkpoint step 913); the candidate is not retained. 236 held-out prompts; texts 236/236 identical to the shipped draft (greedy; the draft never changes the output).
 
 | Category | Tokens per round, Δ |
 |---|---|

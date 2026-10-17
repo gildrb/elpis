@@ -221,58 +221,20 @@ reasoning and final content remain separate channels.
 
 ## Current persistent live deployment
 
-The current authenticated promotion is `qwen-exl3-serving-15` (2026-10-11), container
-`3ad5eb72ea6db0b844bf60f9d3e0d877f8856e5bf76b12391913f174df1f9629`, image
-`sha256:165881baed70f3bc0e333b9c47d988acdc2edb20872927de1fa3f8f8a83070ad`
-(`qwen-inference:exl3-cand-tier2`): the `pfast5` `candidate-ext` engine
-(`docs/benchmarks.md` §11) with the server and launcher of commit 251c328 (streaming
-SSE, cancel on disconnect, 8 GiB host page tier, OpenAI `developer` role and `store`;
-§12). Host page tier: 1783 pages of 4816896 bytes (456K tokens). The canonical tag
-`qwen-inference:exl3` names this image; `qwen-inference:exl3-previous` is the
-serving-12 image `tier1` (`sha256:cad55836…`, same engine, server 3b6b46b).
-serving-13 and serving-14 were promotion attempts rolled back by the guardian: the
-server passed, the Hermes interactive check failed because the live Hermes profile ran
-its own memory housekeeping in the same turn; the check now finds the requested call.
-The persistent configuration is
-`/mnt/ssd/storage/ai/qwen3.8-27b/exl3-serving-15/compose.json` (Compose project
-`elpis-exl3-serving-15`, network `elpis_default`), alongside unchanged copies of
-`launch-gate.py`, `recovery.py` and `operate.py` and its promoted `cutover-window-1/`.
-It sequentially reuses `/mnt/ssd/storage/ai/qwen3.8-27b/exl3-serving-1/cache`; preserve
-the old state. Promotions are made by
-`ADAPTER_REV=<commit> /tmp/elpis-promote.sh TAG IMAGE` (operator tooling outside the
-repo), which replays the serving-2 guardian procedure below with automatic guardian
+The live deployment serves image tag `qwen-inference:exl3` (image `tier2`): the
+`pfast5` `candidate-ext` engine (`docs/benchmarks.md` §11) with the server and
+launcher of commit 251c328 (streaming SSE, cancel on disconnect, 8 GiB host page
+tier, OpenAI `developer` role and `store`; §12). Host page tier: 1783 pages of
+4816896 bytes (456K tokens). `qwen-inference:exl3-previous` is the rollback image
+`tier1` (same engine, server 3b6b46b).
+
+Each promotion replays the guardian procedure below with automatic guardian
 rollback. It pins the adapter to `git show <commit>:serve/exl3_server.py`, checks the
 `base-manifest-sha256` label against `docker/base/engine-manifest.json`, runs CPU smokes
 adapted to this server, verifies the mise Hermes CLI through its stream-json events,
-and replays a captured Autolith request. `PROMOTE_QUIET=<script>` replaces the
-quiet-host wait (promotion measures no speed). serving-12 (`tier1`), serving-11
-(`serve-fix1`) and serving-10 (container `7b98d3dc…`, image `sha256:bc21628f…`, p3021r
-server hotfix) are retained for rollback.
-The previous `qwen-exl3-serving-9` (container
-`b930391224e8806e925fdd128c34446c52673959ae3451388870b249d48b121a`, image p3021r,
-Compose project `elpis-exl3-serving-9`), `qwen-exl3-serving-8` (container
-`bf7087ac57f2dad0113149301e7d7e55b0a05e6a78e0b82cd00cd42269a57ab5`, image p3021p,
-Compose project `eta-exl3-serving-8`), `qwen-exl3-serving-7` (container
-`ebb819cf17a5754f6b9f37c8188d31f73b7e1503597c7eec7ee03d6bfa1611ee`, image p3020fh),
-`qwen-exl3-serving-6` (container
-`e358fe89dd5d985b60594da0131a0d367d297be740e5accc54a31bea5f608c7f`, image tree3s),
-`qwen-exl3-serving-5` (container
-`ca966e6f5407ff3bd27cc435c9a9ad90da7d4562ec65a3cd8d7ffe30d1c884a2`, image cs12),
-`qwen-exl3-serving-4` (container
-`22154417d27bc0ce2455d3f60ff1e3743dd7c40aca8ef0f502450a2463ffa945`, image cs11),
-`qwen-exl3-serving-3` (container
-`288862e7573f5dec9abb9ecc06bb2d144c9926c1f8fb972efafcadf1fa0a235a`, image cs10), all on
-network `eta_default`, and `qwen-exl3-serving-2` (container
-`b5e51bc1f6ac85b1b2af8db3612ff300190145397bb48b31e4cb7bf0f2d30f28`, network
-`litos_default`) are stopped and retained; their promoted windows still admit them for
-rollback, so keep `litos_default` while any retained container uses it.
-
-The original cutover promoted `qwen-exl3-serving-1`, container
-`e22faabe5bc9244d88581e4abcab1459d545b82b154b731ea4ccb2de642efb7c`, with image
-`sha256:f4bdcfb444f3215e57d23c67edd6929c4afa87eb95f5594d1df7bf438a19ae80`.
-Its controls and evidence remain under
-`/mnt/ssd/storage/ai/qwen3.8-27b/exl3-serving-1/`. That container is stopped and
-retained, not deleted.
+and replays a captured Autolith request. Promotion measures no speed. Preserve the
+previous deployment state and the shared cache directory; keep retained rollback
+containers and their networks while their promoted windows admit them.
 
 This live deployment deliberately differs from an ordinary root Compose launch:
 the persistent guardian gate validates candidate identity and its promoted window,
@@ -286,31 +248,19 @@ replace the gate with a direct launch, or start a competing root Compose/Nix
 service. Future maintenance must use the retained deployment and its approved
 ownership procedure. Restart configuration is not a demonstrated cold-boot test.
 
-Current private evidence is in `exl3-serving-12/evidence/` under the state root:
-`main-verification.json`, `promotion-receipt.json`, `cutover-receipt.json`,
-`endpoint-smoke.json`, `live-tool-smoke.json`, `live-tool-smoke.py`,
-`hermes-real-tool-turns.json`, `hermes-interactive-stream.jsonl`, `omp-smoke.jsonl`,
-`autolith-request.json`, `autolith-replay.json`, `installed-exl3-server.py`,
-`guardian.log` and `thermal.csv` (promotion checks: `docs/benchmarks.md` §12).
+Promotion checks (`docs/benchmarks.md` §12): the guardian exits 0 with state
+`promoted_authenticated_main_verified`. Real Hermes gateway and interactive
+terminal-tool turns, an OMP read-tool round trip and a captured Autolith 0.57.0
+request (55 tools) pass against the new image. An interactive Autolith turn called
+`search.content` (the root-`oneOf` tool) and answered from its result.
 
-serving-10's evidence (`exl3-serving-10/evidence/`) records:
-the guardian exited 0 with state `promoted_authenticated_main_verified`. Real Hermes
-gateway and interactive (2026.9.24) terminal-tool turns, an OMP 18.4.12 read-tool round
-trip and the captured Autolith 0.57.0 request (55 tools; HTTP 400 on serving-9) passed
-against the new image. After promotion, an interactive Autolith 0.57.0 turn called
-`search.content` (the root-`oneOf` tool) and answered from its result. No Telegram
-delivery was repeated.
-
-serving-2's evidence (`exl3-serving-2/evidence/`: `main-verification.json`,
-`promotion-receipt.json`, `telegram-delivery.json`) records the top-level reasoning
-compatibility change, Hermes 0.21.3/0.21.4 and OMP 18.2.11 turns, Telegram API checks
-and one approved outbound delivery; **no fresh inbound user-to-bot exchange has been
+Earlier promotions also recorded the top-level reasoning compatibility change,
+Hermes 0.21.3/0.21.4 and OMP 18.2.11 turns, Telegram API checks and one approved
+outbound delivery; **no fresh inbound user-to-bot exchange has been
 exercised**. See [client routing](#host-client-routing) and
 [verification boundaries](development.md#exl3-cutover-verification-status).
 
-Original `exl3-serving-1/evidence/` retains `promotion-receipt.json`,
-`main-promotion-verification.json`, `live-tool-smoke.json` and
-`post-promotion-health.stderr`. That smoke exercised a named addition call
+The first promotion smoke exercised a named addition call
 (`19 + 23`), client execution and continuation returning `42`, buffered tool SSE,
 authentication, model identity and schema-error handling; authenticated health
 and runtime CPU protocol proof passed. Neither promotion establishes full-context
@@ -320,7 +270,7 @@ historical known runtime typing limitation, not a current runtime ty rerun.
 
 ## Host client routing
 
-OMP's host runtime `~/.omp/agent/models.yml` defines `qwen-local/qwen3.8-27b`
+OMP's host runtime `models.yml` defines `qwen-local/qwen3.8-27b`
 using chat completions, the private key via `!cat`, temperature 0, the existing
 nested Qwen thinking dialect and a ten-minute buffered first-event floor.
 Explicit `thinking.requiresEffort: false` allows thinking off. The existing
@@ -328,8 +278,7 @@ cloud default is preserved: select `omp --model qwen-local/qwen3.8-27b` or choos
 that model with `/model`.
 
 Hermes's host runtime `config.yaml` uses local `api_mode: chat_completions` and
-temperature 0. Its durable host-owned overlay in
-`~/nix/modules/nixos/local-ai-backend.nix` was updated without OS activation;
+temperature 0. Its durable host-owned NixOS overlay was updated without OS activation;
 the pinned installed old profile may still regenerate the old configuration.
 Generic dotfiles were not changed. The live gateway 0.21.3 was not restarted;
 its persisted session explicitly selects `custom:local/qwen3.8-27b` at

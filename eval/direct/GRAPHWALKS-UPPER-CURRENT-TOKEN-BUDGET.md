@@ -17,6 +17,6 @@ The exact reproduced tokenizer/template and image8a1eeb69 were reused and authen
 
 The previous35-row smoke/quick proof and32-row oversized next-bucket proof are preserved and hashed in this result. Large-MRCR remains266695 input/274889 total; the next GraphWalks bucket’s32 sampled rows remain357135–357962 input tokens. Nothing was trimmed or replaced.
 
-Proof: `eval/direct/graphwalks-upper-current-token-budget.json` and identical `/tmp/inference-graphwalks-upper-current-token-budget.json`. Private native diagnostic scripts and prompts remain under `/tmp/inference-graphwalks-upper-current-budget-79z430zl`.
+Proof: `eval/direct/graphwalks-upper-current-token-budget.json`.
 
 Next: a separately frozen quality probe could explicitly use this native bucket and the first8 rows per operation, with its measured~179K depth and16-row scope. That would not prove all100 rows fit, and it still needs approval and the verified candidate endpoint. No new profile was created here.

@@ -40,6 +40,6 @@ These are exact local templated token counts, **not observed endpoint token usag
 
 ## Proof and next action
 
-Machine-readable proof: `eval/direct/token-budget.json` and identical `/tmp/inference-direct-token-budget.json`. It binds source/config/dependency/tokenizer hashes and records every row, token-ID digest and cap result without publishing raw prompts or answers. Private diagnostic inputs/scripts remain under `/tmp/inference-direct-token-budget-fxflf8yp`.
+Machine-readable proof: `eval/direct/token-budget.json`. It binds source/config/dependency/tokenizer hashes and records every row, token-ID digest and cap result without publishing raw prompts or answers.
 
 Next: preserve the frozen profiles. Treat all eight current quick large-MRCR tasks as over-budget at every approved rung. Separately decide whether to approve the fitting smoke run; a new deeper token-fit profile needs separate frozen selection and unchanged official scoring. No additional endpoint approval is implied by this report.

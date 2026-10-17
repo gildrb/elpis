@@ -31,6 +31,6 @@ No new200K–253950-token profile can be recommended from the measured rows. Fur
 
 The tokenizer diagnostic used immutable image `sha256:8a1eeb69ca67af0d54688cf11b46700448f15cde5395f013b0b5484244f1dfb7`, two CPUs, no GPU and no network. Six tokenizer/config/template files again matched the reproduced artifact inventory. No dependency changes or tests were introduced. The full template-owned xhigh system instruction and assistant thinking prefix are counted.8192+2 is the same budget convention, not a guarantee of engine acceptance.
 
-Proof: `eval/direct/graphwalks-deeper-token-budget.json`, identical to `/tmp/inference-graphwalks-deeper-token-budget.json`. Private native exports and diagnostic scripts: `/tmp/inference-graphwalks-deeper-budget-7d_275ed`.
+Proof: `eval/direct/graphwalks-deeper-token-budget.json`.
 
 Next: leave this candidate rejected for the sampled rows. Decide separately whether any further native-bucket token measurement is useful; do not launch an oversized quality run.
