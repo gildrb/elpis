@@ -92,7 +92,7 @@ custom Python health supervision and cleanup/retry loops are removed. Provision
 state explicitly; missing bind sources fail closed. The container's persistent
 state lock remains. Its protection does not extend to another state or daemon.
 Do not activate this adapter over an occupied endpoint, or beside another
-service that holds the same launch lock or GPU. The live elpis-fast service uses
+service that holds the same launch lock or GPU. The live elpis service uses
 its guardian configuration, not this adapter.
 
 Static Nix validation is not activation, cold-boot, hang-recovery,

@@ -1,8 +1,8 @@
-# elpis-fast
+# elpis
 
 The fastest decode and prefill for 4-bit Qwen3.8-27B on one RTX 3090 that a pre-registered quality gate accepts, with the serving path's decision logic proven in Bend. Status: finished, no further optimization planned.
 
-[elpis](https://github.com/gildrb/elpis) is the lossless sibling: same model, every changed op proven no less accurate than stock.
+[elpis-lossless](https://github.com/gildrb/elpis-lossless) is the lossless sibling: same model, every changed op proven no less accurate than stock.
 
 | | |
 |---|---|
@@ -16,7 +16,7 @@ The fastest decode and prefill for 4-bit Qwen3.8-27B on one RTX 3090 that a pre-
 
 `bash autoresearch.sh`, 2026-10-06, 350 W, geomeans, whole request (prefill and HTTP included):
 
-| | elpis-fast `pfast5` | elpis `p3031b` stock |
+| | elpis `pfast5` | elpis-lossless `p3031b` stock |
 |---|---|---|
 | Prefill tok/s, 8K/32K/128K/262K | **1,220.7** | 997.4 |
 | TTFT 8K/32K/128K/262K | 5.5 / 21.9 / 114.3 / **299.5 s** | 5.8 / 24.6 / 149.9 / 434.3 s |
@@ -46,13 +46,13 @@ Figures from their repositories, not rerun: different prompts, power and metric.
 
 | One RTX 3090 | Weights | Speculation | Metric | tok/s |
 |---|---|---|---|---|
-| elpis-fast | 4.00 bpw | DFlash2 + 8-row tree | whole request, 350 W | 161.9 lane; 205.3 GSM8K |
-| elpis | 4.00 bpw | DFlash2 + 8-row tree | whole request, 350 W | 158.7 lane; 193.7 GSM8K |
+| elpis | 4.00 bpw | DFlash2 + 8-row tree | whole request, 350 W | 161.9 lane; 205.3 GSM8K |
+| elpis-lossless | 4.00 bpw | DFlash2 + 8-row tree | whole request, 350 W | 158.7 lane; 193.7 GSM8K |
 | [trellis-serve](https://github.com/0xSero/trellis-serve/tree/1ace59c4b43ca16a50fb6b7acf8b3fd7e2351f96) MTP | 3.00 bpw | MTP | decode only | 96.2-141.3 |
 | [trellis-serve](https://github.com/0xSero/local-ai-registry/blob/c6e6f4c796304229a3c11442af6f09673180d4f6/data/registry/recipe/qwen38-27b-exl3-3bpw-dflash2-rtx3090-sglang-tp1.json) DFlash2 | 3.00 bpw | DFlash2 | decode only | 98.2-227.0 |
 | [r0b0tlab](https://github.com/r0b0tlab/qwen38-exl3-dflash2) | 4.00 bpw | DFlash2 | whole request, 350 W, same GSM8K test | 162.9 |
 
-Same GSM8K workload, 350 W: elpis-fast is 26% faster. Prefill: trellis-serve MTP 21.9 s at 32K and 294 s at 209K; elpis-fast 21.9 s at 32K and 299.5 s at 262K, whole request.
+Same GSM8K workload, 350 W: elpis is 26% faster. Prefill: trellis-serve MTP 21.9 s at 32K and 294 s at 209K; elpis 21.9 s at 32K and 299.5 s at 262K, whole request.
 
 ## Why fast
 

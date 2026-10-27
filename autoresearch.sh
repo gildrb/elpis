@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Autoresearch harness for elpis-fast: decode + prefill speed of this checkout.
+# Autoresearch harness for elpis: decode + prefill speed of this checkout.
 #   1. build this checkout's candidate-ext image (docker/build-exl3.sh, under the CPU lock);
 #   2. one guarded GPU window (host ops /tmp/gpu-batch.py -> /tmp/gpu-window.sh: maintenance
 #      lease, cool-down, live baseline restored after) runs bench/ar_gpu.py in the image:
