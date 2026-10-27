@@ -24,6 +24,9 @@ build = ["editables==0.6", "hatchling==1.32.0", "hatch-vcs==0.5.0", "setuptools-
 package = false
 default-groups = ["build"]
 no-build-isolation = true
+# verifiers pins mcp==2.0.0; force 2.2.0 for Dependabot GHSA (unbounded session
+# accumulation in the StreamableHTTP transport). Approved override 2026-10-27.
+override-dependencies = ["mcp==2.2.0"]
 
 [tool.uv.sources]
 verifiers = { path = ".sources/verifiers", editable = true }
