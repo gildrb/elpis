@@ -139,7 +139,7 @@ optional long-context data. `run` never downloads missing task data.
 | `smoke` | First 3 AIME24 tasks; no shuffle | 1 | Prove loading → local inference → upstream scoring → saved traces |
 | `quick` | Native fixed-seed shuffle: 10 each AIME24/25/26, 24 I3 Logic, 12 LiveCodeBench | 1 | 66 fixed comparison tasks; not a broad intelligence score |
 | `full` | All tasks after each upstream environment's configured filters | 20 for each AIME; 1 I3 Logic; 2 LiveCodeBench | Per-environment estimates with representative rollout counts |
-| `tiny` + `broad` | Native fixed-seed shuffle: 3 AIME25 (32768 budget); 10 MMLU-Pro (8192), 4 I3 Logic (16384), 3 LiveCodeBench (16384) | 1 | The broad autoresearch suite tasksets (`python -m bench.autoresearch --suite broad`; [../docs/benchmarks.md](../docs/benchmarks.md)); sampled, not qualification |
+| `tiny` + `broad` | Native fixed-seed shuffle: 3 AIME25 (32768 budget); 10 MMLU-Pro (8192), 4 I3 Logic (16384), 3 LiveCodeBench (16384) | 1 | The broad autoresearch suite tasksets (`python -m bench.autoresearch --suite broad`; [../bench/RESULTS.md](../bench/RESULTS.md)); sampled, not qualification |
 
 Verifiers owns task shuffling (seed 0 at this revision). There is no local sampler
 or selection state. Quick comparisons reuse exactly the same datasets, order,
@@ -276,4 +276,4 @@ implementation.
 See [validation.md](validation.md) for the actual checks and remaining blockers.
 Use `run PROFILE --dry-run` to validate all native configs without a GPU or key.
 The runtime benchmark path remains independent: see
-[../docs/benchmarks.md](../docs/benchmarks.md).
+[../bench/RESULTS.md](../bench/RESULTS.md).

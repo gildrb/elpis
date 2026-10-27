@@ -24,7 +24,7 @@ preview = true
 [tool.ruff.lint]
 select = ["ALL"]
 # D203 conflicts with D211; D213 conflicts with D212. The remaining rules
-# conflict with Ruff's formatter (see docs/development.md).
+# conflict with Ruff's formatter.
 ignore = [
     "incorrect-blank-line-before-class", "multi-line-summary-second-line",
     "missing-trailing-comma", "prohibited-trailing-comma", "docstring-tab-indentation", "triple-single-quotes", "indentation-with-invalid-multiple", "indentation-with-invalid-multiple-comment", "over-indented",
@@ -44,7 +44,7 @@ python-version = "3.13"
 extra-paths = ["bend", "bend/gen"]
 
 [tool.ty.src]
-# Checked in other environments (docs/development.md): the serving image
+# Checked in other environments: the serving image
 # (torch, triton, exllamav3, jsonschema) and eval/direct/mrcr/.venv (verifiers).
 exclude = [
     "serve/exl3_server.py",

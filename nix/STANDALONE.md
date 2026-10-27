@@ -23,7 +23,7 @@ Checks build the thin launcher and example user unit without activating them.
 They do not contact Docker, attach a GPU or qualify image/model/runtime behavior.
 The flake pins nixpkgs at `d482ef84049d9b7276b83a06e4e4d76983830097` for
 `x86_64-linux`. Consumer overrides replace that tool pin and require rechecking.
-See [development](../docs/development.md) and [Docker setup](../docs/docker.md).
+See the root README for build and deployment steps.
 
 ## Foreground adapter
 
@@ -93,8 +93,7 @@ state explicitly; missing bind sources fail closed. The container's persistent
 state lock remains. Its protection does not extend to another state or daemon.
 Do not activate this adapter over an occupied endpoint, or beside another
 service that holds the same launch lock or GPU. The live elpis-fast service uses
-its guardian configuration, not this adapter. See
-[current deployment](../docs/docker.md#current-persistent-live-deployment).
+its guardian configuration, not this adapter.
 
 Static Nix validation is not activation, cold-boot, hang-recovery,
 suspend/resume, full-context capacity or model-quality proof. The actual EXL3

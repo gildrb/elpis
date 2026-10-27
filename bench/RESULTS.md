@@ -299,7 +299,7 @@ Core offset at 350 W, memory 0 (RoundBench, tree3s, C1 1K / 8K, 10 paired reps p
 **Best kept configuration:** candidate image `qwen-inference:exl3-cand-g7kafqt`,
 `sha256:f2e72ec7c9b65aa0478119b7be980763162ed7837b1f2288ece6d46abbc795e7`. It was built
 from this commit's `patches/` by `bash docker/build-exl3.sh candidate-ext`. The live
-deployment (see [docker.md](docker.md)) is unchanged and still serves the promoted image
+deployment was unchanged and still served the promoted image
 `fca4c263`; nothing was promoted.
 
 - **exl3 series:** 0001 greedy batched verify, 0002 host overlap, 0003 draft graph,
