@@ -4,7 +4,6 @@ The fastest decode and prefill for 4-bit Qwen3.8-27B on one RTX 3090 that a pre-
 
 [elpis-lossless](https://github.com/gildrb/elpis-lossless) is the lossless sibling: same model, every changed op proven no less accurate than stock.
 
-| | |
 |---|---|
 | Model | [Qwen3.8-27B](https://huggingface.co/r0b0tlab/Qwen3.8-27B-EXL3-4.00bpw), EXL3 4.00 bpw, 6 bpw head, 16.5 GB |
 | Draft | [DFlash2](https://huggingface.co/r0b0tlab/Qwen3.8-27B-DFlash2-EXL3-4.00bpw), 8-row token tree, greedy, 1.25 GB |
