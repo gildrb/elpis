@@ -7,6 +7,18 @@ cold-prefill suite `exl3-native-prefill-ttft-v1` (§2a); the broad suite
 `bash autoresearch.sh` (build + in-process prefill and decode at 1K-262K) is the
 speed loop since 2026-10-05 (§11).
 
+```sh
+bash autoresearch.sh   # build this checkout + one GPU window: prefill and decode tok/s at 1K-262K
+bash bench/lane.sh     # the served prefill suite; scoring: eval/README.md
+curl -o gsm8k-test.jsonl https://raw.githubusercontent.com/openai/grade-school-math/3101c7d5072418e28b9008a6636bde82a006892c/grade_school_math/data/test.jsonl
+python3 -m bench.gsm8k_compare --api-key-file /path/to/api-key --data gsm8k-test.jsonl --out gsm8k.json
+nix run .#bend-verdict -- bend/tree_pipe_proof.bend --verdict   # one proof module, re-checked by the Lean 4 kernel
+nix develop --no-write-lock-file -c python3 -I -B bend/engine_trees.py OUT                # stock + patched ExLlamaV3
+nix develop --no-write-lock-file -c python3 -I -B bend/pattn_sched_diff.py OUT/patched    # one source link: Bend model vs patched source
+```
+
+Measured on: RTX 3090 24 GiB (GA102, SM86), driver 595.71.05, PCIe 4.0 ×16, 350 W cap since 2026-09-28; Ryzen 7 5800X, 125.7 GiB RAM, NixOS 26.05, Linux 6.18.50; rootless Docker 29.7.2, CDI, read-only root, Ubuntu 24.04 CUDA base; Python 3.13.10, PyTorch 2.10.0+cu130, CUDA 13.0.96, Triton 3.6.0.
+
 | Protocol | Tasks | Declared power, clock offsets |
 |---|---|---|
 | v2 | AIME 2025 ×3, MMLU-Pro ×20, I3 Logic ×6, LiveCodeBench ×3 + C1 | 350 W; offsets not declared (stock) |
